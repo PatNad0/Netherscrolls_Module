@@ -1,0 +1,47 @@
+name: Release Module
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read version
+        shell: bash
+        run: |
+          VERSION=$(node -p "require('./module.json').version")
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Skip if tag exists
+        shell: bash
+        run: |
+          if git tag -l "v$VERSION" | grep -q .; then
+            echo "SKIP_RELEASE=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build zip
+        if: env.SKIP_RELEASE != 'true'
+        shell: bash
+        run: |
+          zip -r Netherscrolls_Module.zip . \
+            -x ".git/*" \
+            -x ".github/*"
+
+      - name: Publish release
+        if: env.SKIP_RELEASE != 'true'
+        uses: ncipollo/release-action@v1
+        with:
+          tag: v${{ env.VERSION }}
+          name: v${{ env.VERSION }}
+          artifacts: module.json,Netherscrolls_Module.zip
+          allowUpdates: true
+          replacesArtifacts: true

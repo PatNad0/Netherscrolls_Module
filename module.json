@@ -2,15 +2,15 @@
   "id": "Netherscrolls_Module",
   "title": "Netherscrolls Module",
   "description": "Replies to helo/banana chat messages and adds a SHOW POWER button to Actor sheets.",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "authors": [
     {
       "name": "Pat"
     }
   ],
-  "url": "https://example.com/netherscrolls-module",
-  "manifest": "https://example.com/netherscrolls-module/module.json",
-  "download": "https://example.com/netherscrolls-module/module.zip",
+  "url": "https://github.com/PatNad0/Netherscrolls_Module",
+  "manifest": "https://github.com/PatNad0/Netherscrolls_Module/releases/latest/download/module.json",
+  "download": "https://github.com/PatNad0/Netherscrolls_Module/releases/latest/download/Netherscrolls_Module.zip",
   "compatibility": {
     "minimum": "14",
     "verified": "14.353"
