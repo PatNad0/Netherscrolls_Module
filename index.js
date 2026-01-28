@@ -1,4 +1,4 @@
-const MODULE_ID = "Netherscrolls_Module";
+const MODULE_ID = "netherscrolls-module";
 const MODULE_TITLE = "Netherscrolls Module";
 const REQUIRED_API_KEY = "MYAPIKEY";
 
