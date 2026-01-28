@@ -8,7 +8,7 @@ const SETTINGS = {
   strongest: "imTheStrongest",
   apiKey: "apiKey",
 };
-//something
+//something something
 Hooks.once("init", () => {
   game.settings.register(MODULE_ID, SETTINGS.helo, {
     name: "Say helo back",
