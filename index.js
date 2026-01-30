@@ -66,6 +66,7 @@ let rerollInitHandler = null;
 let npcDeathSaveHandler = null;
 let chatScrollPatch = null;
 let chatScrollRenderHook = null;
+let chatMessageRenderHook = null;
 const chatLogState = new Map();
 
 function toggleRerollInitHook(enabled) {
@@ -118,12 +119,18 @@ function toggleChatScrollLock(enabled) {
 
     chatScrollRenderHook = handleChatLogRender;
     Hooks.on("renderChatLog", chatScrollRenderHook);
+    chatMessageRenderHook = handleChatMessageRender;
+    Hooks.on("renderChatMessage", chatMessageRenderHook);
     handleChatLogRender(ui?.chat, ui?.chat?.element);
     ui?.notifications?.info?.("Chat auto-scroll lock: ON");
   } else if (!shouldEnable && chatScrollPatch) {
     if (chatScrollRenderHook) {
       Hooks.off("renderChatLog", chatScrollRenderHook);
       chatScrollRenderHook = null;
+    }
+    if (chatMessageRenderHook) {
+      Hooks.off("renderChatMessage", chatMessageRenderHook);
+      chatMessageRenderHook = null;
     }
     chatScrollPatch.restore();
     chatScrollPatch = null;
@@ -184,23 +191,35 @@ function trackChatLog(log) {
   if (!log || chatLogState.has(log)) return;
   const state = {
     atBottom: true,
+    lastScrollTop: 0,
     handler: null,
+    observer: null,
+    pendingRestore: false,
   };
 
   const handler = () => {
     const distance = log.scrollHeight - log.scrollTop - log.clientHeight;
     state.atBottom = distance <= CHAT_SCROLL_THRESHOLD;
+    state.lastScrollTop = log.scrollTop;
   };
 
   state.handler = handler;
   chatLogState.set(log, state);
   log.addEventListener("scroll", handler);
   handler();
+
+  const observer = new MutationObserver(() => {
+    if (state.atBottom) return;
+    scheduleChatScrollRestore(log, state);
+  });
+  observer.observe(log, { childList: true, subtree: true });
+  state.observer = observer;
 }
 
 function untrackAllChatLogs() {
   for (const [log, state] of chatLogState.entries()) {
     log.removeEventListener("scroll", state.handler);
+    state.observer?.disconnect();
   }
   chatLogState.clear();
 }
@@ -210,6 +229,36 @@ function isChatAutoScrollAllowed(app) {
   if (!log) return true;
   trackChatLog(log);
   return chatLogState.get(log)?.atBottom ?? true;
+}
+
+function scheduleChatScrollRestore(log, state) {
+  if (state.pendingRestore) return;
+  state.pendingRestore = true;
+
+  const restore = () => {
+    state.pendingRestore = false;
+    if (state.atBottom) return;
+    const target = state.lastScrollTop ?? log.scrollTop;
+    if (Math.abs(log.scrollTop - target) > 1) {
+      log.scrollTop = target;
+    }
+  };
+
+  if (typeof requestAnimationFrame === "function") {
+    requestAnimationFrame(restore);
+  } else {
+    setTimeout(restore, 0);
+  }
+}
+
+function handleChatMessageRender() {
+  const log = getChatLogElement(ui?.chat);
+  if (!log) return;
+  trackChatLog(log);
+
+  const state = chatLogState.get(log);
+  if (!state || state.atBottom) return;
+  scheduleChatScrollRestore(log, state);
 }
 
 function toggleNpcDeathSaveHook(enabled) {
