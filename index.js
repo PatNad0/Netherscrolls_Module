@@ -517,11 +517,12 @@ async function rollNpcDeathSave(actor) {
     "system.attributes.death.stable": success >= 3,
   });
 
-  if (success >= 3) {
-    await applyDeathStatusEffect(actor, "stable");
-  } else if (failure >= 3) {
-    await applyDeathStatusEffect(actor, "dead");
-  }
+  const targetStatus = getDeathOverlayTarget({
+    hp: Number(actor.system?.attributes?.hp?.value ?? 0),
+    success,
+    failure,
+  });
+  await setDeathOverlayState(actor, targetStatus);
 }
 
 function buildNpcDeathCleanupHandler() {
@@ -530,36 +531,32 @@ function buildNpcDeathCleanupHandler() {
     if (!actor) return;
     if (actor.hasPlayerOwner) return;
 
-    const hpValue = getChangedHpValue(changed);
-    if (hpValue == null) return;
-    if (Number(hpValue) <= 0) return;
-    if (!hasDeathStatus(actor)) return;
-
-    await clearDeathStatusEffects(actor);
+    if (!shouldUpdateDeathOverlay(changed)) return;
+    await applyDeathOverlayFromActor(actor);
   };
 }
 
-function getChangedHpValue(changed) {
-  if (!changed) return null;
-  if (Object.prototype.hasOwnProperty.call(changed, "system")) {
-    return changed?.system?.attributes?.hp?.value ?? null;
-  }
-  return null;
+function shouldUpdateDeathOverlay(changed) {
+  if (!changed?.system?.attributes) return false;
+  const hpChanged = Object.prototype.hasOwnProperty.call(
+    changed.system.attributes,
+    "hp"
+  );
+  const deathChanged = Object.prototype.hasOwnProperty.call(
+    changed.system.attributes,
+    "death"
+  );
+  return hpChanged || deathChanged;
 }
 
-function hasDeathStatus(actor) {
-  const statuses = actor?.statuses;
-  if (statuses?.has?.("dead") || statuses?.has?.("stable")) return true;
-  return false;
-}
+async function applyDeathOverlayFromActor(actor) {
+  const hp = Number(actor.system?.attributes?.hp?.value ?? 0);
+  const death = actor.system?.attributes?.death;
+  const success = Number(death?.success ?? 0);
+  const failure = Number(death?.failure ?? 0);
 
-async function applyDeathStatusEffect(actor, statusId) {
-  if (!actor?.toggleStatusEffect || !statusId) return;
-  try {
-    await actor.toggleStatusEffect(statusId, { active: true, overlay: true });
-  } catch (err) {
-    console.error(`Failed to apply ${statusId} status.`, err);
-  }
+  const targetStatus = getDeathOverlayTarget({ hp, success, failure });
+  await setDeathOverlayState(actor, targetStatus);
 }
 
 async function clearDeathStatusEffects(actor) {
@@ -567,8 +564,59 @@ async function clearDeathStatusEffects(actor) {
   try {
     await actor.toggleStatusEffect("dead", { active: false, overlay: true });
     await actor.toggleStatusEffect("stable", { active: false, overlay: true });
+    await actor.toggleStatusEffect("unconscious", { active: false, overlay: true });
   } catch (err) {
     console.error("Failed to clear death status effects.", err);
+  }
+}
+
+function getDeathOverlayTarget({ hp, success, failure }) {
+  if (Number(hp) > 0) return null;
+  if (Number(failure) >= 3) return "dead";
+  if (Number(success) >= 3) return "stable";
+  return "unconscious";
+}
+
+async function setDeathOverlayState(actor, targetStatus) {
+  if (!actor?.toggleStatusEffect) return;
+  const statuses = actor?.statuses;
+  const desired = {
+    unconscious: false,
+    stable: false,
+    dead: false,
+  };
+  const overlays = {
+    unconscious: false,
+    stable: false,
+    dead: false,
+  };
+
+  if (targetStatus === "dead") {
+    desired.dead = true;
+    overlays.dead = true;
+  } else if (targetStatus === "stable") {
+    desired.stable = true;
+    overlays.stable = true;
+    desired.unconscious = true;
+    overlays.unconscious = false;
+  } else if (targetStatus === "unconscious") {
+    desired.unconscious = true;
+    overlays.unconscious = true;
+  }
+
+  for (const id of Object.keys(desired)) {
+    const isActive = statuses?.has?.(id) ?? false;
+    const shouldBeActive = desired[id];
+    const overlay = overlays[id] ?? false;
+
+    if (shouldBeActive) {
+      await actor.toggleStatusEffect(id, { active: true, overlay });
+      continue;
+    }
+
+    if (isActive) {
+      await actor.toggleStatusEffect(id, { active: false, overlay: false });
+    }
   }
 }
 
