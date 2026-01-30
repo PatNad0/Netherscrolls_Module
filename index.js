@@ -11,6 +11,10 @@ const SETTINGS = {
 };
 //something something
 Hooks.once("init", () => {
+  if (isDnd5eSystem()) {
+    extendDnd5eSpellLevels();
+  }
+
   game.settings.register(MODULE_ID, SETTINGS.helo, {
     name: "Say helo back",
     hint: "When someone says helo, reply with helo you [actor name].",
@@ -48,6 +52,16 @@ Hooks.once("init", () => {
   });
 });
 
+Hooks.once("ready", () => {
+  if (!isDnd5eSystem()) return;
+  ensureHighSlotsOnAllActors();
+});
+
+Hooks.on("createActor", (actor) => {
+  if (!isDnd5eSystem()) return;
+  ensureHighSlotsOnActor(actor);
+});
+
 Hooks.on("chatMessage", (_chatLog, message, chatData) => {
   if (!game?.ready || !hasValidKey()) return true;
 
@@ -68,17 +82,14 @@ Hooks.on("chatMessage", (_chatLog, message, chatData) => {
 
 Hooks.on("renderApplicationV1", (app, html) => {
   injectShowPowerButtonV1(app, html);
-  injectHighSlotsV1(app, html);
 });
 
 Hooks.on("renderApplicationV2", (app, element) => {
   injectShowPowerButtonV2(app, element);
-  injectHighSlotsV2(app, element);
 });
 
 Hooks.on("renderActorSheet", (app, html) => {
   injectShowPowerButtonV1(app, html);
-  injectHighSlotsV1(app, html);
 });
 
 function hasValidKey() {
@@ -110,6 +121,21 @@ function getActorFromApp(app) {
 function isActorSheet(app) {
   const actor = getActorFromApp(app);
   return actor?.documentName === "Actor";
+}
+
+function isDnd5eSystem() {
+  return game?.system?.id === "dnd5e";
+}
+
+function extendDnd5eSpellLevels() {
+  const spellLevels = CONFIG?.DND5E?.spellLevels;
+  if (!spellLevels) return;
+
+  for (const level of HIGH_SLOT_LEVELS) {
+    if (spellLevels[level] == null) {
+      spellLevels[level] = `DND5E.SpellLevel${level}`;
+    }
+  }
 }
 
 function injectShowPowerButtonV1(app, html) {
@@ -154,150 +180,68 @@ function injectShowPowerButtonV2(app, element) {
   controls.appendChild(button);
 }
 
-function injectHighSlotsV1(app, html) {
-  if (!isActorSheet(app)) return;
-  const actor = getActorFromApp(app);
-  if (!actor) return;
-  if (!html?.find) return;
-
-  ensureHighSlotStyles();
-
-  const spellsTab = html.find(".tab.spells");
-  if (!spellsTab.length) return;
-  if (spellsTab.find(".netherscrolls-high-slots").length) return;
-
-  const section = $(buildHighSlotsSection(actor));
-  section.on("change", "input", () => {
-    updateHighSlotsFromContainer(actor, section.get(0));
-  });
-
-  spellsTab.append(section);
-}
-
-function injectHighSlotsV2(app, element) {
-  if (!isActorSheet(app)) return;
-  const actor = getActorFromApp(app);
-  if (!actor) return;
-  if (!element?.querySelector) return;
-
-  ensureHighSlotStyles();
-
-  const spellsTab = element.querySelector(".tab.spells");
-  if (!spellsTab) return;
-  if (spellsTab.querySelector(".netherscrolls-high-slots")) return;
-
-  const template = document.createElement("template");
-  template.innerHTML = buildHighSlotsSection(actor).trim();
-  const section = template.content.firstElementChild;
-  if (!section) return;
-
-  section.addEventListener("change", () => {
-    updateHighSlotsFromContainer(actor, section);
-  });
-
-  spellsTab.appendChild(section);
-}
-
 function announceStrongest(actor) {
   if (!isFeatureEnabled(SETTINGS.strongest)) return;
   if (!actor?.name) return;
   postChatMessage(`${actor.name} IS THE STRONGEST`);
 }
 
-function buildHighSlotsSection(actor) {
-  const slotData = getHighSlotData(actor);
-  const rows = HIGH_SLOT_LEVELS.map((level) => {
-    const value = slotData[level]?.value ?? 0;
-    const max = slotData[level]?.max ?? 0;
-    return `
-      <div class="netherscrolls-high-slot" data-level="${level}">
-        <label>${level}th</label>
-        <input type="number" min="0" step="1" data-kind="value" value="${value}">
-        <span>/</span>
-        <input type="number" min="0" step="1" data-kind="max" value="${max}">
-      </div>
-    `;
-  }).join("");
-
-  return `
-    <section class="netherscrolls-high-slots">
-      <h3>High-Level Slots</h3>
-      <div class="netherscrolls-high-slot-grid">
-        ${rows}
-      </div>
-    </section>
-  `;
-}
-
-function getHighSlotData(actor) {
-  const stored = actor?.getFlag?.(MODULE_ID, "highSlots") ?? {};
-  const result = {};
-  for (const level of HIGH_SLOT_LEVELS) {
-    const entry = stored?.[level] ?? stored?.[String(level)] ?? {};
-    const value = Number.isFinite(entry?.value) ? entry.value : Number(entry?.value) || 0;
-    const max = Number.isFinite(entry?.max) ? entry.max : Number(entry?.max) || 0;
-    result[level] = { value, max };
+function ensureHighSlotsOnAllActors() {
+  if (!game?.actors?.size) return;
+  for (const actor of game.actors) {
+    ensureHighSlotsOnActor(actor);
   }
-  return result;
 }
 
-function updateHighSlotsFromContainer(actor, container) {
-  if (!actor || !container?.querySelectorAll) return;
-  const entries = container.querySelectorAll(".netherscrolls-high-slot");
-  const next = {};
+function ensureHighSlotsOnActor(actor) {
+  if (!actor?.system?.spells) return;
+  if (!canUpdateActor(actor)) return;
 
-  entries.forEach((entry) => {
-    const level = entry.dataset.level;
-    const valueInput = entry.querySelector('input[data-kind="value"]');
-    const maxInput = entry.querySelector('input[data-kind="max"]');
-    const value = toNonNegativeInt(valueInput?.value);
-    const max = toNonNegativeInt(maxInput?.value);
-    next[level] = { value, max };
-  });
+  const template = buildHighSlotTemplate(actor);
+  const updates = {};
 
-  actor.setFlag(MODULE_ID, "highSlots", next);
+  for (const level of HIGH_SLOT_LEVELS) {
+    const key = `spell${level}`;
+    const existing = actor.system.spells[key];
+    const path = `system.spells.${key}`;
+
+    if (!existing || typeof existing !== "object") {
+      updates[path] = deepClone(template);
+      continue;
+    }
+
+    if (existing.value == null) {
+      updates[`${path}.value`] = 0;
+    }
+    if (existing.max == null) {
+      updates[`${path}.max`] = 0;
+    }
+  }
+
+  if (Object.keys(updates).length) {
+    actor.update(updates);
+  }
 }
 
-function toNonNegativeInt(value) {
-  const parsed = Number.parseInt(value ?? "0", 10);
-  if (Number.isNaN(parsed) || parsed < 0) return 0;
-  return parsed;
+function buildHighSlotTemplate(actor) {
+  const base = actor?.system?.spells?.spell9 ?? { value: 0, max: 0 };
+  const template = deepClone(base);
+  template.value = 0;
+  template.max = 0;
+  return template;
 }
 
-function ensureHighSlotStyles() {
-  if (document.getElementById(`${MODULE_ID}-high-slots-style`)) return;
-  const style = document.createElement("style");
-  style.id = `${MODULE_ID}-high-slots-style`;
-  style.textContent = `
-    .netherscrolls-high-slots {
-      border-top: 1px solid var(--color-border-light-tertiary, #b5b3a4);
-      margin-top: 0.5rem;
-      padding-top: 0.5rem;
-    }
-    .netherscrolls-high-slots h3 {
-      margin: 0 0 0.35rem;
-      font-size: 0.95rem;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.02em;
-    }
-    .netherscrolls-high-slot-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-      gap: 0.35rem 0.75rem;
-    }
-    .netherscrolls-high-slot {
-      display: grid;
-      grid-template-columns: auto 1fr auto 1fr;
-      align-items: center;
-      gap: 0.35rem;
-    }
-    .netherscrolls-high-slot input {
-      width: 3.5rem;
-      text-align: center;
-    }
-  `;
-  document.head.appendChild(style);
+function deepClone(value) {
+  if (foundry?.utils?.deepClone) {
+    return foundry.utils.deepClone(value);
+  }
+  return JSON.parse(JSON.stringify(value));
+}
+
+function canUpdateActor(actor) {
+  if (!actor) return false;
+  if (game?.user?.isGM) return true;
+  return actor.isOwner === true;
 }
 
 function postChatMessage(content) {
