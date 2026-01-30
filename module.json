@@ -1,8 +1,8 @@
 {
   "id": "netherscrolls-module",
   "title": "Netherscrolls Module",
-  "description": "Replies to helo/banana chat messages and adds a SHOW POWER button to Actor sheets.",
-  "version": "1.0.5",
+  "description": "My personnal module to do some fun stuff :3.",
+  "version": "1.0.6",
   "authors": [
     {
       "name": "Pat"
