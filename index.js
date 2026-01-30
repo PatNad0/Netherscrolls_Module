@@ -196,6 +196,7 @@ function trackChatLog(log) {
     userScrollActiveUntil: 0,
     restoring: false,
     pendingRestore: false,
+    locked: false,
     handler: null,
     inputHandler: null,
     keyHandler: null,
@@ -210,7 +211,7 @@ function trackChatLog(log) {
   log.addEventListener("scroll", handler);
   bindChatUserInput(log, state);
   ensureJumpButton(log, state);
-  handler();
+  initializeChatState(log, state);
 }
 
 function untrackAllChatLogs() {
@@ -226,7 +227,7 @@ function isChatAutoScrollAllowed(app) {
   const log = getChatLogElement(app);
   if (!log) return true;
   trackChatLog(log);
-  return chatLogState.get(log)?.atBottom ?? true;
+  return !(chatLogState.get(log)?.locked ?? false);
 }
 
 function handleChatScroll(log, state) {
@@ -238,24 +239,24 @@ function handleChatScroll(log, state) {
   ensureJumpButton(log, state);
   const now = Date.now();
   const userActive = now <= state.userScrollActiveUntil;
-  const atBottomNow = isChatAtBottom(log, state);
+  const atBottomNow = isChatAtBottom(log);
 
   if (userActive) {
     state.lastScrollTop = log.scrollTop;
     state.atBottom = atBottomNow;
+    state.locked = !atBottomNow;
     return;
   }
 
-  if (state.atBottom) {
-    state.lastScrollTop = log.scrollTop;
-    state.atBottom = atBottomNow;
+  if (state.locked) {
+    if (Math.abs(log.scrollTop - state.lastScrollTop) > 1) {
+      state.restoring = true;
+      log.scrollTop = state.lastScrollTop;
+    }
     return;
   }
 
-  if (Math.abs(log.scrollTop - state.lastScrollTop) > 1) {
-    state.restoring = true;
-    log.scrollTop = state.lastScrollTop;
-  }
+  state.lastScrollTop = log.scrollTop;
 }
 
 function scheduleChatScrollRestore(log, state) {
@@ -266,7 +267,7 @@ function scheduleChatScrollRestore(log, state) {
     state.pendingRestore = false;
     ensureJumpButton(log, state);
     if (Date.now() <= state.userScrollActiveUntil) return;
-    if (state.atBottom) return;
+    if (!state.locked) return;
     const target = state.lastScrollTop ?? log.scrollTop;
     if (Math.abs(log.scrollTop - target) > 1) {
       state.restoring = true;
@@ -287,7 +288,7 @@ function handleChatMessageRender() {
   trackChatLog(log);
 
   const state = chatLogState.get(log);
-  if (!state || state.atBottom) return;
+  if (!state || !state.locked) return;
   scheduleChatScrollRestore(log, state);
 }
 
@@ -371,29 +372,48 @@ function findJumpToBottomButton(log) {
     log?.closest?.(".sidebar-tab") ||
     document;
 
-  return (
-    root.querySelector(".jump-to-bottom") ||
-    root.querySelector("[data-action='scrollBottom']") ||
-    root.querySelector("[data-control='scrollBottom']")
-  );
+  const selectors = [
+    ".jump-to-bottom",
+    "[data-action='scrollBottom']",
+    "[data-control='scrollBottom']",
+    "[data-tooltip='Jump to Bottom']",
+    "[data-tooltip='CHAT.JumpToBottom']",
+    "[aria-label='Jump to Bottom']",
+    "[aria-label='CHAT.JumpToBottom']",
+    "[title='Jump to Bottom']",
+    "[title='CHAT.JumpToBottom']",
+  ];
+
+  for (const selector of selectors) {
+    const found = root.querySelector(selector);
+    if (found) return found;
+  }
+
+  const candidates = root.querySelectorAll("button, a, div");
+  for (const candidate of candidates) {
+    const tooltip =
+      candidate.getAttribute("data-tooltip") ||
+      candidate.getAttribute("aria-label") ||
+      candidate.getAttribute("title");
+    if (!tooltip) continue;
+    if (/jump to bottom/i.test(tooltip) || /chat\.jumptobottom/i.test(tooltip)) {
+      return candidate;
+    }
+  }
+
+  return null;
 }
 
-function isChatAtBottom(log, state) {
+function initializeChatState(log, state) {
+  const atBottom = isChatAtBottom(log);
+  state.atBottom = atBottom;
+  state.locked = !atBottom;
+  state.lastScrollTop = log.scrollTop;
+}
+
+function isChatAtBottom(log) {
   const distance = log.scrollHeight - log.scrollTop - log.clientHeight;
-  if (distance <= CHAT_SCROLL_THRESHOLD) {
-    return !isJumpButtonVisible(log, state);
-  }
-  return false;
-}
-
-function isJumpButtonVisible(log, state) {
-  const button = state?.jumpButton ?? findJumpToBottomButton(log);
-  if (!button) return false;
-  const style = window.getComputedStyle(button);
-  if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
-    return false;
-  }
-  return button.getClientRects().length > 0;
+  return distance <= CHAT_SCROLL_THRESHOLD;
 }
 
 function toggleNpcDeathSaveHook(enabled) {
