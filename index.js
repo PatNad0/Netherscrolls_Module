@@ -11,14 +11,6 @@ const SETTINGS = {
 };
 //something something
 Hooks.once("init", () => {
-  if (game?.system?.id === "dnd5e") {
-    for (const level of HIGH_SLOT_LEVELS) {
-      if (!CONFIG.DND5E.spellLevels[level]) {
-        CONFIG.DND5E.spellLevels[level] = `${level}th Level`;
-      }
-    }
-  }
-
   game.settings.register(MODULE_ID, SETTINGS.helo, {
     name: "Say helo back",
     hint: "When someone says helo, reply with helo you [actor name].",
