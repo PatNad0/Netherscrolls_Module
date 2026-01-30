@@ -1,13 +1,9 @@
 const MODULE_ID = "netherscrolls-module";
-const MODULE_TITLE = "Netherscrolls Module";
-const REQUIRED_API_KEY = "MYAPIKEY";
 const HIGH_SLOT_LEVELS = [10, 11, 12, 13, 14, 15];
 
 const SETTINGS = {
-  helo: "sayHeloBack",
-  banana: "sayBananaBack",
-  strongest: "imTheStrongest",
-  apiKey: "apiKey",
+  rerollInit: "rerollInitEachRound",
+  npcDeathSave: "npcDeathSaveEachTurn",
 };
 //something something
 Hooks.once("init", () => {
@@ -15,46 +11,32 @@ Hooks.once("init", () => {
     extendDnd5eSpellLevels();
   }
 
-  game.settings.register(MODULE_ID, SETTINGS.helo, {
-    name: "Say helo back",
-    hint: "When someone says helo, reply with helo you [actor name].",
+  game.settings.register(MODULE_ID, SETTINGS.rerollInit, {
+    name: "Reroll initiative each round",
+    hint: "When a new combat round starts, reset and reroll all initiatives.",
     scope: "world",
     config: true,
     type: Boolean,
-    default: true,
+    default: false,
+    onChange: (value) => toggleRerollInitHook(Boolean(value)),
   });
 
-  game.settings.register(MODULE_ID, SETTINGS.banana, {
-    name: "Say banana back",
-    hint: "When someone says banana, reply with banana !",
+  game.settings.register(MODULE_ID, SETTINGS.npcDeathSave, {
+    name: "NPC death save each turn",
+    hint: "When an NPC at 0 HP starts its turn, roll a death save (with CON save).",
     scope: "world",
     config: true,
     type: Boolean,
-    default: true,
-  });
-
-  game.settings.register(MODULE_ID, SETTINGS.strongest, {
-    name: "I'm the strongest",
-    hint: "Adds a SHOW POWER button to every Actor sheet.",
-    scope: "world",
-    config: true,
-    type: Boolean,
-    default: true,
-  });
-
-  game.settings.register(MODULE_ID, SETTINGS.apiKey, {
-    name: "API KEY",
-    hint: "Enter MYAPIKEY to enable all module features.",
-    scope: "world",
-    config: true,
-    type: String,
-    default: "",
+    default: false,
+    onChange: (value) => toggleNpcDeathSaveHook(Boolean(value)),
   });
 });
 
 Hooks.once("ready", () => {
   if (!isDnd5eSystem()) return;
   ensureHighSlotsOnAllActors();
+  toggleRerollInitHook(game.settings.get(MODULE_ID, SETTINGS.rerollInit) === true);
+  toggleNpcDeathSaveHook(game.settings.get(MODULE_ID, SETTINGS.npcDeathSave) === true);
 });
 
 Hooks.on("createActor", (actor) => {
@@ -62,69 +44,142 @@ Hooks.on("createActor", (actor) => {
   ensureHighSlotsOnActor(actor);
 });
 
-Hooks.on("chatMessage", (_chatLog, message, chatData) => {
-  if (!game?.ready || !hasValidKey()) return true;
-
-  const text = String(message ?? "").trim();
-  if (!text || text.startsWith("/")) return true;
-
-  const normalized = text.toLowerCase();
-  if (isFeatureEnabled(SETTINGS.helo) && /\bhelo\b/.test(normalized)) {
-    postChatMessage(`helo you ${getSpeakerName(chatData)}`);
-  }
-
-  if (isFeatureEnabled(SETTINGS.banana) && /\bbanana\b/.test(normalized)) {
-    postChatMessage("banana !");
-  }
-
-  return true;
-});
-
-Hooks.on("renderApplicationV1", (app, html) => {
-  injectShowPowerButtonV1(app, html);
-});
-
-Hooks.on("renderApplicationV2", (app, element) => {
-  injectShowPowerButtonV2(app, element);
-});
-
-Hooks.on("renderActorSheet", (app, html) => {
-  injectShowPowerButtonV1(app, html);
-});
-
-function hasValidKey() {
-  try {
-    return game.settings.get(MODULE_ID, SETTINGS.apiKey) === REQUIRED_API_KEY;
-  } catch (error) {
-    console.warn(`${MODULE_ID} | Unable to read API key setting.`, error);
-    return false;
-  }
-}
-
-function isFeatureEnabled(settingKey) {
-  if (!game?.ready || !hasValidKey()) return false;
-  if (!settingKey) return true;
-  return game.settings.get(MODULE_ID, settingKey) === true;
-}
-
-function getSpeakerName(chatData) {
-  const alias = chatData?.speaker?.alias;
-  if (alias) return alias;
-  const user = chatData?.user ? game.users?.get(chatData.user) : null;
-  return user?.name ?? "someone";
-}
-
-function getActorFromApp(app) {
-  return app?.document ?? app?.actor ?? null;
-}
-
-function isActorSheet(app) {
-  const actor = getActorFromApp(app);
-  return actor?.documentName === "Actor";
-}
-
 function isDnd5eSystem() {
   return game?.system?.id === "dnd5e";
+}
+
+let rerollInitHandler = null;
+let npcDeathSaveHandler = null;
+
+function toggleRerollInitHook(enabled) {
+  if (!game?.ready) return;
+  const shouldEnable = Boolean(enabled);
+
+  if (shouldEnable && !rerollInitHandler) {
+    rerollInitHandler = buildRerollInitHandler();
+    Hooks.on("updateCombat", rerollInitHandler);
+    ui?.notifications?.info?.("Reroll initiative each round: ON");
+  } else if (!shouldEnable && rerollInitHandler) {
+    Hooks.off("updateCombat", rerollInitHandler);
+    rerollInitHandler = null;
+    ui?.notifications?.info?.("Reroll initiative each round: OFF");
+  }
+}
+
+function buildRerollInitHandler() {
+  const lastByCombat = {};
+
+  return async (combat, changed) => {
+    if (!game?.user?.isGM) return;
+    if (!combat?.isActive) return;
+    if (!Object.prototype.hasOwnProperty.call(changed ?? {}, "round")) return;
+    if (lastByCombat[combat.id] === changed.round) return;
+    lastByCombat[combat.id] = changed.round;
+
+    setTimeout(async () => {
+      try {
+        await combat.resetAll({ updateTurn: false });
+        await combat.rollAll({ updateTurn: false });
+        await combat.update({ turn: 0 });
+      } catch (err) {
+        console.error("Reroll each round FAILED:", err);
+      }
+    }, 0);
+  };
+}
+
+function toggleNpcDeathSaveHook(enabled) {
+  if (!game?.ready) return;
+  const shouldEnable = Boolean(enabled);
+
+  if (shouldEnable && !npcDeathSaveHandler) {
+    npcDeathSaveHandler = buildNpcDeathSaveHandler();
+    Hooks.on("updateCombat", npcDeathSaveHandler);
+    ui?.notifications?.info?.("NPC death save each turn: ON");
+  } else if (!shouldEnable && npcDeathSaveHandler) {
+    Hooks.off("updateCombat", npcDeathSaveHandler);
+    npcDeathSaveHandler = null;
+    ui?.notifications?.info?.("NPC death save each turn: OFF");
+  }
+}
+
+function buildNpcDeathSaveHandler() {
+  const lastByCombat = {};
+
+  return async (combat, changed) => {
+    if (!game?.user?.isGM) return;
+    if (!combat?.isActive) return;
+    if (!Object.prototype.hasOwnProperty.call(changed ?? {}, "turn") &&
+        !Object.prototype.hasOwnProperty.call(changed ?? {}, "round")) {
+      return;
+    }
+
+    const combatant = combat.combatant;
+    const actor = combatant?.actor;
+    if (!actor) return;
+    if (actor.hasPlayerOwner) return;
+
+    const hp = Number(actor.system?.attributes?.hp?.value ?? 0);
+    if (hp > 0) return;
+
+    const death = actor.system?.attributes?.death;
+    if (!death) return;
+
+    const success = Number(death.success ?? 0);
+    const failure = Number(death.failure ?? 0);
+    const stable = Boolean(death.stable);
+    if (stable || success >= 3 || failure >= 3) return;
+
+    const key = `${combat.round}:${combat.turn}:${actor.id}`;
+    if (lastByCombat[combat.id] === key) return;
+    lastByCombat[combat.id] = key;
+
+    await rollNpcDeathSave(actor);
+  };
+}
+
+async function rollNpcDeathSave(actor) {
+  const death = actor.system?.attributes?.death;
+  if (!death) return;
+
+  const save = actor.system?.abilities?.con?.save;
+  const conSave = Number(save?.value ?? save ?? 0);
+
+  const roll = await new Roll("1d20 + @conSave", { conSave }).evaluate({ async: true });
+
+  await roll.toMessage({
+    speaker: ChatMessage.getSpeaker({ actor }),
+    flavor: "Death Save (+CON save)",
+  });
+
+  const die = Number(roll.dice?.[0]?.total ?? 0);
+  const total = Number(roll.total ?? 0);
+
+  let success = Number(death.success ?? 0);
+  let failure = Number(death.failure ?? 0);
+
+  if (die === 20) {
+    await actor.update({
+      "system.attributes.hp.value": 1,
+      "system.attributes.death.success": 0,
+      "system.attributes.death.failure": 0,
+      "system.attributes.death.stable": false,
+    });
+    return;
+  }
+
+  if (die === 1) failure += 2;
+  else if (total >= 10) success += 1;
+  else failure += 1;
+
+  success = Math.min(success, 3);
+  failure = Math.min(failure, 3);
+
+  await actor.update({
+    "system.attributes.death.success": success,
+    "system.attributes.death.failure": failure,
+    "system.attributes.death.stable": success >= 3,
+  });
 }
 
 function extendDnd5eSpellLevels() {
@@ -138,53 +193,6 @@ function extendDnd5eSpellLevels() {
   }
 }
 
-function injectShowPowerButtonV1(app, html) {
-  if (!isFeatureEnabled(SETTINGS.strongest)) return;
-  if (!isActorSheet(app)) return;
-  if (!html?.closest) return;
-
-  const appElement = html.closest(".app");
-  if (!appElement?.find) return;
-
-  const header = appElement.find(".window-header");
-  if (!header.length) return;
-  if (header.find(".netherscrolls-show-power").length) return;
-
-  const button = $(
-    `<a class="header-button netherscrolls-show-power" title="SHOW POWER">
-      <i class="fas fa-bolt"></i>SHOW POWER
-    </a>`
-  );
-
-  button.on("click", () => announceStrongest(getActorFromApp(app)));
-  header.append(button);
-}
-
-function injectShowPowerButtonV2(app, element) {
-  if (!isFeatureEnabled(SETTINGS.strongest)) return;
-  if (!isActorSheet(app)) return;
-  if (!element?.querySelector) return;
-
-  const header =
-    element.querySelector("header.window-header") ||
-    element.querySelector(".window-header");
-  if (!header) return;
-  if (header.querySelector(".netherscrolls-show-power")) return;
-
-  const controls = header.querySelector(".header-controls") || header;
-  const button = document.createElement("button");
-  button.type = "button";
-  button.classList.add("header-control", "netherscrolls-show-power");
-  button.innerHTML = '<i class="fas fa-bolt"></i><span>SHOW POWER</span>';
-  button.addEventListener("click", () => announceStrongest(getActorFromApp(app)));
-  controls.appendChild(button);
-}
-
-function announceStrongest(actor) {
-  if (!isFeatureEnabled(SETTINGS.strongest)) return;
-  if (!actor?.name) return;
-  postChatMessage(`${actor.name} IS THE STRONGEST`);
-}
 
 function ensureHighSlotsOnAllActors() {
   if (!game?.actors?.size) return;
@@ -242,17 +250,4 @@ function canUpdateActor(actor) {
   if (!actor) return false;
   if (game?.user?.isGM) return true;
   return actor.isOwner === true;
-}
-
-function postChatMessage(content) {
-  if (!content) return;
-  ChatMessage.create({
-    content,
-    speaker: ChatMessage.getSpeaker({ alias: MODULE_TITLE }),
-    flags: {
-      [MODULE_ID]: {
-        response: true,
-      },
-    },
-  });
 }
