@@ -500,7 +500,6 @@ async function rollNpcDeathSave(actor) {
       "system.attributes.death.failure": 0,
       "system.attributes.death.stable": false,
     });
-    await clearDeathStatusEffects(actor);
     return;
   }
 
@@ -516,13 +515,6 @@ async function rollNpcDeathSave(actor) {
     "system.attributes.death.failure": failure,
     "system.attributes.death.stable": success >= 3,
   });
-
-  const targetStatus = getDeathOverlayTarget({
-    hp: Number(actor.system?.attributes?.hp?.value ?? 0),
-    success,
-    failure,
-  });
-  await setDeathOverlayState(actor, targetStatus);
 }
 
 function buildNpcDeathCleanupHandler() {
@@ -557,17 +549,6 @@ async function applyDeathOverlayFromActor(actor) {
 
   const targetStatus = getDeathOverlayTarget({ hp, success, failure });
   await setDeathOverlayState(actor, targetStatus);
-}
-
-async function clearDeathStatusEffects(actor) {
-  if (!actor?.toggleStatusEffect) return;
-  try {
-    await actor.toggleStatusEffect("dead", { active: false, overlay: true });
-    await actor.toggleStatusEffect("stable", { active: false, overlay: true });
-    await actor.toggleStatusEffect("unconscious", { active: false, overlay: true });
-  } catch (err) {
-    console.error("Failed to clear death status effects.", err);
-  }
 }
 
 function getDeathOverlayTarget({ hp, success, failure }) {
@@ -605,18 +586,84 @@ async function setDeathOverlayState(actor, targetStatus) {
   }
 
   for (const id of Object.keys(desired)) {
-    const isActive = statuses?.has?.(id) ?? false;
     const shouldBeActive = desired[id];
     const overlay = overlays[id] ?? false;
+    const state = getStatusEffectState(actor, id);
+    const configured = isStatusEffectConfigured(id);
 
     if (shouldBeActive) {
-      await actor.toggleStatusEffect(id, { active: true, overlay });
+      if (state.active) {
+        await updateStatusEffectOverlay(state.effect, overlay);
+        continue;
+      }
+
+      if (state.exists && state.effect) {
+        await state.effect.update({ disabled: false });
+        await updateStatusEffectOverlay(state.effect, overlay);
+        continue;
+      }
+
+      if (configured) {
+        await actor.toggleStatusEffect(id, { active: true, overlay });
+      }
       continue;
     }
 
-    if (isActive) {
+    if (state.active && state.effect) {
+      await state.effect.update({ disabled: true });
+      continue;
+    }
+
+    if (configured && (statuses?.has?.(id) ?? false)) {
       await actor.toggleStatusEffect(id, { active: false, overlay: false });
     }
+  }
+}
+
+function getStatusEffectState(actor, statusId) {
+  const effects = actor?.effects;
+  if (!effects) return { exists: false, active: false, effect: null };
+
+  let found = null;
+  for (const effect of effects) {
+    const statusIds = effect?.statuses;
+    const coreStatusId =
+      effect?.getFlag?.("core", "statusId") ?? effect?.flags?.core?.statusId;
+
+    if (statusIds?.has?.(statusId) || coreStatusId === statusId) {
+      found = effect;
+      break;
+    }
+  }
+
+  if (!found) {
+    return { exists: false, active: false, effect: null };
+  }
+
+  const disabled = Boolean(found.disabled);
+  return { exists: true, active: !disabled, effect: found };
+}
+
+function isStatusEffectConfigured(statusId) {
+  const effects = CONFIG?.statusEffects;
+  if (!Array.isArray(effects)) return false;
+  return effects.some(
+    (effect) =>
+      effect?.id === statusId ||
+      effect?.statusId === statusId ||
+      effect?.flags?.core?.statusId === statusId
+  );
+}
+
+async function updateStatusEffectOverlay(effect, overlay) {
+  if (!effect) return;
+  const current =
+    effect?.getFlag?.("core", "overlay") ?? effect?.flags?.core?.overlay;
+  if (current === overlay) return;
+  try {
+    await effect.update({ "flags.core.overlay": overlay });
+  } catch (err) {
+    console.warn("Failed to update status effect overlay.", err);
   }
 }
 
