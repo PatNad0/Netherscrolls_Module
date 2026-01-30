@@ -65,6 +65,7 @@ function isDnd5eSystem() {
 
 let rerollInitHandler = null;
 let npcDeathSaveHandler = null;
+let npcDeathCleanupHandler = null;
 let chatScrollPatch = null;
 let chatScrollRenderHook = null;
 let chatMessageRenderHook = null;
@@ -423,10 +424,16 @@ function toggleNpcDeathSaveHook(enabled) {
   if (shouldEnable && !npcDeathSaveHandler) {
     npcDeathSaveHandler = buildNpcDeathSaveHandler();
     Hooks.on("updateCombat", npcDeathSaveHandler);
+    npcDeathCleanupHandler = buildNpcDeathCleanupHandler();
+    Hooks.on("updateActor", npcDeathCleanupHandler);
     ui?.notifications?.info?.("NPC death save each turn: ON");
   } else if (!shouldEnable && npcDeathSaveHandler) {
     Hooks.off("updateCombat", npcDeathSaveHandler);
     npcDeathSaveHandler = null;
+    if (npcDeathCleanupHandler) {
+      Hooks.off("updateActor", npcDeathCleanupHandler);
+      npcDeathCleanupHandler = null;
+    }
     ui?.notifications?.info?.("NPC death save each turn: OFF");
   }
 }
@@ -493,6 +500,7 @@ async function rollNpcDeathSave(actor) {
       "system.attributes.death.failure": 0,
       "system.attributes.death.stable": false,
     });
+    await clearDeathStatusEffects(actor);
     return;
   }
 
@@ -508,6 +516,60 @@ async function rollNpcDeathSave(actor) {
     "system.attributes.death.failure": failure,
     "system.attributes.death.stable": success >= 3,
   });
+
+  if (success >= 3) {
+    await applyDeathStatusEffect(actor, "stable");
+  } else if (failure >= 3) {
+    await applyDeathStatusEffect(actor, "dead");
+  }
+}
+
+function buildNpcDeathCleanupHandler() {
+  return async (actor, changed) => {
+    if (!game?.user?.isGM) return;
+    if (!actor) return;
+    if (actor.hasPlayerOwner) return;
+
+    const hpValue = getChangedHpValue(changed);
+    if (hpValue == null) return;
+    if (Number(hpValue) <= 0) return;
+    if (!hasDeathStatus(actor)) return;
+
+    await clearDeathStatusEffects(actor);
+  };
+}
+
+function getChangedHpValue(changed) {
+  if (!changed) return null;
+  if (Object.prototype.hasOwnProperty.call(changed, "system")) {
+    return changed?.system?.attributes?.hp?.value ?? null;
+  }
+  return null;
+}
+
+function hasDeathStatus(actor) {
+  const statuses = actor?.statuses;
+  if (statuses?.has?.("dead") || statuses?.has?.("stable")) return true;
+  return false;
+}
+
+async function applyDeathStatusEffect(actor, statusId) {
+  if (!actor?.toggleStatusEffect || !statusId) return;
+  try {
+    await actor.toggleStatusEffect(statusId, { active: true, overlay: true });
+  } catch (err) {
+    console.error(`Failed to apply ${statusId} status.`, err);
+  }
+}
+
+async function clearDeathStatusEffects(actor) {
+  if (!actor?.toggleStatusEffect) return;
+  try {
+    await actor.toggleStatusEffect("dead", { active: false, overlay: true });
+    await actor.toggleStatusEffect("stable", { active: false, overlay: true });
+  } catch (err) {
+    console.error("Failed to clear death status effects.", err);
+  }
 }
 
 function extendDnd5eSpellLevels() {
