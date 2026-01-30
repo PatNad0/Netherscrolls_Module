@@ -1,9 +1,11 @@
 const MODULE_ID = "netherscrolls-module";
 const HIGH_SLOT_LEVELS = [10, 11, 12, 13, 14, 15];
+const CHAT_SCROLL_THRESHOLD = 10;
 
 const SETTINGS = {
   rerollInit: "rerollInitEachRound",
   npcDeathSave: "npcDeathSaveEachTurn",
+  lockChatScroll: "lockChatAutoScroll",
 };
 //something something
 Hooks.once("init", () => {
@@ -30,13 +32,25 @@ Hooks.once("init", () => {
     default: false,
     onChange: (value) => toggleNpcDeathSaveHook(Boolean(value)),
   });
+
+  game.settings.register(MODULE_ID, SETTINGS.lockChatScroll, {
+    name: "Lock chat auto-scroll",
+    hint: "When scrolled up, stop chat from auto-scrolling to new messages.",
+    scope: "client",
+    config: true,
+    type: Boolean,
+    default: false,
+    onChange: (value) => toggleChatScrollLock(Boolean(value)),
+  });
 });
 
 Hooks.once("ready", () => {
-  if (!isDnd5eSystem()) return;
-  ensureHighSlotsOnAllActors();
+  if (isDnd5eSystem()) {
+    ensureHighSlotsOnAllActors();
+  }
   toggleRerollInitHook(game.settings.get(MODULE_ID, SETTINGS.rerollInit) === true);
   toggleNpcDeathSaveHook(game.settings.get(MODULE_ID, SETTINGS.npcDeathSave) === true);
+  toggleChatScrollLock(game.settings.get(MODULE_ID, SETTINGS.lockChatScroll) === true);
 });
 
 Hooks.on("createActor", (actor) => {
@@ -50,6 +64,9 @@ function isDnd5eSystem() {
 
 let rerollInitHandler = null;
 let npcDeathSaveHandler = null;
+let chatScrollPatch = null;
+let chatScrollRenderHook = null;
+const chatLogState = new Map();
 
 function toggleRerollInitHook(enabled) {
   if (!game?.ready) return;
@@ -86,6 +103,113 @@ function buildRerollInitHandler() {
       }
     }, 0);
   };
+}
+
+function toggleChatScrollLock(enabled) {
+  if (!game?.ready) return;
+  const shouldEnable = Boolean(enabled);
+
+  if (shouldEnable && !chatScrollPatch) {
+    chatScrollPatch = patchChatScrollBottom();
+    if (!chatScrollPatch) {
+      ui?.notifications?.warn?.("Chat auto-scroll lock unavailable.");
+      return;
+    }
+
+    chatScrollRenderHook = handleChatLogRender;
+    Hooks.on("renderChatLog", chatScrollRenderHook);
+    handleChatLogRender(ui?.chat, ui?.chat?.element);
+    ui?.notifications?.info?.("Chat auto-scroll lock: ON");
+  } else if (!shouldEnable && chatScrollPatch) {
+    if (chatScrollRenderHook) {
+      Hooks.off("renderChatLog", chatScrollRenderHook);
+      chatScrollRenderHook = null;
+    }
+    chatScrollPatch.restore();
+    chatScrollPatch = null;
+    untrackAllChatLogs();
+    ui?.notifications?.info?.("Chat auto-scroll lock: OFF");
+  }
+}
+
+function patchChatScrollBottom() {
+  const proto = ChatLog?.prototype;
+  if (!proto?.scrollBottom) return null;
+
+  const original = proto.scrollBottom;
+  const wrapped = function (...args) {
+    if (!isChatAutoScrollAllowed(this)) return;
+    return original.apply(this, args);
+  };
+
+  proto.scrollBottom = wrapped;
+
+  return {
+    restore: () => {
+      proto.scrollBottom = original;
+    },
+  };
+}
+
+function handleChatLogRender(app, html) {
+  const log = getChatLogElement(html ?? app);
+  if (log) {
+    trackChatLog(log);
+  }
+}
+
+function getChatLogElement(context) {
+  if (context?.find) {
+    const byId = context.find("#chat-log");
+    if (byId?.length) return byId.get(0);
+    const byClass = context.find(".chat-log");
+    if (byClass?.length) return byClass.get(0);
+  }
+
+  const root =
+    context?.element?.[0] ??
+    context?.element ??
+    (context?.querySelector ? context : null) ??
+    document;
+
+  return (
+    root?.querySelector?.("#chat-log") ||
+    root?.querySelector?.(".chat-log") ||
+    document.querySelector("#chat-log") ||
+    document.querySelector(".chat-log")
+  );
+}
+
+function trackChatLog(log) {
+  if (!log || chatLogState.has(log)) return;
+  const state = {
+    atBottom: true,
+    handler: null,
+  };
+
+  const handler = () => {
+    const distance = log.scrollHeight - log.scrollTop - log.clientHeight;
+    state.atBottom = distance <= CHAT_SCROLL_THRESHOLD;
+  };
+
+  state.handler = handler;
+  chatLogState.set(log, state);
+  log.addEventListener("scroll", handler);
+  handler();
+}
+
+function untrackAllChatLogs() {
+  for (const [log, state] of chatLogState.entries()) {
+    log.removeEventListener("scroll", state.handler);
+  }
+  chatLogState.clear();
+}
+
+function isChatAutoScrollAllowed(app) {
+  const log = getChatLogElement(app);
+  if (!log) return true;
+  trackChatLog(log);
+  return chatLogState.get(log)?.atBottom ?? true;
 }
 
 function toggleNpcDeathSaveHook(enabled) {
