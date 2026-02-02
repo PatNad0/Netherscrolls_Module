@@ -114,6 +114,21 @@ Hooks.on("renderActorSheetV2", (app, html) => {
   injectPowerButtonV2(app, html);
 });
 
+Hooks.on("getHeaderControlsActorSheet", (app, controls) => {
+  if (!isPowerButtonEnabled()) return;
+  const actor = getActorFromApp(app);
+  if (!actor) return;
+  if (controls?.some?.((control) => control.action === "netherscrolls.showPower")) {
+    return;
+  }
+  controls.unshift({
+    action: "netherscrolls.showPower",
+    icon: "fa-solid fa-bolt",
+    label: "SHOW POWER",
+    onClick: () => announcePower(actor),
+  });
+});
+
 Hooks.on("getHeaderControlsActorSheetV2", (app, controls) => {
   if (!isSyncButtonEnabled()) return;
   const actor = getActorFromApp(app);
