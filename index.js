@@ -1273,3 +1273,110 @@ function getActorFromApp(app) {
   if (app?.object?.actor) return app.object.actor;
   return null;
 }
+
+const NS_DEBUG_BUTTONS = [
+  { id: "ns-btn-a", label: "POWER A" },
+  { id: "ns-btn-b", label: "POWER B" },
+  { id: "ns-btn-c", label: "POWER C" },
+  { id: "ns-btn-d", label: "POWER D" },
+  { id: "ns-btn-e", label: "POWER E" },
+  { id: "ns-btn-f", label: "POWER F" },
+];
+
+Hooks.on("renderActorSheet", (app) => {
+  injectDebugButtons(app);
+});
+
+Hooks.on("renderActorSheetV2", (app) => {
+  injectDebugButtons(app);
+});
+
+function injectDebugButtons(app) {
+  if (!game?.settings?.get(NS_MODULE_ID, NS_POWER_SETTING)) return;
+  const actor = getActorFromApp(app);
+  if (!actor) return;
+
+  const root = app?.element?.[0] ?? app?.element;
+  if (!root?.querySelector) return;
+
+  injectButtonsInHeader(root, actor);
+  injectButtonsInContentTop(root, actor);
+  injectButtonsInContentBottom(root, actor);
+  injectButtonsInSidebar(root, actor);
+}
+
+function injectButtonsInHeader(root, actor) {
+  const header = root.querySelector(".window-header");
+  if (!header) return;
+  if (header.querySelector(".ns-debug-cluster")) return;
+
+  const cluster = document.createElement("div");
+  cluster.className = "ns-debug-cluster ns-debug-header";
+  for (const { id, label } of NS_DEBUG_BUTTONS) {
+    cluster.appendChild(buildDebugButton(id, label, actor));
+  }
+
+  const controls =
+    header.querySelector(".header-controls") ||
+    header.querySelector(".window-controls") ||
+    header;
+  controls.appendChild(cluster);
+}
+
+function injectButtonsInContentTop(root, actor) {
+  const content = root.querySelector(".window-content");
+  if (!content) return;
+  if (content.querySelector(".ns-debug-bar-top")) return;
+
+  const bar = document.createElement("div");
+  bar.className = "ns-debug-cluster ns-debug-bar-top";
+  for (const { id, label } of NS_DEBUG_BUTTONS) {
+    bar.appendChild(buildDebugButton(`${id}-top`, `${label} TOP`, actor));
+  }
+  content.prepend(bar);
+}
+
+function injectButtonsInContentBottom(root, actor) {
+  const content = root.querySelector(".window-content");
+  if (!content) return;
+  if (content.querySelector(".ns-debug-bar-bottom")) return;
+
+  const bar = document.createElement("div");
+  bar.className = "ns-debug-cluster ns-debug-bar-bottom";
+  for (const { id, label } of NS_DEBUG_BUTTONS) {
+    bar.appendChild(buildDebugButton(`${id}-bot`, `${label} BOT`, actor));
+  }
+  content.appendChild(bar);
+}
+
+function injectButtonsInSidebar(root, actor) {
+  const sidebar =
+    root.querySelector(".sidebar") ||
+    root.querySelector(".sheet-sidebar") ||
+    root.querySelector(".left") ||
+    null;
+  if (!sidebar) return;
+  if (sidebar.querySelector(".ns-debug-bar-side")) return;
+
+  const bar = document.createElement("div");
+  bar.className = "ns-debug-cluster ns-debug-bar-side";
+  for (const { id, label } of NS_DEBUG_BUTTONS) {
+    bar.appendChild(buildDebugButton(`${id}-side`, `${label} SIDE`, actor));
+  }
+  sidebar.prepend(bar);
+}
+
+function buildDebugButton(id, label, actor) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "header-control ns-debug-button";
+  button.dataset.action = id;
+  button.textContent = label;
+  button.addEventListener("click", () => {
+    ChatMessage.create({
+      speaker: ChatMessage.getSpeaker({ actor }),
+      content: `${actor.name} clicked ${label}`,
+    });
+  });
+  return button;
+}
