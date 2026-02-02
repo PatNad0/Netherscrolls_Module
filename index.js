@@ -83,8 +83,29 @@ Hooks.on("createActor", (actor) => {
   ensureHighSlotsOnActor(actor);
 });
 
-Hooks.on("renderActorSheet", (app, html) => {
-  injectSyncButton(app, html);
+Hooks.on("getHeaderControlsActorSheetV2", (app, controls) => {
+  if (!app?.actor) return;
+  if (!game?.settings?.get(MODULE_ID, SETTINGS.syncButton)) return;
+
+  controls.unshift({
+    action: "netherscrolls.syncActor",
+    icon: "fa-solid fa-cloud-upload-alt",
+    label: "Sync to Netherscrolls",
+    ownership: "OBSERVER",
+    onClick: () => postActorSyncMessage(app.actor),
+  });
+});
+
+Hooks.on("getActorSheetHeaderButtons", (app, buttons) => {
+  if (!app?.actor) return;
+  if (!game?.settings?.get(MODULE_ID, SETTINGS.syncButton)) return;
+
+  buttons.unshift({
+    label: "Sync to Netherscrolls",
+    class: "ns-sync-control",
+    icon: "fas fa-cloud-upload-alt",
+    onclick: () => postActorSyncMessage(app.actor),
+  });
 });
 
 function isDnd5eSystem() {
@@ -98,33 +119,6 @@ let chatScrollPatch = null;
 let chatScrollRenderHook = null;
 let chatMessageRenderHook = null;
 const chatLogState = new Map();
-
-function injectSyncButton(app, html) {
-  if (!app?.actor) return;
-  const root = html?.length ? html : app?.element;
-  if (!root?.length) return;
-
-  root.find(".ns-actor-sync-wrap").remove();
-  if (!game?.settings?.get(MODULE_ID, SETTINGS.syncButton)) return;
-
-  const headerHost = root.find(".sheet-header");
-  const host = headerHost?.length ? headerHost : root.find(".window-content");
-  if (!host?.length) return;
-
-  host.addClass("ns-actor-sync-host");
-
-  const button = $(
-    `<button type="button" class="ns-actor-sync">
-      <i class="fas fa-cloud-upload-alt"></i>
-      <span>Sync to Netherscrolls</span>
-    </button>`
-  );
-  button.on("click", () => postActorSyncMessage(app.actor));
-
-  const wrap = $('<div class="ns-actor-sync-wrap"></div>');
-  wrap.append(button);
-  host.append(wrap);
-}
 
 function rerenderActorSheets() {
   const apps = Object.values(ui?.windows ?? {});
