@@ -115,17 +115,17 @@ Hooks.on("renderActorSheetV2", (app, html) => {
 });
 
 Hooks.on("getHeaderControlsActorSheet", (app, controls) => {
-  if (!isPowerButtonEnabled()) return;
+  if (!isSyncButtonEnabled()) return;
   const actor = getActorFromApp(app);
   if (!actor) return;
-  if (controls?.some?.((control) => control.action === "netherscrolls.showPower")) {
+  if (controls?.some?.((control) => control.action === "netherscrolls.syncActor")) {
     return;
   }
   controls.unshift({
-    action: "netherscrolls.showPower",
-    icon: "fa-solid fa-bolt",
-    label: "SHOW POWER",
-    onClick: () => announcePower(actor),
+    action: "netherscrolls.syncActor",
+    icon: "fa-solid fa-cloud-upload-alt",
+    label: "sync",
+    onClick: () => postActorSyncMessage(actor),
   });
 });
 
@@ -146,18 +146,18 @@ Hooks.on("getHeaderControlsActorSheetV2", (app, controls) => {
 });
 
 Hooks.on("getHeaderControlsActorSheetV2", (app, controls) => {
-  if (!isPowerButtonEnabled()) return;
+  if (!isSyncButtonEnabled()) return;
   const actor = getActorFromApp(app);
   if (!actor) return;
-  if (controls?.some?.((control) => control.action === "netherscrolls.showPower")) {
+  if (controls?.some?.((control) => control.action === "netherscrolls.syncActor")) {
     return;
   }
   controls.unshift({
-    action: "netherscrolls.showPower",
-    icon: "fa-solid fa-bolt",
-    label: "SHOW POWER",
+    action: "netherscrolls.syncActor",
+    icon: "fa-solid fa-cloud-upload-alt",
+    label: "sync",
     ownership: "OBSERVER",
-    onClick: () => announcePower(actor),
+    onClick: () => postActorSyncMessage(actor),
   });
 });
 
@@ -312,7 +312,7 @@ function getWindowElement(app, root) {
 }
 
 function injectPowerButtonV1(app, html) {
-  if (!isPowerButtonEnabled()) return;
+  if (!isSyncButtonEnabled()) return;
   if (!isActorSheetApp(app)) return;
 
   const root = html?.length ? html : app?.element;
@@ -326,21 +326,21 @@ function injectPowerButtonV1(app, html) {
     header = app.element.find(".window-header");
   }
   if (!header?.length) return;
-  if (header.find(".netherscrolls-power-button").length) return;
+  if (header.find(".netherscrolls-sync-button").length) return;
 
   const button = $(
-    `<a class="header-button netherscrolls-power-button">
-      <i class="fas fa-bolt"></i>
-      <span>SHOW POWER</span>
+    `<a class="header-button netherscrolls-sync-button">
+      <i class="fas fa-cloud-upload-alt"></i>
+      <span>sync</span>
     </a>`
   );
-  button.attr("data-action", "netherscrolls.showPower");
-  button.on("click", () => announcePower(actor));
+  button.attr("data-action", "netherscrolls.syncActor");
+  button.on("click", () => postActorSyncMessage(actor));
   header.append(button);
 }
 
 function injectPowerButtonV2(app, html) {
-  if (!isPowerButtonEnabled()) return;
+  if (!isSyncButtonEnabled()) return;
   if (!isActorSheetApp(app)) return;
 
   const root = getRootElement(app, html);
@@ -351,14 +351,15 @@ function injectPowerButtonV2(app, html) {
   if (!actor) return;
 
   const header = windowEl.querySelector(".window-header");
-  if (!header || header.querySelector(".netherscrolls-power-button")) return;
+  if (!header || header.querySelector(".netherscrolls-sync-button")) return;
 
   const button = document.createElement("button");
   button.type = "button";
-  button.className = "header-control netherscrolls-power-button";
-  button.dataset.action = "netherscrolls.showPower";
-  button.innerHTML = '<i class="fa-solid fa-bolt"></i><span>SHOW POWER</span>';
-  button.addEventListener("click", () => announcePower(actor));
+  button.className = "header-control netherscrolls-sync-button";
+  button.dataset.action = "netherscrolls.syncActor";
+  button.innerHTML =
+    '<i class="fa-solid fa-cloud-upload-alt"></i><span>sync</span>';
+  button.addEventListener("click", () => postActorSyncMessage(actor));
 
   const controls = header.querySelector(".window-controls") || header;
   controls.appendChild(button);
