@@ -3,7 +3,13 @@
 .window-app .window-header .header-control.netherscrolls-sync-button,
 .window-app .window-header .header-control.netherscrolls-hello-button,
 .window-app .window-header [data-action="netherscrolls.syncActor"],
-.window-app .window-header [data-action="netherscrolls.sayHello"] {
+.window-app .window-header [data-action="netherscrolls.sayHello"],
+.app .app-header .header-button.netherscrolls-sync-button,
+.app .app-header .header-button.netherscrolls-hello-button,
+.app .app-header .header-control.netherscrolls-sync-button,
+.app .app-header .header-control.netherscrolls-hello-button,
+.app .app-header [data-action="netherscrolls.syncActor"],
+.app .app-header [data-action="netherscrolls.sayHello"] {
   background: linear-gradient(135deg, #1f2b2e, #355a55);
   border: 1px solid rgba(20, 30, 30, 0.6);
   border-radius: 6px;
@@ -19,7 +25,13 @@
 .window-app .window-header .header-control.netherscrolls-sync-button:hover,
 .window-app .window-header .header-control.netherscrolls-hello-button:hover,
 .window-app .window-header [data-action="netherscrolls.syncActor"]:hover,
-.window-app .window-header [data-action="netherscrolls.sayHello"]:hover {
+.window-app .window-header [data-action="netherscrolls.sayHello"]:hover,
+.app .app-header .header-button.netherscrolls-sync-button:hover,
+.app .app-header .header-button.netherscrolls-hello-button:hover,
+.app .app-header .header-control.netherscrolls-sync-button:hover,
+.app .app-header .header-control.netherscrolls-hello-button:hover,
+.app .app-header [data-action="netherscrolls.syncActor"]:hover,
+.app .app-header [data-action="netherscrolls.sayHello"]:hover {
   filter: brightness(1.08);
 }
 
@@ -28,7 +40,13 @@
 .window-app .window-header .header-control.netherscrolls-sync-button i,
 .window-app .window-header .header-control.netherscrolls-hello-button i,
 .window-app .window-header [data-action="netherscrolls.syncActor"] i,
-.window-app .window-header [data-action="netherscrolls.sayHello"] i {
+.window-app .window-header [data-action="netherscrolls.sayHello"] i,
+.app .app-header .header-button.netherscrolls-sync-button i,
+.app .app-header .header-button.netherscrolls-hello-button i,
+.app .app-header .header-control.netherscrolls-sync-button i,
+.app .app-header .header-control.netherscrolls-hello-button i,
+.app .app-header [data-action="netherscrolls.syncActor"] i,
+.app .app-header [data-action="netherscrolls.sayHello"] i {
   margin-right: 0.35rem;
 }
 
