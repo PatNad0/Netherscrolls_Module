@@ -2,7 +2,7 @@
   "id": "netherscrolls-module",
   "title": "Netherscrolls Module",
   "description": "My personnal module to do some fun stuff :3.",
-  "version": "1.1.17",
+  "version": "1.1.18",
   "authors": [
     {
       "name": "Pat"
@@ -23,7 +23,8 @@
     }
   ],
   "esmodules": [
-    "index.js"
+    "index.js",
+    "legacy-strongest.js"
   ],
   "styles": [
     "styles/netherscrolls.css"

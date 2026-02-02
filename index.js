@@ -10,7 +10,6 @@ const SETTINGS = {
   npcDeathSave: "npcDeathSaveEachTurn",
   lockChatScroll: "lockChatAutoScroll",
   apiKey: "nsApiKey",
-  syncButton: "showSyncButton",
   powerButton: "showPowerButton",
 };
 //something something
@@ -59,19 +58,9 @@ Hooks.once("init", () => {
     default: "",
   });
 
-  game.settings.register(MODULE_ID, SETTINGS.syncButton, {
+  game.settings.register(MODULE_ID, SETTINGS.powerButton, {
     name: "Sync button",
     hint: "Show the sync button on actor sheets.",
-    scope: "client",
-    config: true,
-    type: Boolean,
-    default: true,
-    onChange: () => rerenderActorSheets(),
-  });
-
-  game.settings.register(MODULE_ID, SETTINGS.powerButton, {
-    name: "Show POWER button",
-    hint: "Show a SHOW POWER button on actor sheets (posts to chat).",
     scope: "client",
     config: true,
     type: Boolean,
@@ -185,17 +174,14 @@ function rerenderActorSheets() {
 function injectSyncButtonV1(app, html) {
   if (!isSyncButtonEnabled()) return;
   if (!isActorSheetApp(app)) return;
-
-  const root = html?.length ? html : app?.element;
-  if (!root?.length) return;
+  if (!html?.closest) return;
+  const appElement = html.closest(".app");
+  if (!appElement?.find) return;
 
   const actor = getActorFromApp(app);
   if (!actor) return;
 
-  let header = root.find(".window-header");
-  if (!header?.length && app?.element?.find) {
-    header = app.element.find(".window-header");
-  }
+  const header = appElement.find(".window-header");
   if (header?.length && !header.find(".netherscrolls-sync-button").length) {
     const button = $(
       `<a class="header-button netherscrolls-sync-button">
@@ -208,10 +194,7 @@ function injectSyncButtonV1(app, html) {
     header.append(button);
   }
 
-  let content = root.find(".window-content");
-  if (!content?.length && app?.element?.find) {
-    content = app.element.find(".window-content");
-  }
+  const content = appElement.find(".window-content");
   if (content?.length && !content.find(".netherscrolls-sync-row").length) {
     const row = $(
       `<div class="netherscrolls-sync-row">
@@ -268,7 +251,7 @@ function injectSyncButtonV2(app, html) {
 }
 
 function isSyncButtonEnabled() {
-  return Boolean(game?.settings?.get(MODULE_ID, SETTINGS.syncButton));
+  return Boolean(game?.settings?.get(MODULE_ID, SETTINGS.powerButton));
 }
 
 function isPowerButtonEnabled() {
@@ -314,17 +297,14 @@ function getWindowElement(app, root) {
 function injectPowerButtonV1(app, html) {
   if (!isSyncButtonEnabled()) return;
   if (!isActorSheetApp(app)) return;
-
-  const root = html?.length ? html : app?.element;
-  if (!root?.length) return;
+  if (!html?.closest) return;
+  const appElement = html.closest(".app");
+  if (!appElement?.find) return;
 
   const actor = getActorFromApp(app);
   if (!actor) return;
 
-  let header = root.find(".window-header");
-  if (!header?.length && app?.element?.find) {
-    header = app.element.find(".window-header");
-  }
+  const header = appElement.find(".window-header");
   if (!header?.length) return;
   if (header.find(".netherscrolls-sync-button").length) return;
 
