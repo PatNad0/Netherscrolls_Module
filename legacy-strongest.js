@@ -130,11 +130,11 @@ function injectShowPowerButtonV1(app, html) {
   );
 
   button.on("click", () => announceStrongest(getActorFromApp(app)));
-  const title = header.find(".window-title");
-  if (title.length) {
-    title.after(button);
+  const closeButton = header.find("[data-action='close'], .close, .header-control.close, a.close");
+  if (closeButton.length) {
+    closeButton.first().before(button);
   } else {
-    header.prepend(button);
+    header.append(button);
   }
 }
 
@@ -155,8 +155,11 @@ function injectShowPowerButtonV2(app, element) {
   button.classList.add("header-control", "netherscrolls-show-power");
   button.innerHTML = '<i class="fas fa-bolt"></i><span>sync</span>';
   button.addEventListener("click", () => announceStrongest(getActorFromApp(app)));
-  if (controls !== header) {
-    header.insertBefore(button, controls);
+  const closeButton = controls.querySelector(
+    "[data-action='close'], .close, .header-control.close, a.close"
+  );
+  if (closeButton) {
+    controls.insertBefore(button, closeButton);
   } else {
     controls.appendChild(button);
   }
