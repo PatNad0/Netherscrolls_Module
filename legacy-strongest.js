@@ -130,11 +130,14 @@ function injectShowPowerButtonV1(app, html) {
   );
 
   button.on("click", () => announceStrongest(getActorFromApp(app)));
-  const closeButton = header.find("[data-action='close'], .close, .header-control.close, a.close");
-  if (closeButton.length) {
-    closeButton.first().before(button);
+  const modeSlider = header.find(".mode-slider");
+  const title = header.find(".window-title");
+  if (modeSlider.length) {
+    modeSlider.last().after(button);
+  } else if (title.length) {
+    title.first().before(button);
   } else {
-    header.append(button);
+    header.prepend(button);
   }
 }
 
@@ -149,19 +152,19 @@ function injectShowPowerButtonV2(app, element) {
   if (!header) return;
   if (header.querySelector(".netherscrolls-show-power")) return;
 
-  const controls = header.querySelector(".header-controls") || header;
   const button = document.createElement("button");
   button.type = "button";
   button.classList.add("header-control", "netherscrolls-show-power");
   button.innerHTML = '<i class="fas fa-bolt"></i><span>sync</span>';
   button.addEventListener("click", () => announceStrongest(getActorFromApp(app)));
-  const closeButton = controls.querySelector(
-    "[data-action='close'], .close, .header-control.close, a.close"
-  );
-  if (closeButton) {
-    controls.insertBefore(button, closeButton);
+  const modeSlider = header.querySelector(".mode-slider");
+  const title = header.querySelector(".window-title");
+  if (modeSlider) {
+    modeSlider.insertAdjacentElement("afterend", button);
+  } else if (title) {
+    title.insertAdjacentElement("beforebegin", button);
   } else {
-    controls.appendChild(button);
+    header.prepend(button);
   }
 }
 
