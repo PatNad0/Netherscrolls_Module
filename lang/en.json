@@ -16,5 +16,7 @@
   "DND5E.SPELLCASTING.SLOTS.spell12": "12th Level",
   "DND5E.SPELLCASTING.SLOTS.spell13": "13th Level",
   "DND5E.SPELLCASTING.SLOTS.spell14": "14th Level",
-  "DND5E.SPELLCASTING.SLOTS.spell15": "15th Level"
+  "DND5E.SPELLCASTING.SLOTS.spell15": "15th Level",
+  "NETHERSCROLLS.SayHello": "Say hello",
+  "NETHERSCROLLS.HelloMessage": "helo from {name}"
 }
