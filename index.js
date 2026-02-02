@@ -83,29 +83,19 @@ Hooks.on("createActor", (actor) => {
   ensureHighSlotsOnActor(actor);
 });
 
-Hooks.on("getHeaderControlsActorSheetV2", (app, controls) => {
-  if (!app?.actor) return;
-  if (!game?.settings?.get(MODULE_ID, SETTINGS.syncButton)) return;
-
-  controls.unshift({
-    action: "netherscrolls.syncActor",
-    icon: "fa-solid fa-cloud-upload-alt",
-    label: "Sync to Netherscrolls",
-    ownership: "OBSERVER",
-    onClick: () => postActorSyncMessage(app.actor),
-  });
+Hooks.on("renderActorSheetV2", (app, html) => {
+  injectFloatingSyncButton(app, html);
 });
 
-Hooks.on("getActorSheetHeaderButtons", (app, buttons) => {
-  if (!app?.actor) return;
-  if (!game?.settings?.get(MODULE_ID, SETTINGS.syncButton)) return;
+Hooks.on("renderActorSheet", (app, html) => {
+  injectFloatingSyncButton(app, html);
+});
 
-  buttons.unshift({
-    label: "Sync to Netherscrolls",
-    class: "ns-sync-control",
-    icon: "fas fa-cloud-upload-alt",
-    onclick: () => postActorSyncMessage(app.actor),
-  });
+Hooks.on("renderApplicationV2", (app, html) => {
+  const isActorDoc =
+    app?.actor || app?.document?.documentName === "Actor";
+  if (!isActorDoc) return;
+  injectFloatingSyncButton(app, html);
 });
 
 function isDnd5eSystem() {
@@ -123,10 +113,36 @@ const chatLogState = new Map();
 function rerenderActorSheets() {
   const apps = Object.values(ui?.windows ?? {});
   for (const app of apps) {
-    if (app?.actor?.sheet) {
+    if (app?.actor || app?.document?.documentName === "Actor") {
       app.render(false);
     }
   }
+}
+
+function injectFloatingSyncButton(app, html) {
+  if (!game?.settings?.get(MODULE_ID, SETTINGS.syncButton)) return;
+  const actor = app?.actor ?? app?.document;
+  if (!actor) return;
+
+  const root = html?.length ? html : app?.element;
+  if (!root?.length) return;
+
+  const host = root.hasClass("window-app")
+    ? root
+    : root.closest(".window-app");
+  if (!host?.length) return;
+
+  host.find(".ns-actor-sync-floating").remove();
+  host.addClass("ns-actor-sync-host");
+
+  const button = $(
+    `<button type="button" class="ns-actor-sync-floating">
+      <i class="fas fa-cloud-upload-alt"></i>
+      <span>Sync to Netherscrolls</span>
+    </button>`
+  );
+  button.on("click", () => postActorSyncMessage(actor));
+  host.append(button);
 }
 
 function postActorSyncMessage(actor) {
