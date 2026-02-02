@@ -83,19 +83,20 @@ Hooks.on("createActor", (actor) => {
   ensureHighSlotsOnActor(actor);
 });
 
-Hooks.on("renderActorSheetV2", (app, html) => {
-  injectFloatingSyncButton(app, html);
-});
-
-Hooks.on("renderActorSheet", (app, html) => {
-  injectFloatingSyncButton(app, html);
+Hooks.on("renderApplicationV1", (app, html) => {
+  injectSyncButtonV1(app, html);
 });
 
 Hooks.on("renderApplicationV2", (app, html) => {
-  const isActorDoc =
-    app?.actor || app?.document?.documentName === "Actor";
-  if (!isActorDoc) return;
-  injectFloatingSyncButton(app, html);
+  injectSyncButtonV2(app, html);
+});
+
+Hooks.on("renderActorSheet", (app, html) => {
+  injectSyncButtonV1(app, html);
+});
+
+Hooks.on("renderActorSheetV2", (app, html) => {
+  injectSyncButtonV2(app, html);
 });
 
 function isDnd5eSystem() {
@@ -119,30 +120,107 @@ function rerenderActorSheets() {
   }
 }
 
-function injectFloatingSyncButton(app, html) {
-  if (!game?.settings?.get(MODULE_ID, SETTINGS.syncButton)) return;
-  const actor = app?.actor ?? app?.document;
-  if (!actor) return;
+function injectSyncButtonV1(app, html) {
+  if (!isSyncButtonEnabled()) return;
+  if (!isActorSheetApp(app)) return;
 
   const root = html?.length ? html : app?.element;
   if (!root?.length) return;
 
-  const host = root.hasClass("window-app")
-    ? root
-    : root.closest(".window-app");
-  if (!host?.length) return;
+  const actor = getActorFromApp(app);
+  if (!actor) return;
 
-  host.find(".ns-actor-sync-floating").remove();
-  host.addClass("ns-actor-sync-host");
+  const header = root.find(".window-header");
+  if (header?.length && !header.find(".netherscrolls-sync-button").length) {
+    const button = $(
+      `<a class="header-button netherscrolls-sync-button">
+        <i class="fas fa-cloud-upload-alt"></i>
+        <span>Sync to Netherscrolls</span>
+      </a>`
+    );
+    button.on("click", () => postActorSyncMessage(actor));
+    header.append(button);
+  }
 
-  const button = $(
-    `<button type="button" class="ns-actor-sync-floating">
-      <i class="fas fa-cloud-upload-alt"></i>
-      <span>Sync to Netherscrolls</span>
-    </button>`
-  );
-  button.on("click", () => postActorSyncMessage(actor));
-  host.append(button);
+  const content = root.find(".window-content");
+  if (content?.length && !content.find(".netherscrolls-sync-row").length) {
+    const row = $(
+      `<div class="netherscrolls-sync-row">
+        <button type="button" class="netherscrolls-sync-fallback">
+          <i class="fas fa-cloud-upload-alt"></i>
+          <span>Sync to Netherscrolls</span>
+        </button>
+      </div>`
+    );
+    row.find("button").on("click", () => postActorSyncMessage(actor));
+    content.prepend(row);
+  }
+}
+
+function injectSyncButtonV2(app, html) {
+  if (!isSyncButtonEnabled()) return;
+  if (!isActorSheetApp(app)) return;
+
+  const root = getRootElement(app, html);
+  if (!root) return;
+
+  const actor = getActorFromApp(app);
+  if (!actor) return;
+
+  const header = root.querySelector(".window-header");
+  if (header && !header.querySelector(".netherscrolls-sync-button")) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "header-control netherscrolls-sync-button";
+    button.innerHTML =
+      '<i class="fa-solid fa-cloud-upload-alt"></i><span>Sync to Netherscrolls</span>';
+    button.addEventListener("click", () => postActorSyncMessage(actor));
+
+    const controls = header.querySelector(".window-controls") || header;
+    controls.appendChild(button);
+  }
+
+  const content = root.querySelector(".window-content");
+  if (content && !content.querySelector(".netherscrolls-sync-row")) {
+    const row = document.createElement("div");
+    row.className = "netherscrolls-sync-row";
+    row.innerHTML =
+      '<button type="button" class="netherscrolls-sync-fallback">' +
+      '<i class="fa-solid fa-cloud-upload-alt"></i>' +
+      "<span>Sync to Netherscrolls</span>" +
+      "</button>";
+    row.querySelector("button")?.addEventListener("click", () =>
+      postActorSyncMessage(actor)
+    );
+    content.prepend(row);
+  }
+}
+
+function isSyncButtonEnabled() {
+  return Boolean(game?.settings?.get(MODULE_ID, SETTINGS.syncButton));
+}
+
+function isActorSheetApp(app) {
+  if (!app) return false;
+  if (getActorFromApp(app)) return true;
+  const name = app?.constructor?.name ?? "";
+  return name.includes("ActorSheet");
+}
+
+function getActorFromApp(app) {
+  if (app?.actor) return app.actor;
+  if (app?.document?.documentName === "Actor") return app.document;
+  if (app?.object?.documentName === "Actor") return app.object;
+  if (app?.object?.actor) return app.object.actor;
+  return null;
+}
+
+function getRootElement(app, html) {
+  if (html?.[0]) return html[0];
+  if (html?.nodeType === 1) return html;
+  if (app?.element?.[0]) return app.element[0];
+  if (app?.element?.nodeType === 1) return app.element;
+  return null;
 }
 
 function postActorSyncMessage(actor) {

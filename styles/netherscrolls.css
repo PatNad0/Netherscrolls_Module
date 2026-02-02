@@ -1,12 +1,30 @@
-.ns-actor-sync-host {
-  position: relative;
+.window-app .window-header .header-button.netherscrolls-sync-button,
+.window-app .window-header .header-control.netherscrolls-sync-button {
+  background: linear-gradient(135deg, #1f2b2e, #355a55);
+  border: 1px solid rgba(20, 30, 30, 0.6);
+  border-radius: 6px;
+  padding: 0.1rem 0.4rem;
+  color: #f7f3e8;
+  font-weight: 600;
+  text-transform: none;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
 }
 
-.ns-actor-sync-floating {
-  position: absolute;
-  top: 8px;
-  left: 8px;
-  z-index: 9999;
+.window-app .window-header .header-button.netherscrolls-sync-button:hover,
+.window-app .window-header .header-control.netherscrolls-sync-button:hover {
+  filter: brightness(1.08);
+}
+
+.window-app .window-header .header-button.netherscrolls-sync-button i,
+.window-app .window-header .header-control.netherscrolls-sync-button i {
+  margin-right: 0.35rem;
+}
+
+.window-app .window-content .netherscrolls-sync-row {
+  padding: 0.35rem 0.5rem;
+}
+
+.window-app .window-content .netherscrolls-sync-fallback {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
@@ -21,34 +39,8 @@
   cursor: pointer;
 }
 
-.ns-actor-sync-floating:hover {
+.window-app .window-content .netherscrolls-sync-fallback:hover {
   filter: brightness(1.08);
-}
-
-.ns-actor-sync-floating i {
-  margin-right: 0.1rem;
-}
-
-.window-app .window-header .header-control[data-action="netherscrolls.syncActor"],
-.window-app .window-header .header-button.ns-sync-control {
-  background: linear-gradient(135deg, #1f2b2e, #355a55);
-  border: 1px solid rgba(20, 30, 30, 0.6);
-  border-radius: 6px;
-  padding: 0.1rem 0.4rem;
-  color: #f7f3e8;
-  font-weight: 600;
-  text-transform: none;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
-}
-
-.window-app .window-header .header-control[data-action="netherscrolls.syncActor"]:hover,
-.window-app .window-header .header-button.ns-sync-control:hover {
-  filter: brightness(1.08);
-}
-
-.window-app .window-header .header-control[data-action="netherscrolls.syncActor"] i,
-.window-app .window-header .header-button.ns-sync-control i {
-  margin-right: 0.35rem;
 }
 
 .ns-sync-data {
