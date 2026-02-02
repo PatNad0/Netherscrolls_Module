@@ -1,12 +1,13 @@
 .ns-actor-sync-host {
   position: relative;
+  overflow: visible;
 }
 
 .ns-actor-sync-wrap {
   position: absolute;
-  left: 18px;
-  top: 22px;
-  z-index: 90;
+  left: 220px;
+  top: 8px;
+  z-index: 120;
   pointer-events: auto;
 }
 

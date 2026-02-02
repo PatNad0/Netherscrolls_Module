@@ -101,14 +101,16 @@ const chatLogState = new Map();
 
 function injectSyncButton(app, html) {
   if (!app?.actor) return;
-  const appElement = app?.element;
-  if (!appElement?.length) return;
+  const root = html?.length ? html : app?.element;
+  if (!root?.length) return;
 
-  const host = appElement.find(".window-content");
+  root.find(".ns-actor-sync-wrap").remove();
+  if (!game?.settings?.get(MODULE_ID, SETTINGS.syncButton)) return;
+
+  const headerHost = root.find(".sheet-header");
+  const host = headerHost?.length ? headerHost : root.find(".window-content");
   if (!host?.length) return;
 
-  host.find(".ns-actor-sync-wrap").remove();
-  if (!game?.settings?.get(MODULE_ID, SETTINGS.syncButton)) return;
   host.addClass("ns-actor-sync-host");
 
   const button = $(
