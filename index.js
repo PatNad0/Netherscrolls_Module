@@ -130,6 +130,22 @@ Hooks.on("getHeaderControlsActorSheetV2", (app, controls) => {
   });
 });
 
+Hooks.on("getHeaderControlsActorSheetV2", (app, controls) => {
+  if (!isPowerButtonEnabled()) return;
+  const actor = getActorFromApp(app);
+  if (!actor) return;
+  if (controls?.some?.((control) => control.action === "netherscrolls.showPower")) {
+    return;
+  }
+  controls.unshift({
+    action: "netherscrolls.showPower",
+    icon: "fa-solid fa-bolt",
+    label: "SHOW POWER",
+    ownership: "OBSERVER",
+    onClick: () => announcePower(actor),
+  });
+});
+
 function isDnd5eSystem() {
   return game?.system?.id === "dnd5e";
 }
