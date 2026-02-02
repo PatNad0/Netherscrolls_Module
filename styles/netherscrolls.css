@@ -1,0 +1,36 @@
+.ns-actor-sync-wrap {
+  position: absolute;
+  left: 8px;
+  top: 72px;
+  z-index: 50;
+  pointer-events: auto;
+}
+
+.ns-actor-sync {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.65rem;
+  border-radius: 8px;
+  border: 1px solid rgba(20, 30, 30, 0.6);
+  background: linear-gradient(135deg, #1f2b2e, #355a55);
+  color: #f7f3e8;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: none;
+  white-space: nowrap;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+}
+
+.ns-actor-sync i {
+  font-size: 0.85em;
+}
+
+.ns-actor-sync:hover {
+  filter: brightness(1.08);
+}
+
+.ns-actor-sync:active {
+  transform: translateY(1px);
+}

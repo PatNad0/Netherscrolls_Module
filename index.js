@@ -2,11 +2,15 @@ const MODULE_ID = "netherscrolls-module";
 const HIGH_SLOT_LEVELS = [10, 11, 12, 13, 14, 15];
 const CHAT_SCROLL_THRESHOLD = 10;
 const CHAT_SCROLL_USER_GRACE_MS = 250;
+const PLACEHOLDER_CHARACTER_ID = "697412a366e5e9513cbadf6f";
+const ABILITY_KEYS = ["str", "dex", "con", "int", "wis", "cha"];
 
 const SETTINGS = {
   rerollInit: "rerollInitEachRound",
   npcDeathSave: "npcDeathSaveEachTurn",
   lockChatScroll: "lockChatAutoScroll",
+  apiKey: "nsApiKey",
+  syncButton: "showSyncButton",
 };
 //something something
 Hooks.once("init", () => {
@@ -43,6 +47,26 @@ Hooks.once("init", () => {
     default: false,
     onChange: (value) => toggleChatScrollLock(Boolean(value)),
   });
+
+  game.settings.register(MODULE_ID, SETTINGS.apiKey, {
+    name: "Netherscrolls API Key",
+    hint: "Paste your API key here. This is stored in the world settings and only editable by GMs.",
+    scope: "world",
+    config: true,
+    restricted: true,
+    type: String,
+    default: "",
+  });
+
+  game.settings.register(MODULE_ID, SETTINGS.syncButton, {
+    name: "Sync to Netherscrolls button",
+    hint: "Show the Sync to Netherscrolls button on actor sheets.",
+    scope: "client",
+    config: true,
+    type: Boolean,
+    default: true,
+    onChange: () => rerenderActorSheets(),
+  });
 });
 
 Hooks.once("ready", () => {
@@ -59,6 +83,10 @@ Hooks.on("createActor", (actor) => {
   ensureHighSlotsOnActor(actor);
 });
 
+Hooks.on("renderActorSheet", (app, html) => {
+  injectSyncButton(app, html);
+});
+
 function isDnd5eSystem() {
   return game?.system?.id === "dnd5e";
 }
@@ -70,6 +98,213 @@ let chatScrollPatch = null;
 let chatScrollRenderHook = null;
 let chatMessageRenderHook = null;
 const chatLogState = new Map();
+
+function injectSyncButton(app, html) {
+  if (!app?.actor) return;
+  const appElement = app?.element;
+  if (!appElement?.length) return;
+
+  appElement.find(".ns-actor-sync-wrap").remove();
+  if (!game?.settings?.get(MODULE_ID, SETTINGS.syncButton)) return;
+
+  const button = $(
+    `<button type="button" class="ns-actor-sync">
+      <i class="fas fa-cloud-upload-alt"></i>
+      <span>Sync to Netherscrolls</span>
+    </button>`
+  );
+  button.on("click", () => postActorSyncMessage(app.actor));
+
+  const wrap = $('<div class="ns-actor-sync-wrap"></div>');
+  wrap.append(button);
+  appElement.append(wrap);
+}
+
+function rerenderActorSheets() {
+  const apps = Object.values(ui?.windows ?? {});
+  for (const app of apps) {
+    if (app?.actor?.sheet) {
+      app.render(false);
+    }
+  }
+}
+
+function postActorSyncMessage(actor) {
+  if (!actor) return;
+  const payload = buildActorSyncPayload(actor);
+  const content = renderSyncPayload(payload);
+  ChatMessage.create({
+    speaker: ChatMessage.getSpeaker({ actor }),
+    content,
+  });
+}
+
+function renderSyncPayload(payload) {
+  const json = JSON.stringify(payload, null, 2);
+  const escaped = escapeHtml(json);
+  return `<pre class="ns-sync-data">${escaped}</pre>`;
+}
+
+function buildActorSyncPayload(actor) {
+  const system = actor?.system ?? {};
+  const attributes = system.attributes ?? {};
+  const abilities = system.abilities ?? {};
+  const { items, spells, feats } = splitActorItems(actor);
+
+  return {
+    characterId: PLACEHOLDER_CHARACTER_ID,
+    characterName: actor?.name ?? "",
+    proficiencyBonus: toNumber(attributes.prof),
+    initiative: getInitiativeValue(attributes, abilities),
+    hp: {
+      current: toNumber(attributes.hp?.value),
+      max: toNumber(attributes.hp?.max),
+      temp: toNumber(attributes.hp?.temp),
+    },
+    hitDice: buildHitDice(actor),
+    spellSlots: buildSpellSlots(system.spells),
+    abilities: buildAbilities(abilities),
+    savingThrows: buildSavingThrows(abilities, attributes.prof),
+    items,
+    spells,
+    feats,
+  };
+}
+
+function buildAbilities(abilities) {
+  const result = {};
+  for (const key of ABILITY_KEYS) {
+    result[key] = toNumber(abilities?.[key]?.value);
+  }
+  return result;
+}
+
+function buildSavingThrows(abilities, profBonus) {
+  const result = {};
+  for (const key of ABILITY_KEYS) {
+    const data = abilities?.[key] ?? {};
+    const prof = toNumber(data?.proficient ?? data?.prof);
+    let bonus = data?.save ?? data?.save?.value ?? data?.saveBonus;
+    if (bonus == null) {
+      const mod = toNumber(data?.mod);
+      const extra = toNumber(data?.bonuses?.save);
+      bonus = mod + toNumber(profBonus) * prof + extra;
+    }
+    result[key] = {
+      prof,
+      bonus: toNumber(bonus),
+    };
+  }
+  return result;
+}
+
+function buildSpellSlots(spells) {
+  const current = {};
+  const max = {};
+  if (!spells) return { current, max };
+
+  for (let level = 1; level <= 9; level += 1) {
+    const slot = spells[`spell${level}`];
+    if (!slot) continue;
+    const cur = toNumber(slot.value);
+    const mx = toNumber(slot.max);
+    if (cur <= 0 && mx <= 0) continue;
+    current[`lvl${level}`] = cur;
+    max[`lvl${level}`] = mx;
+  }
+
+  return { current, max };
+}
+
+function buildHitDice(actor) {
+  const current = {};
+  const max = {};
+  const classes = actor?.items?.filter((item) => item?.type === "class") ?? [];
+
+  if (classes.length) {
+    for (const cls of classes) {
+      const data = cls?.system ?? {};
+      const die = normalizeHitDie(data.hitDice);
+      if (!die) continue;
+      const levels = toNumber(data.levels);
+      if (levels <= 0) continue;
+      const used = toNumber(data.hitDiceUsed);
+      const available = Math.max(0, levels - used);
+      current[die] = (current[die] ?? 0) + available;
+      max[die] = (max[die] ?? 0) + levels;
+    }
+    return { current, max };
+  }
+
+  const hd = actor?.system?.attributes?.hd;
+  const die = normalizeHitDie(hd?.denomination ?? hd?.hitDice ?? hd?.value ?? hd);
+  if (!die) return { current, max };
+
+  const cur = toNumber(hd?.value ?? hd?.current);
+  const mx = toNumber(hd?.max ?? hd?.value ?? hd?.current);
+  current[die] = cur;
+  max[die] = mx;
+  return { current, max };
+}
+
+function normalizeHitDie(hitDice) {
+  if (!hitDice) return null;
+  if (typeof hitDice === "string") {
+    return hitDice.startsWith("d") ? hitDice : `d${hitDice}`;
+  }
+  if (typeof hitDice === "number") {
+    return `d${hitDice}`;
+  }
+  const denom = hitDice?.denomination ?? hitDice?.faces ?? hitDice?.value;
+  if (!denom) return null;
+  return `d${denom}`;
+}
+
+function splitActorItems(actor) {
+  const items = [];
+  const spells = [];
+  const feats = [];
+  const ignoreTypes = new Set(["spell", "feat", "class", "subclass", "background", "race"]);
+
+  for (const item of actor?.items ?? []) {
+    const name = item?.name;
+    if (!name) continue;
+    if (item.type === "spell") {
+      spells.push(name);
+    } else if (item.type === "feat") {
+      feats.push(name);
+    } else if (!ignoreTypes.has(item.type)) {
+      items.push(name);
+    }
+  }
+
+  return { items, spells, feats };
+}
+
+function getInitiativeValue(attributes, abilities) {
+  const init = attributes?.init ?? {};
+  if (init.total != null) return toNumber(init.total);
+  if (init.value != null) return toNumber(init.value);
+  if (init.mod != null) return toNumber(init.mod);
+  return toNumber(abilities?.dex?.mod);
+}
+
+function escapeHtml(value) {
+  if (foundry?.utils?.escapeHTML) {
+    return foundry.utils.escapeHTML(value);
+  }
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function toNumber(value, fallback = 0) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : fallback;
+}
 
 function toggleRerollInitHook(enabled) {
   if (!game?.ready) return;

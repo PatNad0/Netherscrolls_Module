@@ -2,7 +2,7 @@
   "id": "netherscrolls-module",
   "title": "Netherscrolls Module",
   "description": "My personnal module to do some fun stuff :3.",
-  "version": "1.0.97",
+  "version": "1.0.98",
   "authors": [
     {
       "name": "Pat"
@@ -24,5 +24,11 @@
   ],
   "esmodules": [
     "index.js"
-  ]
+  ],
+  "styles": [
+    "styles/netherscrolls.css"
+  ],
+  "options": {
+    "NS_API_KEY": ""
+  }
 }
