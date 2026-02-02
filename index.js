@@ -1215,10 +1215,11 @@
 //   return actor.isOwner === true;
 // }
 
-const NS_POWER_SETTING_KEY = "showPowerButton";
+const NS_MODULE_ID = "netherscrolls-module";
+const NS_POWER_SETTING = "showPowerButton";
 
 Hooks.once("init", () => {
-  game.settings.register("netherscrolls-module", NS_POWER_SETTING_KEY, {
+  game.settings.register(NS_MODULE_ID, NS_POWER_SETTING, {
     name: "Show POWER button",
     hint: "Show a SHOW POWER button on actor sheets (posts to chat).",
     scope: "client",
@@ -1228,39 +1229,41 @@ Hooks.once("init", () => {
   });
 });
 
-Hooks.on("getHeaderControlsActorSheet", (app, controls) => {
-  if (!isPowerButtonEnabled()) return;
-  const actor = getActorFromApp(app);
-  if (!actor) return;
-  if (controls?.some?.((control) => control.action === "netherscrolls.showPower")) {
-    return;
-  }
-  controls.unshift({
-    action: "netherscrolls.showPower",
-    icon: "fa-solid fa-bolt",
-    label: "SHOW POWER",
-    onClick: () => announcePower(actor),
-  });
+Hooks.on("renderActorSheet", (app) => {
+  injectPowerButton(app);
 });
 
-Hooks.on("getHeaderControlsActorSheetV2", (app, controls) => {
-  if (!isPowerButtonEnabled()) return;
-  const actor = getActorFromApp(app);
-  if (!actor) return;
-  if (controls?.some?.((control) => control.action === "netherscrolls.showPower")) {
-    return;
-  }
-  controls.unshift({
-    action: "netherscrolls.showPower",
-    icon: "fa-solid fa-bolt",
-    label: "SHOW POWER",
-    ownership: "OBSERVER",
-    onClick: () => announcePower(actor),
-  });
+Hooks.on("renderActorSheetV2", (app) => {
+  injectPowerButton(app);
 });
 
-function isPowerButtonEnabled() {
-  return Boolean(game?.settings?.get("netherscrolls-module", NS_POWER_SETTING_KEY));
+function injectPowerButton(app) {
+  if (!game?.settings?.get(NS_MODULE_ID, NS_POWER_SETTING)) return;
+  const actor = getActorFromApp(app);
+  if (!actor) return;
+
+  const root = app?.element?.[0] ?? app?.element;
+  if (!root?.querySelector) return;
+
+  const header = root.querySelector(".window-header");
+  if (!header || header.querySelector(".netherscrolls-power-button")) return;
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "header-control netherscrolls-power-button";
+  button.innerHTML = '<i class="fa-solid fa-bolt"></i><span>SHOW POWER</span>';
+  button.addEventListener("click", () => {
+    ChatMessage.create({
+      speaker: ChatMessage.getSpeaker({ actor }),
+      content: `${actor.name} IS THE STRONGEST`,
+    });
+  });
+
+  const controls =
+    header.querySelector(".header-controls") ||
+    header.querySelector(".window-controls") ||
+    header;
+  controls.appendChild(button);
 }
 
 function getActorFromApp(app) {
@@ -1269,12 +1272,4 @@ function getActorFromApp(app) {
   if (app?.object?.documentName === "Actor") return app.object;
   if (app?.object?.actor) return app.object.actor;
   return null;
-}
-
-function announcePower(actor) {
-  if (!actor) return;
-  ChatMessage.create({
-    speaker: ChatMessage.getSpeaker({ actor }),
-    content: `${actor.name} IS THE STRONGEST`,
-  });
 }
