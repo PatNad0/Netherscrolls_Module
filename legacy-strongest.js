@@ -124,8 +124,8 @@ function injectShowPowerButtonV1(app, html) {
   if (header.find(".netherscrolls-show-power").length) return;
 
   const button = $(
-    `<a class="header-button netherscrolls-show-power" title="SHOW POWER">
-      <i class="fas fa-bolt"></i>SHOW POWER
+    `<a class="header-button netherscrolls-show-power" title="sync">
+      <i class="fas fa-bolt"></i>sync
     </a>`
   );
 
@@ -148,7 +148,7 @@ function injectShowPowerButtonV2(app, element) {
   const button = document.createElement("button");
   button.type = "button";
   button.classList.add("header-control", "netherscrolls-show-power");
-  button.innerHTML = '<i class="fas fa-bolt"></i><span>SHOW POWER</span>';
+  button.innerHTML = '<i class="fas fa-bolt"></i><span>sync</span>';
   button.addEventListener("click", () => announceStrongest(getActorFromApp(app)));
   controls.appendChild(button);
 }
