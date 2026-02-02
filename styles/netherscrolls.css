@@ -1,5 +1,6 @@
 .window-app .window-header .header-button.netherscrolls-sync-button,
-.window-app .window-header .header-control.netherscrolls-sync-button {
+.window-app .window-header .header-control.netherscrolls-sync-button,
+.window-app .window-header [data-action="netherscrolls.syncActor"] {
   background: linear-gradient(135deg, #1f2b2e, #355a55);
   border: 1px solid rgba(20, 30, 30, 0.6);
   border-radius: 6px;
@@ -11,12 +12,14 @@
 }
 
 .window-app .window-header .header-button.netherscrolls-sync-button:hover,
-.window-app .window-header .header-control.netherscrolls-sync-button:hover {
+.window-app .window-header .header-control.netherscrolls-sync-button:hover,
+.window-app .window-header [data-action="netherscrolls.syncActor"]:hover {
   filter: brightness(1.08);
 }
 
 .window-app .window-header .header-button.netherscrolls-sync-button i,
-.window-app .window-header .header-control.netherscrolls-sync-button i {
+.window-app .window-header .header-control.netherscrolls-sync-button i,
+.window-app .window-header [data-action="netherscrolls.syncActor"] i {
   margin-right: 0.35rem;
 }
 

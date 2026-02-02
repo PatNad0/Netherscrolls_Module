@@ -11,6 +11,7 @@ const SETTINGS = {
   lockChatScroll: "lockChatAutoScroll",
   apiKey: "nsApiKey",
   syncButton: "showSyncButton",
+  powerButton: "showPowerButton",
 };
 //something something
 Hooks.once("init", () => {
@@ -67,6 +68,16 @@ Hooks.once("init", () => {
     default: false,
     onChange: () => rerenderActorSheets(),
   });
+
+  game.settings.register(MODULE_ID, SETTINGS.powerButton, {
+    name: "Show POWER button",
+    hint: "Show a SHOW POWER button on actor sheets (posts to chat).",
+    scope: "client",
+    config: true,
+    type: Boolean,
+    default: true,
+    onChange: () => rerenderActorSheets(),
+  });
 });
 
 Hooks.once("ready", () => {
@@ -85,18 +96,38 @@ Hooks.on("createActor", (actor) => {
 
 Hooks.on("renderApplicationV1", (app, html) => {
   injectSyncButtonV1(app, html);
+  injectPowerButtonV1(app, html);
 });
 
 Hooks.on("renderApplicationV2", (app, html) => {
   injectSyncButtonV2(app, html);
+  injectPowerButtonV2(app, html);
 });
 
 Hooks.on("renderActorSheet", (app, html) => {
   injectSyncButtonV1(app, html);
+  injectPowerButtonV1(app, html);
 });
 
 Hooks.on("renderActorSheetV2", (app, html) => {
   injectSyncButtonV2(app, html);
+  injectPowerButtonV2(app, html);
+});
+
+Hooks.on("getHeaderControlsActorSheetV2", (app, controls) => {
+  if (!isSyncButtonEnabled()) return;
+  const actor = getActorFromApp(app);
+  if (!actor) return;
+  if (controls?.some?.((control) => control.action === "netherscrolls.syncActor")) {
+    return;
+  }
+  controls.unshift({
+    action: "netherscrolls.syncActor",
+    icon: "fa-solid fa-cloud-upload-alt",
+    label: "Sync to Netherscrolls",
+    ownership: "OBSERVER",
+    onClick: () => postActorSyncMessage(actor),
+  });
 });
 
 function isDnd5eSystem() {
@@ -130,7 +161,10 @@ function injectSyncButtonV1(app, html) {
   const actor = getActorFromApp(app);
   if (!actor) return;
 
-  const header = root.find(".window-header");
+  let header = root.find(".window-header");
+  if (!header?.length && app?.element?.find) {
+    header = app.element.find(".window-header");
+  }
   if (header?.length && !header.find(".netherscrolls-sync-button").length) {
     const button = $(
       `<a class="header-button netherscrolls-sync-button">
@@ -138,11 +172,15 @@ function injectSyncButtonV1(app, html) {
         <span>Sync to Netherscrolls</span>
       </a>`
     );
+    button.attr("data-action", "netherscrolls.syncActor");
     button.on("click", () => postActorSyncMessage(actor));
     header.append(button);
   }
 
-  const content = root.find(".window-content");
+  let content = root.find(".window-content");
+  if (!content?.length && app?.element?.find) {
+    content = app.element.find(".window-content");
+  }
   if (content?.length && !content.find(".netherscrolls-sync-row").length) {
     const row = $(
       `<div class="netherscrolls-sync-row">
@@ -162,16 +200,18 @@ function injectSyncButtonV2(app, html) {
   if (!isActorSheetApp(app)) return;
 
   const root = getRootElement(app, html);
-  if (!root) return;
+  const windowEl = getWindowElement(app, root);
+  if (!windowEl) return;
 
   const actor = getActorFromApp(app);
   if (!actor) return;
 
-  const header = root.querySelector(".window-header");
+  const header = windowEl.querySelector(".window-header");
   if (header && !header.querySelector(".netherscrolls-sync-button")) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "header-control netherscrolls-sync-button";
+    button.dataset.action = "netherscrolls.syncActor";
     button.innerHTML =
       '<i class="fa-solid fa-cloud-upload-alt"></i><span>Sync to Netherscrolls</span>';
     button.addEventListener("click", () => postActorSyncMessage(actor));
@@ -180,7 +220,7 @@ function injectSyncButtonV2(app, html) {
     controls.appendChild(button);
   }
 
-  const content = root.querySelector(".window-content");
+  const content = windowEl.querySelector(".window-content");
   if (content && !content.querySelector(".netherscrolls-sync-row")) {
     const row = document.createElement("div");
     row.className = "netherscrolls-sync-row";
@@ -198,6 +238,10 @@ function injectSyncButtonV2(app, html) {
 
 function isSyncButtonEnabled() {
   return Boolean(game?.settings?.get(MODULE_ID, SETTINGS.syncButton));
+}
+
+function isPowerButtonEnabled() {
+  return Boolean(game?.settings?.get(MODULE_ID, SETTINGS.powerButton));
 }
 
 function isActorSheetApp(app) {
@@ -218,9 +262,83 @@ function getActorFromApp(app) {
 function getRootElement(app, html) {
   if (html?.[0]) return html[0];
   if (html?.nodeType === 1) return html;
+  if (html?.nodeType === 11 && html.firstElementChild) {
+    return html.firstElementChild;
+  }
   if (app?.element?.[0]) return app.element[0];
   if (app?.element?.nodeType === 1) return app.element;
+  if (app?.element?.nodeType === 11 && app.element.firstElementChild) {
+    return app.element.firstElementChild;
+  }
   return null;
+}
+
+function getWindowElement(app, root) {
+  if (app?.element?.[0]) return app.element[0];
+  if (app?.element?.nodeType === 1) return app.element;
+  if (root?.classList?.contains?.("window-app")) return root;
+  return root?.closest?.(".window-app") || root;
+}
+
+function injectPowerButtonV1(app, html) {
+  if (!isPowerButtonEnabled()) return;
+  if (!isActorSheetApp(app)) return;
+
+  const root = html?.length ? html : app?.element;
+  if (!root?.length) return;
+
+  const actor = getActorFromApp(app);
+  if (!actor) return;
+
+  let header = root.find(".window-header");
+  if (!header?.length && app?.element?.find) {
+    header = app.element.find(".window-header");
+  }
+  if (!header?.length) return;
+  if (header.find(".netherscrolls-power-button").length) return;
+
+  const button = $(
+    `<a class="header-button netherscrolls-power-button">
+      <i class="fas fa-bolt"></i>
+      <span>SHOW POWER</span>
+    </a>`
+  );
+  button.attr("data-action", "netherscrolls.showPower");
+  button.on("click", () => announcePower(actor));
+  header.append(button);
+}
+
+function injectPowerButtonV2(app, html) {
+  if (!isPowerButtonEnabled()) return;
+  if (!isActorSheetApp(app)) return;
+
+  const root = getRootElement(app, html);
+  const windowEl = getWindowElement(app, root);
+  if (!windowEl) return;
+
+  const actor = getActorFromApp(app);
+  if (!actor) return;
+
+  const header = windowEl.querySelector(".window-header");
+  if (!header || header.querySelector(".netherscrolls-power-button")) return;
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "header-control netherscrolls-power-button";
+  button.dataset.action = "netherscrolls.showPower";
+  button.innerHTML = '<i class="fa-solid fa-bolt"></i><span>SHOW POWER</span>';
+  button.addEventListener("click", () => announcePower(actor));
+
+  const controls = header.querySelector(".window-controls") || header;
+  controls.appendChild(button);
+}
+
+function announcePower(actor) {
+  if (!actor) return;
+  ChatMessage.create({
+    speaker: ChatMessage.getSpeaker({ actor }),
+    content: `${actor.name} IS THE STRONGEST`,
+  });
 }
 
 function postActorSyncMessage(actor) {
