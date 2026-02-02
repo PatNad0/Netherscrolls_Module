@@ -64,7 +64,7 @@ Hooks.once("init", () => {
     scope: "client",
     config: true,
     type: Boolean,
-    default: true,
+    default: false,
     onChange: () => rerenderActorSheets(),
   });
 });
@@ -104,8 +104,12 @@ function injectSyncButton(app, html) {
   const appElement = app?.element;
   if (!appElement?.length) return;
 
-  appElement.find(".ns-actor-sync-wrap").remove();
+  const host = appElement.find(".window-content");
+  if (!host?.length) return;
+
+  host.find(".ns-actor-sync-wrap").remove();
   if (!game?.settings?.get(MODULE_ID, SETTINGS.syncButton)) return;
+  host.addClass("ns-actor-sync-host");
 
   const button = $(
     `<button type="button" class="ns-actor-sync">
@@ -117,7 +121,7 @@ function injectSyncButton(app, html) {
 
   const wrap = $('<div class="ns-actor-sync-wrap"></div>');
   wrap.append(button);
-  appElement.append(wrap);
+  host.append(wrap);
 }
 
 function rerenderActorSheets() {
