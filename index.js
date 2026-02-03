@@ -1,6 +1,7 @@
 const MODULE_ID = "netherscrolls-module";
 const PLACEHOLDER_CHARACTER_ID = "PLACEHOLDER";
 const ABILITY_KEYS = ["str", "dex", "con", "int", "wis", "cha"];
+const SYNC_ENDPOINT = "https://api.netherscrolls.ca/api/foundry/sync";
 
 const SETTINGS = {
   rerollInit: "rerollInitEachRound",
@@ -176,6 +177,7 @@ function postActorSyncMessage(actor) {
     speaker: ChatMessage.getSpeaker({ actor }),
     content,
   });
+  syncActorToApi(actor, payload);
 }
 
 function renderSyncPayload(payload) {
@@ -189,9 +191,8 @@ function buildActorSyncPayload(actor) {
   const attributes = system.attributes ?? {};
   const abilities = system.abilities ?? {};
   const { items, spells, feats } = splitActorItems(actor);
-
-  return {
-    characterId: PLACEHOLDER_CHARACTER_ID,
+  const characterId = getActorCharacterId(actor);
+  const payload = {
     characterName: actor?.name ?? "",
     proficiencyBonus: toNumber(attributes.prof),
     initiative: getInitiativeValue(attributes, abilities),
@@ -208,6 +209,8 @@ function buildActorSyncPayload(actor) {
     spells,
     feats,
   };
+  if (characterId) payload.characterId = characterId;
+  return payload;
 }
 
 function buildAbilities(abilities) {
@@ -368,6 +371,66 @@ function escapeHtml(value) {
 function toNumber(value, fallback = 0) {
   const num = Number(value);
   return Number.isFinite(num) ? num : fallback;
+}
+
+function getActorCharacterId(actor) {
+  try {
+    return actor?.getFlag?.(MODULE_ID, "characterId") ?? null;
+  } catch (err) {
+    console.warn(`${MODULE_ID} | Unable to read actor characterId flag.`, err);
+    return null;
+  }
+}
+
+async function setActorCharacterId(actor, characterId) {
+  try {
+    if (!actor?.setFlag) return;
+    await actor.setFlag(MODULE_ID, "characterId", characterId);
+  } catch (err) {
+    console.warn(`${MODULE_ID} | Unable to set actor characterId flag.`, err);
+  }
+}
+
+async function syncActorToApi(actor, payload) {
+  const apiKey = String(game?.settings?.get(MODULE_ID, SETTINGS.apiKey) ?? "").trim();
+  if (!apiKey) {
+    ui?.notifications?.warn?.(
+      "Netherscrolls API Key is missing. Set it in Module Settings."
+    );
+    return;
+  }
+
+  try {
+    const response = await fetch(SYNC_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      ui?.notifications?.warn?.(
+        `Sync failed (${response.status} ${response.statusText}).`
+      );
+      return;
+    }
+
+    const data = await response.json();
+    const responseContent = renderSyncPayload(data);
+    ChatMessage.create({
+      speaker: ChatMessage.getSpeaker({ actor }),
+      content: responseContent,
+    });
+    const characterId = data?.data?.characterId;
+    if (characterId) {
+      await setActorCharacterId(actor, characterId);
+    }
+  } catch (err) {
+    console.error("Netherscrolls sync failed.", err);
+    ui?.notifications?.error?.("Sync failed. Check console for details.");
+  }
 }
 
 function toggleRerollInitHook(enabled) {
