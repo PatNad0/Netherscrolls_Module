@@ -317,7 +317,10 @@ function splitActorItems(actor) {
     if (item.type === "spell") {
       spells.push(name);
     } else if (item.type === "feat") {
-      feats.push(name);
+      const featType = item?.system?.type?.value ?? item?.system?.type;
+      if (featType === "feat") {
+        feats.push(name);
+      }
     } else if (!ignoreTypes.has(item.type)) {
       items.push(name);
     }
