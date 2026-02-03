@@ -410,14 +410,23 @@ async function syncActorToApi(actor, payload) {
       body: JSON.stringify(payload),
     });
 
+    const data = await response.json().catch(() => null);
     if (!response.ok) {
-      ui?.notifications?.warn?.(
-        `Sync failed (${response.status} ${response.statusText}).`
-      );
+      const message =
+        data?.message ??
+        data?.error ??
+        `Sync failed (${response.status} ${response.statusText}).`;
+      ui?.notifications?.warn?.(message);
+      if (data) {
+        const errorContent = renderSyncPayload(data);
+        ChatMessage.create({
+          speaker: ChatMessage.getSpeaker({ actor }),
+          content: errorContent,
+        });
+      }
       return;
     }
 
-    const data = await response.json();
     const responseContent = renderSyncPayload(data);
     ChatMessage.create({
       speaker: ChatMessage.getSpeaker({ actor }),
