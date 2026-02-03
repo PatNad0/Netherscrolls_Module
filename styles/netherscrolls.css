@@ -1,15 +1,7 @@
 .window-app .window-header .header-button.netherscrolls-sync-button,
-.window-app .window-header .header-button.netherscrolls-hello-button,
 .window-app .window-header .header-control.netherscrolls-sync-button,
-.window-app .window-header .header-control.netherscrolls-hello-button,
-.window-app .window-header [data-action="netherscrolls.syncActor"],
-.window-app .window-header [data-action="netherscrolls.sayHello"],
 .app .app-header .header-button.netherscrolls-sync-button,
-.app .app-header .header-button.netherscrolls-hello-button,
-.app .app-header .header-control.netherscrolls-sync-button,
-.app .app-header .header-control.netherscrolls-hello-button,
-.app .app-header [data-action="netherscrolls.syncActor"],
-.app .app-header [data-action="netherscrolls.sayHello"] {
+.app .app-header .header-control.netherscrolls-sync-button {
   background: linear-gradient(135deg, #1f2b2e, #355a55);
   border: 1px solid rgba(20, 30, 30, 0.6);
   border-radius: 6px;
@@ -21,56 +13,17 @@
 }
 
 .window-app .window-header .header-button.netherscrolls-sync-button:hover,
-.window-app .window-header .header-button.netherscrolls-hello-button:hover,
 .window-app .window-header .header-control.netherscrolls-sync-button:hover,
-.window-app .window-header .header-control.netherscrolls-hello-button:hover,
-.window-app .window-header [data-action="netherscrolls.syncActor"]:hover,
-.window-app .window-header [data-action="netherscrolls.sayHello"]:hover,
 .app .app-header .header-button.netherscrolls-sync-button:hover,
-.app .app-header .header-button.netherscrolls-hello-button:hover,
-.app .app-header .header-control.netherscrolls-sync-button:hover,
-.app .app-header .header-control.netherscrolls-hello-button:hover,
-.app .app-header [data-action="netherscrolls.syncActor"]:hover,
-.app .app-header [data-action="netherscrolls.sayHello"]:hover {
+.app .app-header .header-control.netherscrolls-sync-button:hover {
   filter: brightness(1.08);
 }
 
 .window-app .window-header .header-button.netherscrolls-sync-button i,
-.window-app .window-header .header-button.netherscrolls-hello-button i,
 .window-app .window-header .header-control.netherscrolls-sync-button i,
-.window-app .window-header .header-control.netherscrolls-hello-button i,
-.window-app .window-header [data-action="netherscrolls.syncActor"] i,
-.window-app .window-header [data-action="netherscrolls.sayHello"] i,
 .app .app-header .header-button.netherscrolls-sync-button i,
-.app .app-header .header-button.netherscrolls-hello-button i,
-.app .app-header .header-control.netherscrolls-sync-button i,
-.app .app-header .header-control.netherscrolls-hello-button i,
-.app .app-header [data-action="netherscrolls.syncActor"] i,
-.app .app-header [data-action="netherscrolls.sayHello"] i {
+.app .app-header .header-control.netherscrolls-sync-button i {
   margin-right: 0.35rem;
-}
-
-.window-app .window-content .netherscrolls-sync-row {
-  padding: 0.35rem 0.5rem;
-}
-
-.window-app .window-content .netherscrolls-sync-fallback {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  padding: 0.2rem 0.5rem;
-  border-radius: 6px;
-  border: 1px solid rgba(20, 30, 30, 0.6);
-  background: linear-gradient(135deg, #1f2b2e, #355a55);
-  color: #f7f3e8;
-  font-weight: 600;
-  text-transform: none;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
-  cursor: pointer;
-}
-
-.window-app .window-content .netherscrolls-sync-fallback:hover {
-  filter: brightness(1.08);
 }
 
 .ns-sync-data {
@@ -81,42 +34,4 @@
   border: 1px solid rgba(255, 255, 255, 0.08);
   max-height: 360px;
   overflow: auto;
-}
-/* Debug button clusters for locating visible insertion points */
-.ns-debug-cluster {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: center;
-  margin: 6px 0;
-  padding: 4px;
-  border: 1px dashed rgba(255, 255, 255, 0.35);
-  background: rgba(0, 0, 0, 0.25);
-}
-
-.ns-debug-button {
-  font-size: 11px;
-  padding: 2px 6px;
-  line-height: 1.2;
-  border: 1px solid rgba(255, 255, 255, 0.35);
-  border-radius: 4px;
-  background: rgba(20, 20, 20, 0.6);
-  color: #f2f2f2;
-  text-transform: none;
-}
-
-.ns-debug-bar-top {
-  position: sticky;
-  top: 0;
-  z-index: 5;
-}
-
-.ns-debug-bar-bottom {
-  position: sticky;
-  bottom: 0;
-  z-index: 5;
-}
-
-.ns-debug-bar-side {
-  margin-bottom: 8px;
 }
