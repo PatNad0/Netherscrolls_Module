@@ -8,6 +8,7 @@ const SETTINGS = {
   npcDeathSave: "npcDeathSaveEachTurn",
   apiKey: "nsApiKey",
   syncButton: "showSyncButton",
+  debug: "debugMode",
 };
 
 Hooks.once("init", () => {
@@ -50,6 +51,15 @@ Hooks.once("init", () => {
     default: true,
     onChange: () => rerenderActorSheets(),
   });
+
+  game.settings.register(MODULE_ID, SETTINGS.debug, {
+    name: "Debug mode",
+    hint: "Show sync request/response payloads in chat.",
+    scope: "client",
+    config: true,
+    type: Boolean,
+    default: false,
+  });
 });
 
 Hooks.once("ready", () => {
@@ -87,6 +97,10 @@ function rerenderActorSheets() {
 
 function isSyncButtonEnabled() {
   return Boolean(game?.settings?.get(MODULE_ID, SETTINGS.syncButton));
+}
+
+function isDebugEnabled() {
+  return Boolean(game?.settings?.get(MODULE_ID, SETTINGS.debug));
 }
 
 function isActorSheetApp(app) {
@@ -172,11 +186,13 @@ function injectSyncButtonV2(app, element) {
 function postActorSyncMessage(actor) {
   if (!actor) return;
   const payload = buildActorSyncPayload(actor);
-  const content = renderSyncPayload(payload);
-  ChatMessage.create({
-    speaker: ChatMessage.getSpeaker({ actor }),
-    content,
-  });
+  if (isDebugEnabled()) {
+    const content = renderSyncPayload(payload);
+    ChatMessage.create({
+      speaker: ChatMessage.getSpeaker({ actor }),
+      content,
+    });
+  }
   syncActorToApi(actor, payload);
 }
 
@@ -321,21 +337,210 @@ function splitActorItems(actor) {
   const ignoreTypes = new Set(["spell", "feat", "class", "subclass", "background", "race"]);
 
   for (const item of actor?.items ?? []) {
-    const name = item?.name;
-    if (!name) continue;
+    if (!item?.name) continue;
     if (item.type === "spell") {
-      spells.push(name);
+      spells.push(buildSpellExport(item));
     } else if (item.type === "feat") {
       const featType = item?.system?.type?.value ?? item?.system?.type;
       if (featType === "feat") {
-        feats.push(name);
+        feats.push(buildFeatExport(item));
       }
     } else if (!ignoreTypes.has(item.type)) {
-      items.push(name);
+      items.push(buildItemExport(item));
     }
   }
 
   return { items, spells, feats };
+}
+
+function buildFeatExport(item) {
+  const description = getDescription(item);
+  const source = getSource(item);
+  const requirements =
+    item?.system?.requirements ??
+    item?.system?.requirement ??
+    item?.system?.prerequisites ??
+    null;
+  const ability = getFeatAbilities(item);
+  const netherscrollsId = getItemNetherId(item);
+
+  if (netherscrollsId) {
+    return { netherscrollsId, name: item?.name ?? null };
+  }
+
+  return compactObject({
+    name: item?.name ?? null,
+    description,
+    requirement: requirements || null,
+    source,
+    demifeat: null,
+    ability,
+    netherscrollsId: netherscrollsId || null,
+  });
+}
+
+function buildSpellExport(item) {
+  const system = item?.system ?? {};
+  const description = getDescription(item);
+  const source = getSource(item);
+  const components = system.components ?? {};
+  const material = system.materials?.value ?? system.material ?? null;
+  const netherscrollsId = getItemNetherId(item);
+  const damageParts = Array.isArray(system.damage?.parts)
+    ? system.damage.parts
+    : [];
+  const damage = damageParts.length
+    ? damageParts.map((part) => String(part?.[0] ?? "")).filter(Boolean).join(" + ")
+    : null;
+  const damageTypes = damageParts.length
+    ? damageParts.map((part) => part?.[1]).filter(Boolean)
+    : null;
+  const saveAbilities = Array.isArray(system.save?.ability)
+    ? system.save.ability
+    : system.save?.ability
+    ? [system.save.ability]
+    : null;
+  const componentTypes = Object.entries(components)
+    .filter(([, value]) => value)
+    .map(([key]) => key.toUpperCase());
+
+  if (netherscrollsId) {
+    return { netherscrollsId, name: item?.name ?? null };
+  }
+
+  return compactObject({
+    name: item?.name ?? null,
+    level: system.level ?? null,
+    school: system.school ?? null,
+    description,
+    source,
+    classes: null,
+    castingTime: formatActivation(system.activation),
+    range: formatRange(system.range),
+    duration: formatDuration(system.duration),
+    concentration: system.duration?.concentration ?? null,
+    ritual: system.ritual ?? null,
+    actionType: system.actionType ?? null,
+    damage,
+    summary: null,
+    componentTypes: componentTypes.length ? componentTypes : null,
+    componentMaterial: material ?? null,
+    saveAbilities,
+    damageTypes,
+    netherscrollsId: netherscrollsId || null,
+  });
+}
+
+function buildItemExport(item) {
+  const system = item?.system ?? {};
+  const description = getDescription(item);
+  const source = getSource(item);
+  const netherscrollsId = getItemNetherId(item);
+  const priceValue = system.price?.value ?? system.price ?? null;
+  const weightValue = system.weight?.value ?? system.weight ?? null;
+  const properties = Array.isArray(system.properties)
+    ? system.properties
+    : system.properties
+    ? Object.keys(system.properties).filter((key) => system.properties[key])
+    : [];
+  const isHomebrew =
+    typeof system.source?.custom === "string" && system.source.custom ? true : null;
+
+  if (netherscrollsId) {
+    return { netherscrollsId, name: item?.name ?? null };
+  }
+
+  return compactObject({
+    name: item?.name ?? null,
+    description,
+    type: item?.type ?? null,
+    rarity: system.rarity ?? null,
+    attunement: system.attunement ?? null,
+    price: priceValue != null ? { gp: priceValue } : null,
+    weight: weightValue != null ? { lb: weightValue } : null,
+    source,
+    properties: properties.length ? properties : null,
+    armor: system.armor ?? {},
+    tags: null,
+    isHomebrew,
+    netherscrollsId: netherscrollsId || null,
+  });
+}
+
+function getFeatAbilities(item) {
+  const advances = item?.system?.advancement;
+  if (!Array.isArray(advances)) return null;
+  const abilities = [];
+  for (const adv of advances) {
+    if (adv?.type !== "AbilityScoreImprovement") continue;
+    const value = adv?.value ?? {};
+    const chosen = Object.keys(value).filter((key) => value[key]);
+    abilities.push(...chosen);
+  }
+  return abilities.length ? abilities : null;
+}
+
+function getSource(item) {
+  const source = item?.system?.source ?? {};
+  const value = source.custom || source.book || source.rules || null;
+  return value || "Foundry";
+}
+
+function getDescription(item) {
+  const value = item?.system?.description?.value ?? "";
+  if (foundry?.utils?.stripHTML) {
+    return foundry.utils.stripHTML(value);
+  }
+  return String(value).replace(/<[^>]*>/g, "").trim();
+}
+
+function formatActivation(activation) {
+  if (!activation) return null;
+  const type = activation.type ?? "";
+  const value = activation.value ?? "";
+  if (!type && value === "") return null;
+  if (value === "" || value == null) return type || null;
+  return `${value} ${type}`.trim();
+}
+
+function formatRange(range) {
+  if (!range) return null;
+  const value = range.value ?? range.distance ?? "";
+  const units = range.units ?? range.unit ?? "";
+  if (!value && !units) return null;
+  return `${value} ${units}`.trim();
+}
+
+function formatDuration(duration) {
+  if (!duration) return null;
+  const value = duration.value ?? "";
+  const units = duration.units ?? "";
+  if (!value && !units) return null;
+  return `${value} ${units}`.trim();
+}
+
+function compactObject(value) {
+  if (!value || typeof value !== "object") return value;
+  const entries = Object.entries(value).filter(([, val]) => val !== null);
+  return Object.fromEntries(entries);
+}
+
+function getItemNetherId(item) {
+  try {
+    return item?.getFlag?.(MODULE_ID, "netherscrollsId") ?? null;
+  } catch (err) {
+    console.warn(`${MODULE_ID} | Unable to read item netherscrollsId flag.`, err);
+    return null;
+  }
+}
+
+async function setItemNetherId(item, id) {
+  try {
+    if (!item?.setFlag) return;
+    await item.setFlag(MODULE_ID, "netherscrollsId", id);
+  } catch (err) {
+    console.warn(`${MODULE_ID} | Unable to set item netherscrollsId flag.`, err);
+  }
 }
 
 function getInitiativeValue(attributes, abilities) {
@@ -413,11 +618,12 @@ async function syncActorToApi(actor, payload) {
     const data = await response.json().catch(() => null);
     if (!response.ok) {
       const message =
+        data?.error?.message ??
         data?.message ??
-        data?.error ??
+        (typeof data?.error === "string" ? data.error : null) ??
         `Sync failed (${response.status} ${response.statusText}).`;
-      ui?.notifications?.warn?.(message);
-      if (data) {
+      ui?.notifications?.warn?.(`Sync failed: ${message}`);
+      if (data && isDebugEnabled()) {
         const errorContent = renderSyncPayload(data);
         ChatMessage.create({
           speaker: ChatMessage.getSpeaker({ actor }),
@@ -427,15 +633,20 @@ async function syncActorToApi(actor, payload) {
       return;
     }
 
-    const responseContent = renderSyncPayload(data);
-    ChatMessage.create({
-      speaker: ChatMessage.getSpeaker({ actor }),
-      content: responseContent,
-    });
+    if (data && isDebugEnabled()) {
+      const responseContent = renderSyncPayload(data);
+      ChatMessage.create({
+        speaker: ChatMessage.getSpeaker({ actor }),
+        content: responseContent,
+      });
+    }
     const characterId = data?.data?.characterId;
     if (characterId) {
       await setActorCharacterId(actor, characterId);
     }
+    await applyLinkedIds(actor, data?.linked);
+    const name = data?.data?.name ?? payload?.characterName ?? actor?.name ?? "actor";
+    ui?.notifications?.info?.(`Sync success: ${name}`);
   } catch (err) {
     console.error("Netherscrolls sync failed.", err);
     ui?.notifications?.error?.("Sync failed. Check console for details.");
@@ -573,4 +784,38 @@ async function rollNpcDeathSave(actor) {
     "system.attributes.death.failure": failure,
     "system.attributes.death.stable": success >= 3,
   });
+}
+
+async function applyLinkedIds(actor, linked) {
+  if (!actor || !linked) return;
+  const itemLinks = Array.isArray(linked.items) ? linked.items : [];
+  const spellLinks = Array.isArray(linked.spells) ? linked.spells : [];
+  const featLinks = Array.isArray(linked.feats) ? linked.feats : [];
+
+  if (!itemLinks.length && !spellLinks.length && !featLinks.length) return;
+
+  const byName = new Map();
+  for (const item of actor.items ?? []) {
+    if (!item?.name) continue;
+    byName.set(`${item.type}:${item.name}`, item);
+  }
+
+  const apply = async (links, type) => {
+    for (const link of links) {
+      const id = link?.id;
+      const name = link?.name;
+      if (!id || !name) continue;
+      const item = byName.get(`${type}:${name}`);
+      if (!item) continue;
+      await setItemNetherId(item, id);
+    }
+  };
+
+  await apply(itemLinks, "weapon");
+  await apply(itemLinks, "equipment");
+  await apply(itemLinks, "consumable");
+  await apply(itemLinks, "tool");
+  await apply(itemLinks, "loot");
+  await apply(spellLinks, "spell");
+  await apply(featLinks, "feat");
 }
