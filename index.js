@@ -354,6 +354,7 @@ function splitActorItems(actor) {
 }
 
 function buildFeatExport(item) {
+  const name = normalizeNetherscrollsName(item?.name);
   const description = getDescription(item);
   const source = getSource(item);
   const requirements =
@@ -365,11 +366,11 @@ function buildFeatExport(item) {
   const netherscrollsId = getItemNetherId(item);
 
   if (netherscrollsId) {
-    return { netherscrollsId, name: item?.name ?? null };
+    return { netherscrollsId, name };
   }
 
   return compactObject({
-    name: item?.name ?? null,
+    name,
     description,
     requirement: requirements || null,
     source,
@@ -381,6 +382,7 @@ function buildFeatExport(item) {
 
 function buildSpellExport(item) {
   const system = item?.system ?? {};
+  const name = normalizeNetherscrollsName(item?.name);
   const description = getDescription(item);
   const source = getSource(item);
   const components = system.components ?? {};
@@ -405,11 +407,11 @@ function buildSpellExport(item) {
     .map(([key]) => key.toUpperCase());
 
   if (netherscrollsId) {
-    return { netherscrollsId, name: item?.name ?? null };
+    return { netherscrollsId, name };
   }
 
   return compactObject({
-    name: item?.name ?? null,
+    name,
     level: system.level ?? null,
     school: system.school ?? null,
     description,
@@ -433,6 +435,7 @@ function buildSpellExport(item) {
 
 function buildItemExport(item) {
   const system = item?.system ?? {};
+  const name = normalizeNetherscrollsName(item?.name);
   const description = getDescription(item);
   const source = getSource(item);
   const netherscrollsId = getItemNetherId(item);
@@ -447,11 +450,11 @@ function buildItemExport(item) {
     typeof system.source?.custom === "string" && system.source.custom ? true : null;
 
   if (netherscrollsId) {
-    return { netherscrollsId, name: item?.name ?? null };
+    return { netherscrollsId, name };
   }
 
   return compactObject({
-    name: item?.name ?? null,
+    name,
     description,
     type: item?.type ?? null,
     rarity: system.rarity ?? null,
@@ -492,6 +495,14 @@ function getDescription(item) {
     return foundry.utils.stripHTML(value);
   }
   return String(value).replace(/<[^>]*>/g, "").trim();
+}
+
+function normalizeNetherscrollsName(name) {
+  if (!name) return "";
+  return String(name)
+    .replace(/\s*\(Legacy\)\s*/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function formatActivation(activation) {
@@ -797,7 +808,10 @@ async function applyLinkedIds(actor, linked) {
   const byName = new Map();
   for (const item of actor.items ?? []) {
     if (!item?.name) continue;
-    byName.set(`${item.type}:${item.name}`, item);
+    const key = `${item.type}:${normalizeNetherscrollsName(item.name).toLowerCase()}`;
+    const bucket = byName.get(key);
+    if (bucket) bucket.push(item);
+    else byName.set(key, [item]);
   }
 
   const apply = async (links, type) => {
@@ -805,9 +819,12 @@ async function applyLinkedIds(actor, linked) {
       const id = link?.id;
       const name = link?.name;
       if (!id || !name) continue;
-      const item = byName.get(`${type}:${name}`);
-      if (!item) continue;
-      await setItemNetherId(item, id);
+      const key = `${type}:${normalizeNetherscrollsName(name).toLowerCase()}`;
+      const items = byName.get(key);
+      if (!items) continue;
+      for (const item of items) {
+        await setItemNetherId(item, id);
+      }
     }
   };
 
