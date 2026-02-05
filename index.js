@@ -312,7 +312,6 @@ function buildSkills(actor, skills, abilities, bonuses, profBonus) {
       ability: abilityKey,
       prof,
       misc: toNumber(total - base),
-      bonus: toNumber(total),
     };
   }
 
