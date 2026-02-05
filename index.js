@@ -1,6 +1,26 @@
 const MODULE_ID = "netherscrolls-module";
 const PLACEHOLDER_CHARACTER_ID = "PLACEHOLDER";
 const ABILITY_KEYS = ["str", "dex", "con", "int", "wis", "cha"];
+const SKILL_KEY_TO_NAME = {
+  acr: "acrobatics",
+  ani: "animalHandling",
+  arc: "arcana",
+  ath: "athletics",
+  dec: "deception",
+  his: "history",
+  ins: "insight",
+  itm: "intimidation",
+  inv: "investigation",
+  med: "medicine",
+  nat: "nature",
+  prc: "perception",
+  prf: "performance",
+  per: "persuasion",
+  rel: "religion",
+  slt: "sleightOfHand",
+  ste: "stealth",
+  sur: "survival",
+};
 const SYNC_ENDPOINT = "https://api.netherscrolls.ca/api/foundry/sync";
 
 const SETTINGS = {
@@ -221,6 +241,7 @@ function buildActorSyncPayload(actor) {
     spellSlots: buildSpellSlots(system.spells),
     abilities: buildAbilities(abilities),
     savingThrows: buildSavingThrows(abilities, attributes.prof),
+    skills: buildSkills(actor, system.skills, abilities, system.bonuses, attributes.prof),
     items,
     spells,
     feats,
@@ -260,6 +281,67 @@ function buildSavingThrows(abilities, profBonus) {
     result[key] = entry;
   }
   return result;
+}
+
+function buildSkills(actor, skills, abilities, bonuses, profBonus) {
+  const result = {};
+  if (!skills || typeof skills !== "object") return result;
+
+  const pb = toNumber(profBonus);
+  const rollData = typeof actor?.getRollData === "function" ? actor.getRollData() : null;
+  const global = bonuses?.abilities ?? {};
+
+  for (const [key, skill] of Object.entries(skills)) {
+    if (!skill || typeof skill !== "object") continue;
+
+    const outKey = SKILL_KEY_TO_NAME[key] ?? key;
+    const abilityKey = skill?.ability ?? null;
+    const prof = toNumber(skill?.value ?? skill?.proficient ?? skill?.prof);
+    const ability = abilityKey ? abilities?.[abilityKey] ?? {} : {};
+
+    const abilityMod = getAbilityMod(ability);
+    const base = abilityMod + getProficiencyContribution(pb, prof);
+    const total = getSkillTotalBonus(skill, base, rollData, {
+      skillCheck: skill?.bonuses?.check,
+      abilityCheck: ability?.bonuses?.check,
+      globalAbilityCheck: global?.check,
+      globalSkill: global?.skill,
+    });
+
+    result[outKey] = {
+      ability: abilityKey,
+      prof,
+      misc: toNumber(total - base),
+      bonus: toNumber(total),
+    };
+  }
+
+  return result;
+}
+
+function getProficiencyContribution(proficiencyBonus, prof) {
+  const pb = toNumber(proficiencyBonus);
+  const p = toNumber(prof);
+  if (!pb || !p) return 0;
+  // Match 5e / dnd5e rounding rules for half-proficiency.
+  return Math.floor(pb * p);
+}
+
+function getSkillTotalBonus(skill, base, rollData, bonusFormulas) {
+  const direct =
+    toNumberOrNull(skill?.total) ??
+    toNumberOrNull(skill?.mod) ??
+    toNumberOrNull(skill?.bonus) ??
+    toNumberOrNull(skill?.check?.total) ??
+    toNumberOrNull(skill?.check?.bonus);
+  if (direct != null) return direct;
+
+  const misc =
+    evalDeterministicFormula(bonusFormulas?.skillCheck, rollData) +
+    evalDeterministicFormula(bonusFormulas?.abilityCheck, rollData) +
+    evalDeterministicFormula(bonusFormulas?.globalAbilityCheck, rollData) +
+    evalDeterministicFormula(bonusFormulas?.globalSkill, rollData);
+  return base + misc;
 }
 
 function buildSpellSlots(spells) {
@@ -497,6 +579,37 @@ function getDescription(item) {
   return String(value).replace(/<[^>]*>/g, "").trim();
 }
 
+function toTrimmedStringOrNull(value) {
+  if (value == null) return null;
+  const str = String(value).trim();
+  return str ? str : null;
+}
+
+function evalDeterministicFormula(formula, rollData) {
+  const raw = toTrimmedStringOrNull(formula);
+  if (!raw) return 0;
+
+  // Avoid randomness; these should be flat numeric bonuses (sometimes with @data references).
+  if (/\d+d\d+/i.test(raw)) return 0;
+
+  // Roll formulas like "+1" are not always valid standalone; prefix with 0.
+  const expr = /^[+-]/.test(raw) ? `0 ${raw}` : raw;
+
+  try {
+    if (typeof Roll === "function") {
+      const roll = new Roll(expr, rollData ?? {});
+      const evaluated = roll.evaluate?.({ async: false });
+      const total = Number((evaluated ?? roll)?.total);
+      return Number.isFinite(total) ? total : 0;
+    }
+  } catch {
+    // Fall back to a plain numeric parse.
+  }
+
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 function normalizeNetherscrollsName(name) {
   if (!name) return "";
   return String(name)
@@ -547,7 +660,9 @@ function getItemNetherId(item) {
 
 async function setItemNetherId(item, id) {
   try {
-    if (!item?.setFlag) return;
+    if (!item?.setFlag || !id) return;
+    const current = item?.getFlag?.(MODULE_ID, "netherscrollsId") ?? null;
+    if (current === id) return;
     await item.setFlag(MODULE_ID, "netherscrollsId", id);
   } catch (err) {
     console.warn(`${MODULE_ID} | Unable to set item netherscrollsId flag.`, err);
@@ -589,6 +704,11 @@ function toNumber(value, fallback = 0) {
   return Number.isFinite(num) ? num : fallback;
 }
 
+function toNumberOrNull(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
 function getActorCharacterId(actor) {
   try {
     return actor?.getFlag?.(MODULE_ID, "characterId") ?? null;
@@ -600,7 +720,9 @@ function getActorCharacterId(actor) {
 
 async function setActorCharacterId(actor, characterId) {
   try {
-    if (!actor?.setFlag) return;
+    if (!actor?.setFlag || !characterId) return;
+    const current = actor?.getFlag?.(MODULE_ID, "characterId") ?? null;
+    if (current === characterId) return;
     await actor.setFlag(MODULE_ID, "characterId", characterId);
   } catch (err) {
     console.warn(`${MODULE_ID} | Unable to set actor characterId flag.`, err);
