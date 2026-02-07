@@ -171,7 +171,7 @@ function registerEnhancedDamageContextOption(options) {
     callback: async (li) => {
       const message = getContextMenuMessage(li);
       if (!canEnhanceDamageMessage(message)) return;
-      await repostDamageMessage(message);
+      await runEnhanceDamageFlow(message);
     },
   });
 }
@@ -228,9 +228,345 @@ function canEnhanceDamageMessage(message) {
   });
 }
 
-async function repostDamageMessage(message) {
+async function runEnhanceDamageFlow(message) {
+  const buckets = collectEnhanceBuckets(message);
+  if (!buckets.length) {
+    ui?.notifications?.warn?.("Enhance: no damage dice were found in this message.");
+    return;
+  }
+
+  const selectedCounts = await promptEnhanceRerollCounts(buckets);
+  if (!selectedCounts) return;
+
+  await repostDamageMessage(message, buckets, selectedCounts);
+}
+
+function collectEnhanceBuckets(message) {
+  const buckets = new Map();
+  const messageRolls = Array.isArray(message?.rolls) ? message.rolls : [];
+
+  for (let rollIndex = 0; rollIndex < messageRolls.length; rollIndex += 1) {
+    const roll = messageRolls[rollIndex];
+    if (!isDamageLikeRoll(message, roll, rollIndex)) continue;
+
+    const damageType = getRollDamageType(message, roll, rollIndex);
+    const terms = Array.isArray(roll?.terms) ? roll.terms : [];
+
+    for (let termIndex = 0; termIndex < terms.length; termIndex += 1) {
+      const term = terms[termIndex];
+      const faces = Number(term?.faces);
+      const results = Array.isArray(term?.results) ? term.results : null;
+      if (!Number.isFinite(faces) || faces <= 0 || !results?.length) continue;
+
+      const key = `${damageType}\u0000${faces}`;
+      const bucket =
+        buckets.get(key) ??
+        {
+          key,
+          damageType,
+          faces,
+          dice: [],
+        };
+      buckets.set(key, bucket);
+
+      for (let resultIndex = 0; resultIndex < results.length; resultIndex += 1) {
+        const result = results[resultIndex];
+        if (result?.active === false || result?.discarded === true) continue;
+        const value = Number(result?.result);
+        if (!Number.isFinite(value)) continue;
+
+        bucket.dice.push({
+          value,
+          rollIndex,
+          termIndex,
+          resultIndex,
+          faces,
+        });
+      }
+    }
+  }
+
+  const list = Array.from(buckets.values()).filter((bucket) => bucket.dice.length > 0);
+  for (const bucket of list) {
+    bucket.dice.sort(
+      (a, b) =>
+        a.value - b.value ||
+        a.rollIndex - b.rollIndex ||
+        a.termIndex - b.termIndex ||
+        a.resultIndex - b.resultIndex
+    );
+  }
+
+  list.sort((a, b) => {
+    const byType = String(a.damageType).localeCompare(String(b.damageType));
+    return byType || a.faces - b.faces;
+  });
+
+  return list;
+}
+
+function isDamageLikeRoll(message, roll, rollIndex) {
+  const rollType = String(roll?.options?.type ?? "").toLowerCase();
+  if (/(damage|healing)/.test(rollType)) return true;
+
+  const rollName = String(roll?.constructor?.name ?? "");
+  if (/damage/i.test(rollName)) return true;
+
+  const entry = getDnd5eFlaggedRollEntry(message, rollIndex);
+  const entryType = String(entry?.type ?? "").toLowerCase();
+  if (/(damage|healing)/.test(entryType)) return true;
+
+  if ((Array.isArray(message?.rolls) ? message.rolls.length : 0) === 1) {
+    const messageType = String(message?.flags?.dnd5e?.roll?.type ?? "").toLowerCase();
+    if (/(damage|healing)/.test(messageType)) return true;
+  }
+
+  return false;
+}
+
+function getDnd5eFlaggedRollEntry(message, rollIndex) {
+  const flagged = message?.flags?.dnd5e?.rolls;
+  if (!Array.isArray(flagged)) return null;
+  return flagged[rollIndex] ?? null;
+}
+
+function getRollDamageType(message, roll, rollIndex) {
+  const entry = getDnd5eFlaggedRollEntry(message, rollIndex);
+  const single = message?.flags?.dnd5e?.roll ?? {};
+  const options = roll?.options ?? {};
+
+  const candidates = [
+    options.damageType,
+    Array.isArray(options.damageTypes) ? options.damageTypes.join(", ") : null,
+    entry?.damageType,
+    Array.isArray(entry?.damageTypes) ? entry.damageTypes.join(", ") : null,
+    single?.damageType,
+    Array.isArray(single?.damageTypes) ? single.damageTypes.join(", ") : null,
+    options.flavor,
+  ];
+
+  for (const candidate of candidates) {
+    const value = toTrimmedStringOrNull(candidate);
+    if (value) return value;
+  }
+
+  const kind = String(options.type ?? entry?.type ?? single?.type ?? "").toLowerCase();
+  if (kind === "healing") return "healing";
+  return "damage";
+}
+
+function renderEnhanceDialogContent(buckets) {
+  const rows = buckets
+    .map((bucket, index) => {
+      const damageType = escapeHtml(String(bucket.damageType ?? "damage"));
+      const diceText = escapeHtml(bucket.dice.map((die) => die.value).join(", "));
+      return `
+        <tr>
+          <td>${damageType}</td>
+          <td>d${bucket.faces}</td>
+          <td>${diceText}</td>
+          <td>
+            <input
+              type="number"
+              min="0"
+              max="${bucket.dice.length}"
+              value="0"
+              step="1"
+              data-enhance-bucket="${index}"
+              style="width: 5em;"
+            />
+          </td>
+        </tr>
+      `;
+    })
+    .join("");
+
+  return `
+    <form class="ns-enhance-damage">
+      <p>Set how many of the lowest dice to reroll for each damage bucket.</p>
+      <table style="width: 100%; border-collapse: collapse;">
+        <thead>
+          <tr>
+            <th style="text-align: left;">Damage Type</th>
+            <th style="text-align: left;">Die</th>
+            <th style="text-align: left;">Rolled Dice</th>
+            <th style="text-align: left;">Reroll Count</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </form>
+  `;
+}
+
+function readEnhanceDialogCounts(html, buckets) {
+  const counts = {};
+  for (let index = 0; index < buckets.length; index += 1) {
+    const bucket = buckets[index];
+    const input =
+      html?.find?.(`[data-enhance-bucket="${index}"]`)?.first?.() ??
+      html?.find?.(`[data-enhance-bucket="${index}"]`);
+    const raw = typeof input?.val === "function" ? input.val() : input?.value;
+    const amount = Math.floor(toNumber(raw, 0));
+    counts[bucket.key] = Math.max(0, Math.min(bucket.dice.length, amount));
+  }
+  return counts;
+}
+
+async function promptEnhanceRerollCounts(buckets) {
+  const content = renderEnhanceDialogContent(buckets);
+
+  if (typeof Dialog === "function") {
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = (value) => {
+        if (settled) return;
+        settled = true;
+        resolve(value);
+      };
+
+      const dialog = new Dialog({
+        title: "Enhance Damage",
+        content,
+        buttons: {
+          apply: {
+            icon: '<i class="fas fa-check"></i>',
+            label: "Reroll",
+            callback: (html) => done(readEnhanceDialogCounts(html, buckets)),
+          },
+          cancel: {
+            icon: '<i class="fas fa-times"></i>',
+            label: "Cancel",
+            callback: () => done(null),
+          },
+        },
+        default: "apply",
+        close: () => done(null),
+      });
+
+      dialog.render(true);
+    });
+  }
+
+  const fallback = {};
+  for (const bucket of buckets) {
+    fallback[bucket.key] = 0;
+  }
+  return fallback;
+}
+
+function randomDieResult(faces) {
+  const sides = Math.max(1, Math.floor(toNumber(faces, 0)));
+  const uniform =
+    typeof CONFIG?.Dice?.randomUniform === "function" ? CONFIG.Dice.randomUniform() : Math.random();
+  return Math.floor(uniform * sides) + 1;
+}
+
+function recomputeRollData(rollData) {
+  if (!rollData || typeof rollData !== "object") return rollData;
+  try {
+    if (typeof Roll?.fromData === "function") {
+      const roll = Roll.fromData(rollData);
+      if (typeof roll?._evaluateTotal === "function") {
+        roll._total = roll._evaluateTotal();
+      } else if (Number.isFinite(Number(roll?.total))) {
+        roll._total = Number(roll.total);
+      }
+      return typeof roll?.toJSON === "function" ? roll.toJSON() : rollData;
+    }
+  } catch (err) {
+    console.warn(`${MODULE_ID} | Unable to recompute enhanced roll total.`, err);
+  }
+
+  const fallbackTotal = computeSimpleRollTotal(rollData?.terms);
+  if (Number.isFinite(fallbackTotal)) {
+    rollData.total = fallbackTotal;
+    rollData._total = fallbackTotal;
+    rollData.result = String(fallbackTotal);
+  }
+  return rollData;
+}
+
+function computeSimpleRollTotal(terms) {
+  if (!Array.isArray(terms) || !terms.length) return null;
+
+  let total = 0;
+  let hasValue = false;
+  let operator = "+";
+
+  for (const term of terms) {
+    const op = String(term?.operator ?? "");
+    if (["+", "-", "*", "/"].includes(op)) {
+      operator = op;
+      continue;
+    }
+
+    const value = getSimpleTermTotal(term);
+    if (!Number.isFinite(value)) continue;
+    hasValue = true;
+
+    if (operator === "+") total += value;
+    else if (operator === "-") total -= value;
+    else if (operator === "*") total *= value;
+    else if (operator === "/") total = value === 0 ? total : total / value;
+    operator = "+";
+  }
+
+  return hasValue ? total : null;
+}
+
+function getSimpleTermTotal(term) {
+  if (!term || typeof term !== "object") return null;
+
+  const results = Array.isArray(term?.results) ? term.results : null;
+  if (results?.length) {
+    return results.reduce((sum, result) => {
+      if (result?.active === false || result?.discarded === true) return sum;
+      const value = Number(result?.result);
+      return Number.isFinite(value) ? sum + value : sum;
+    }, 0);
+  }
+
+  const number = Number(term?.number);
+  if (Number.isFinite(number)) return number;
+
+  const total = Number(term?.total);
+  if (Number.isFinite(total)) return total;
+
+  return null;
+}
+
+function applyEnhanceRerolls(source, buckets, selectedCounts) {
+  const rolls = Array.isArray(source?.rolls) ? source.rolls : [];
+  const changedRollIndices = new Set();
+
+  for (const bucket of buckets) {
+    const rawCount = selectedCounts?.[bucket.key] ?? 0;
+    const count = Math.max(0, Math.min(bucket.dice.length, Math.floor(toNumber(rawCount, 0))));
+    if (count <= 0) continue;
+
+    for (const die of bucket.dice.slice(0, count)) {
+      const result =
+        rolls?.[die.rollIndex]?.terms?.[die.termIndex]?.results?.[die.resultIndex] ?? null;
+      if (!result) continue;
+      result.result = randomDieResult(die.faces);
+      changedRollIndices.add(die.rollIndex);
+    }
+  }
+
+  for (const rollIndex of changedRollIndices) {
+    const rollData = rolls[rollIndex];
+    if (!rollData) continue;
+    rolls[rollIndex] = recomputeRollData(rollData);
+  }
+}
+
+async function repostDamageMessage(message, buckets = null, selectedCounts = null) {
   try {
     const source = foundry?.utils?.deepClone?.(message.toObject()) ?? message.toObject();
+    if (Array.isArray(buckets) && selectedCounts) {
+      applyEnhanceRerolls(source, buckets, selectedCounts);
+    }
     delete source._id;
     delete source._stats;
     source.user = game?.user?.id ?? source.user;
