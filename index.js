@@ -818,7 +818,10 @@ function buildRerollInitHandler() {
     setTimeout(async () => {
       try {
         await combat.resetAll({ updateTurn: false });
-        await combat.rollAll({ updateTurn: false });
+        await combat.rollAll({
+          updateTurn: false,
+          messageOptions: { create: false },
+        });
         await combat.update({ turn: 0 });
       } catch (err) {
         console.error("Reroll each round FAILED:", err);
