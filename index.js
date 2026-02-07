@@ -390,6 +390,9 @@ function getRollDamageType(message, roll, rollIndex) {
   const contentType = getContentDamageTypeByRollIndex(message, rollIndex);
   if (contentType) return contentType;
 
+  const itemType = getItemDamageTypeByRollIndex(message, rollIndex);
+  if (itemType) return itemType;
+
   const kind = String(options.type ?? entry?.type ?? single?.type ?? "").toLowerCase();
   if (kind === "healing") return "healing";
   return "damage";
@@ -453,6 +456,87 @@ function getContentDamageTypeByRollIndex(message, rollIndex) {
 
 function escapeRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function getItemDamageTypeByRollIndex(message, rollIndex) {
+  const item = resolveMessageItem(message);
+  if (!item) return null;
+
+  const parts = Array.isArray(item?.system?.damage?.parts) ? item.system.damage.parts : [];
+  if (!parts.length) return null;
+
+  const types = parts
+    .map((part) => normalizeDamageTypeLabel(part?.[1]))
+    .filter((value) => Boolean(value));
+  if (!types.length) return null;
+
+  return types[rollIndex] ?? (types.length === 1 ? types[0] : null);
+}
+
+function resolveMessageItem(message) {
+  const flags = message?.flags?.dnd5e ?? {};
+  const rollFlag = flags?.roll ?? {};
+
+  const uuidCandidates = [
+    rollFlag?.itemUuid,
+    flags?.itemUuid,
+    rollFlag?.item?.uuid,
+    flags?.item?.uuid,
+    message?.flags?.itemUuid,
+  ];
+  for (const uuid of uuidCandidates) {
+    const item = resolveItemByUuid(uuid);
+    if (item) return item;
+  }
+
+  const itemIdCandidates = [
+    rollFlag?.itemId,
+    flags?.itemId,
+    rollFlag?.item?.id,
+    flags?.item?.id,
+  ];
+  const actor = resolveMessageActor(message);
+  for (const itemId of itemIdCandidates) {
+    const id = toTrimmedStringOrNull(itemId);
+    if (!id || !actor?.items?.get) continue;
+    const item = actor.items.get(id);
+    if (item) return item;
+  }
+
+  return null;
+}
+
+function resolveItemByUuid(uuid) {
+  const id = toTrimmedStringOrNull(uuid);
+  if (!id) return null;
+  try {
+    if (typeof fromUuidSync === "function") {
+      const doc = fromUuidSync(id);
+      if (doc?.documentName === "Item") return doc;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function resolveMessageActor(message) {
+  const speaker = message?.speaker ?? {};
+  const actorId = toTrimmedStringOrNull(speaker?.actor);
+  if (actorId && game?.actors?.get) {
+    const actor = game.actors.get(actorId);
+    if (actor) return actor;
+  }
+
+  const sceneId = toTrimmedStringOrNull(speaker?.scene);
+  const tokenId = toTrimmedStringOrNull(speaker?.token);
+  if (!sceneId || !tokenId) return null;
+
+  const scene =
+    game?.scenes?.get?.(sceneId) ??
+    (canvas?.scene?.id === sceneId ? canvas.scene : null);
+  const token = scene?.tokens?.get?.(tokenId);
+  return token?.actor ?? null;
 }
 
 function extractDamageTypeTagsFromFormula(formula) {
@@ -837,8 +921,30 @@ function getSimpleTermTotal(term) {
   return null;
 }
 
-function applyEnhanceRerolls(source, buckets, selectedCounts) {
-  const rolls = Array.isArray(source?.rolls) ? source.rolls : [];
+function applyEnhanceRerolls(source, message, buckets, selectedCounts) {
+  const sourceRolls = Array.isArray(source?.rolls) ? source.rolls : [];
+  const messageRolls = Array.isArray(message?.rolls) ? message.rolls : [];
+  const maxIndex =
+    Math.max(sourceRolls.length, messageRolls.length, getMaxEnhanceRollIndex(buckets) + 1) || 0;
+  const rollFormats = [];
+  const rolls = [];
+
+  for (let i = 0; i < maxIndex; i += 1) {
+    const sourceEntry = sourceRolls[i];
+    rollFormats[i] = getRollEntryFormat(sourceEntry);
+
+    let rollData = getRollDataObject(sourceEntry);
+    if (!hasRollTerms(rollData)) {
+      rollData = getRollDataObject(messageRolls[i]);
+    }
+    if (hasRollTerms(rollData)) {
+      rolls[i] = rollData;
+      continue;
+    }
+
+    rolls[i] = null;
+  }
+
   const changedRollIndices = new Set();
   let changedDiceCount = 0;
 
@@ -848,8 +954,7 @@ function applyEnhanceRerolls(source, buckets, selectedCounts) {
     if (count <= 0) continue;
 
     for (const die of bucket.dice.slice(0, count)) {
-      const result =
-        rolls?.[die.rollIndex]?.terms?.[die.termIndex]?.results?.[die.resultIndex] ?? null;
+      const result = rolls?.[die.rollIndex]?.terms?.[die.termIndex]?.results?.[die.resultIndex] ?? null;
       if (!result) continue;
       result.result = randomDieResult(die.faces);
       changedRollIndices.add(die.rollIndex);
@@ -863,6 +968,13 @@ function applyEnhanceRerolls(source, buckets, selectedCounts) {
     rolls[rollIndex] = recomputeRollData(rollData);
   }
 
+  source.rolls = rolls
+    .map((rollData, index) => {
+      if (rollData == null) return sourceRolls[index] ?? null;
+      return serializeRollDataEntry(rollData, rollFormats[index]);
+    })
+    .filter((entry) => entry != null);
+
   return changedDiceCount;
 }
 
@@ -871,7 +983,7 @@ async function repostDamageMessage(message, buckets = null, selectedCounts = nul
     const source = foundry?.utils?.deepClone?.(message.toObject()) ?? message.toObject();
     let changedDiceCount = 0;
     if (Array.isArray(buckets) && selectedCounts) {
-      changedDiceCount = applyEnhanceRerolls(source, buckets, selectedCounts);
+      changedDiceCount = applyEnhanceRerolls(source, message, buckets, selectedCounts);
       const requested = getSelectedEnhanceCountTotal(selectedCounts);
       if (requested > 0 && changedDiceCount === 0) {
         ui?.notifications?.warn?.("Enhance: no dice could be rerolled from this message.");
@@ -887,6 +999,103 @@ async function repostDamageMessage(message, buckets = null, selectedCounts = nul
     console.error(`${MODULE_ID} | Enhance damage failed.`, err);
     ui?.notifications?.error?.("Enhance damage failed. Check console for details.");
   }
+}
+
+function getMaxEnhanceRollIndex(buckets) {
+  if (!Array.isArray(buckets) || !buckets.length) return -1;
+  let max = -1;
+  for (const bucket of buckets) {
+    for (const die of bucket?.dice ?? []) {
+      const idx = Number(die?.rollIndex);
+      if (Number.isFinite(idx) && idx > max) max = idx;
+    }
+  }
+  return max;
+}
+
+function hasRollTerms(rollData) {
+  return Array.isArray(rollData?.terms) && rollData.terms.length > 0;
+}
+
+function getRollEntryFormat(entry) {
+  if (typeof entry === "string") return "string";
+  if (entry && typeof entry === "object") return "object";
+  return "object";
+}
+
+function getRollDataObject(entry) {
+  if (!entry) return null;
+
+  if (typeof entry === "string") {
+    try {
+      const parsed = JSON.parse(entry);
+      return parsed && typeof parsed === "object" ? parsed : null;
+    } catch {
+      try {
+        if (typeof Roll?.fromJSON === "function") {
+          const roll = Roll.fromJSON(entry);
+          return getRollDataObject(roll);
+        }
+      } catch {
+        return null;
+      }
+      return null;
+    }
+  }
+
+  if (typeof entry === "object") {
+    const ctorName = String(entry?.constructor?.name ?? "");
+    if (/roll/i.test(ctorName)) {
+      if (typeof entry.toJSON === "function") {
+        const json = entry.toJSON();
+        const parsed = getRollDataObject(json);
+        if (parsed) return parsed;
+      }
+      if (typeof entry.toObject === "function") {
+        const obj = entry.toObject();
+        const parsed = getRollDataObject(obj);
+        if (parsed) return parsed;
+      }
+    }
+
+    if (Array.isArray(entry.terms)) {
+      try {
+        return foundry?.utils?.deepClone?.(entry) ?? JSON.parse(JSON.stringify(entry));
+      } catch {
+        return null;
+      }
+    }
+
+    if (typeof entry.toJSON === "function") {
+      const json = entry.toJSON();
+      return getRollDataObject(json);
+    }
+
+    if (typeof entry.toObject === "function") {
+      const obj = entry.toObject();
+      return getRollDataObject(obj);
+    }
+  }
+
+  return null;
+}
+
+function serializeRollDataEntry(rollData, format) {
+  if (format === "string") {
+    try {
+      if (typeof Roll?.fromData === "function") {
+        const roll = Roll.fromData(rollData);
+        const json = roll?.toJSON?.();
+        if (typeof json === "string") return json;
+        if (json && typeof json === "object") return JSON.stringify(json);
+      }
+    } catch {
+      // fall through to raw serialization
+    }
+    return JSON.stringify(rollData);
+  }
+
+  return rollData;
 }
 
 function isActorSheetApp(app) {
