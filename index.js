@@ -176,23 +176,25 @@ function canEnhanceDamageMessage(message) {
   if (!message) return false;
 
   const canCreate =
-    typeof game?.user?.can === "function" ? game.user.can("CHAT_MESSAGE_CREATE") : true;
+    game?.user?.isGM === true ||
+    (typeof game?.user?.can === "function"
+      ? game.user.can("MESSAGE_CREATE") || game.user.can("CHAT_MESSAGE_CREATE")
+      : true);
   if (!canCreate) return false;
 
-  if (!Array.isArray(message.rolls) || message.rolls.length === 0) return false;
+  const type = String(message?.flags?.dnd5e?.roll?.type ?? "");
+  if (/(damage|healing)/i.test(type)) return true;
 
-  const type = foundry?.utils?.getProperty?.(message, "flags.dnd5e.roll.type");
-  if (typeof type === "string" && /(damage|healing)/i.test(type)) return true;
-
-  const rolls = foundry?.utils?.getProperty?.(message, "flags.dnd5e.rolls");
+  const flaggedRolls = message?.flags?.dnd5e?.rolls;
   if (
-    Array.isArray(rolls) &&
-    rolls.some((entry) => /(damage|healing)/i.test(String(entry?.type ?? "")))
+    Array.isArray(flaggedRolls) &&
+    flaggedRolls.some((entry) => /(damage|healing)/i.test(String(entry?.type ?? "")))
   ) {
     return true;
   }
 
-  return message.rolls.some((roll) => {
+  const messageRolls = Array.isArray(message?.rolls) ? message.rolls : [];
+  return messageRolls.some((roll) => {
     const rollName = String(roll?.constructor?.name ?? "");
     const rollType = String(roll?.options?.type ?? "");
     return /damage/i.test(rollName) || /(damage|healing)/i.test(rollType);
