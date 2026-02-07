@@ -807,8 +807,13 @@ function buildRerollInitHandler() {
     if (!game?.user?.isGM) return;
     if (!combat?.isActive) return;
     if (!Object.prototype.hasOwnProperty.call(changed ?? {}, "round")) return;
-    if (lastByCombat[combat.id] === changed.round) return;
-    lastByCombat[combat.id] = changed.round;
+    const round = Number(changed.round);
+    if (!Number.isFinite(round)) return;
+    if (lastByCombat[combat.id] === round) return;
+    lastByCombat[combat.id] = round;
+
+    // Foundry startCombat() begins at round 1, so keep the initial initiative roll.
+    if (round <= 1) return;
 
     setTimeout(async () => {
       try {
