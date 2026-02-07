@@ -240,6 +240,7 @@ async function runEnhanceDamageFlow(message) {
     selectedCounts = await promptEnhanceRerollCountsFallback(buckets);
   }
   if (!isEnhanceCountsObject(selectedCounts)) return;
+  if (getSelectedEnhanceCountTotal(selectedCounts) <= 0) return;
 
   await repostDamageMessage(message, buckets, selectedCounts);
 }
@@ -261,7 +262,7 @@ function collectEnhanceBuckets(message) {
       const results = Array.isArray(term?.results) ? term.results : null;
       if (!Number.isFinite(faces) || faces <= 0 || !results?.length) continue;
 
-      const key = `${damageType}\u0000${faces}`;
+      const key = buildEnhanceBucketKey(damageType, faces);
       const bucket =
         buckets.get(key) ??
         {
@@ -386,9 +387,72 @@ function getRollDamageType(message, roll, rollIndex) {
     if (value && !/^(damage|healing)$/i.test(value)) return value;
   }
 
+  const contentType = getContentDamageTypeByRollIndex(message, rollIndex);
+  if (contentType) return contentType;
+
   const kind = String(options.type ?? entry?.type ?? single?.type ?? "").toLowerCase();
   if (kind === "healing") return "healing";
   return "damage";
+}
+
+function buildEnhanceBucketKey(damageType, faces) {
+  return `${String(damageType ?? "damage")}::d${Number(faces)}`;
+}
+
+function getSelectedEnhanceCountTotal(selectedCounts) {
+  if (!selectedCounts || typeof selectedCounts !== "object") return 0;
+  return Object.values(selectedCounts).reduce(
+    (sum, value) => sum + Math.max(0, Math.floor(toNumber(value, 0))),
+    0
+  );
+}
+
+function getContentDamageTypeByRollIndex(message, rollIndex) {
+  const content = toTrimmedStringOrNull(message?.content);
+  if (!content) return null;
+
+  const matches = [];
+  const attrRegexes = [
+    /data-damage-type="([^"]+)"/gi,
+    /data-type="([^"]+)"/gi,
+    /data-damagetype="([^"]+)"/gi,
+  ];
+
+  for (const regex of attrRegexes) {
+    let match;
+    while ((match = regex.exec(content)) !== null) {
+      const normalized = normalizeDamageTypeLabel(match[1]);
+      if (normalized) matches.push(normalized);
+    }
+  }
+
+  if (!matches.length) {
+    const keys = Object.keys(CONFIG?.DND5E?.damageTypes ?? {});
+    if (keys.length) {
+      const tokenRegex = new RegExp(`\\b(${keys.map(escapeRegex).join("|")})\\b`, "gi");
+      let match;
+      while ((match = tokenRegex.exec(content)) !== null) {
+        const normalized = normalizeDamageTypeLabel(match[1]);
+        if (normalized) matches.push(normalized);
+      }
+    }
+  }
+
+  const unique = [];
+  const seen = new Set();
+  for (const type of matches) {
+    const key = String(type).toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(type);
+  }
+
+  if (!unique.length) return null;
+  return unique[rollIndex] ?? (unique.length === 1 ? unique[0] : null);
+}
+
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function extractDamageTypeTagsFromFormula(formula) {
@@ -633,27 +697,6 @@ async function promptEnhanceRerollCounts(buckets) {
   const content = renderEnhanceDialogContent(buckets);
   const dialogV2 = foundry?.applications?.api?.DialogV2;
 
-  if (dialogV2?.prompt) {
-    try {
-      return await dialogV2.prompt({
-        window: { title: "Enhance Damage" },
-        content,
-        modal: true,
-        rejectClose: false,
-        ok: {
-          label: "Reroll",
-          icon: '<i class="fas fa-check"></i>',
-          callback: (event, button, dialog) => {
-            const root = resolveEnhanceDialogRoot(event, button, dialog);
-            return readEnhanceDialogCountsFromForm(root, buckets);
-          },
-        },
-      });
-    } catch {
-      return null;
-    }
-  }
-
   if (typeof Dialog === "function") {
     return new Promise((resolve) => {
       let settled = false;
@@ -684,6 +727,27 @@ async function promptEnhanceRerollCounts(buckets) {
 
       dialog.render(true);
     });
+  }
+
+  if (dialogV2?.prompt) {
+    try {
+      return await dialogV2.prompt({
+        window: { title: "Enhance Damage" },
+        content,
+        modal: true,
+        rejectClose: false,
+        ok: {
+          label: "Reroll",
+          icon: '<i class="fas fa-check"></i>',
+          callback: (event, button, dialog) => {
+            const root = resolveEnhanceDialogRoot(event, button, dialog);
+            return readEnhanceDialogCountsFromForm(root, buckets);
+          },
+        },
+      });
+    } catch {
+      return null;
+    }
   }
 
   const fallback = {};
@@ -776,6 +840,7 @@ function getSimpleTermTotal(term) {
 function applyEnhanceRerolls(source, buckets, selectedCounts) {
   const rolls = Array.isArray(source?.rolls) ? source.rolls : [];
   const changedRollIndices = new Set();
+  let changedDiceCount = 0;
 
   for (const bucket of buckets) {
     const rawCount = selectedCounts?.[bucket.key] ?? 0;
@@ -788,6 +853,7 @@ function applyEnhanceRerolls(source, buckets, selectedCounts) {
       if (!result) continue;
       result.result = randomDieResult(die.faces);
       changedRollIndices.add(die.rollIndex);
+      changedDiceCount += 1;
     }
   }
 
@@ -796,13 +862,21 @@ function applyEnhanceRerolls(source, buckets, selectedCounts) {
     if (!rollData) continue;
     rolls[rollIndex] = recomputeRollData(rollData);
   }
+
+  return changedDiceCount;
 }
 
 async function repostDamageMessage(message, buckets = null, selectedCounts = null) {
   try {
     const source = foundry?.utils?.deepClone?.(message.toObject()) ?? message.toObject();
+    let changedDiceCount = 0;
     if (Array.isArray(buckets) && selectedCounts) {
-      applyEnhanceRerolls(source, buckets, selectedCounts);
+      changedDiceCount = applyEnhanceRerolls(source, buckets, selectedCounts);
+      const requested = getSelectedEnhanceCountTotal(selectedCounts);
+      if (requested > 0 && changedDiceCount === 0) {
+        ui?.notifications?.warn?.("Enhance: no dice could be rerolled from this message.");
+        return;
+      }
     }
     delete source._id;
     delete source._stats;
