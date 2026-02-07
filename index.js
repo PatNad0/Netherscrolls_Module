@@ -460,9 +460,7 @@ function escapeRegex(value) {
 
 function getItemDamageTypeByRollIndex(message, rollIndex) {
   const item = resolveMessageItem(message);
-  if (!item) return null;
-
-  const parts = Array.isArray(item?.system?.damage?.parts) ? item.system.damage.parts : [];
+  const parts = resolveMessageDamageParts(message, item);
   if (!parts.length) return null;
 
   const types = parts
@@ -483,6 +481,8 @@ function resolveMessageItem(message) {
     rollFlag?.item?.uuid,
     flags?.item?.uuid,
     message?.flags?.itemUuid,
+    rollFlag?.origin,
+    flags?.origin,
   ];
   for (const uuid of uuidCandidates) {
     const item = resolveItemByUuid(uuid);
@@ -493,7 +493,9 @@ function resolveMessageItem(message) {
     rollFlag?.itemId,
     flags?.itemId,
     rollFlag?.item?.id,
+    rollFlag?.item?._id,
     flags?.item?.id,
+    flags?.item?._id,
   ];
   const actor = resolveMessageActor(message);
   for (const itemId of itemIdCandidates) {
@@ -501,6 +503,13 @@ function resolveMessageItem(message) {
     if (!id || !actor?.items?.get) continue;
     const item = actor.items.get(id);
     if (item) return item;
+  }
+
+  const parsedFromOrigin = parseActorItemIdsFromUuid(rollFlag?.origin ?? flags?.origin);
+  if (parsedFromOrigin.actorId && parsedFromOrigin.itemId) {
+    const actorFromOrigin = game?.actors?.get?.(parsedFromOrigin.actorId);
+    const itemFromOrigin = actorFromOrigin?.items?.get?.(parsedFromOrigin.itemId) ?? null;
+    if (itemFromOrigin) return itemFromOrigin;
   }
 
   return null;
@@ -515,13 +524,23 @@ function resolveItemByUuid(uuid) {
       if (doc?.documentName === "Item") return doc;
     }
   } catch {
-    return null;
+    // Ignore and continue with parsing fallbacks.
+  }
+  const parsed = parseActorItemIdsFromUuid(id);
+  if (parsed.actorId && parsed.itemId) {
+    const actor = game?.actors?.get?.(parsed.actorId) ?? null;
+    const item = actor?.items?.get?.(parsed.itemId) ?? null;
+    if (item) return item;
   }
   return null;
 }
 
 function resolveMessageActor(message) {
   const speaker = message?.speaker ?? {};
+  if (typeof ChatMessage?.getSpeakerActor === "function") {
+    const speakerActor = ChatMessage.getSpeakerActor(speaker);
+    if (speakerActor) return speakerActor;
+  }
   const actorId = toTrimmedStringOrNull(speaker?.actor);
   if (actorId && game?.actors?.get) {
     const actor = game.actors.get(actorId);
@@ -537,6 +556,115 @@ function resolveMessageActor(message) {
     (canvas?.scene?.id === sceneId ? canvas.scene : null);
   const token = scene?.tokens?.get?.(tokenId);
   return token?.actor ?? null;
+}
+
+function parseActorItemIdsFromUuid(uuid) {
+  const str = toTrimmedStringOrNull(uuid);
+  if (!str) return { actorId: null, itemId: null };
+
+  const actorMatch = /Actor\.([^.\]]+)/i.exec(str);
+  const itemMatch = /Item\.([^.\]]+)/i.exec(str);
+  return {
+    actorId: actorMatch?.[1] ?? null,
+    itemId: itemMatch?.[1] ?? null,
+  };
+}
+
+function resolveMessageDamageParts(message, item) {
+  const flags = message?.flags?.dnd5e ?? {};
+  const rollFlag = flags?.roll ?? {};
+  const flaggedRolls = Array.isArray(flags?.rolls) ? flags.rolls : [];
+
+  const candidateParts = [
+    rollFlag?.parts,
+    rollFlag?.damage?.parts,
+    flags?.parts,
+    flags?.damage?.parts,
+    ...flaggedRolls.map((entry) => entry?.parts),
+    ...flaggedRolls.map((entry) => entry?.damage?.parts),
+  ];
+
+  for (const candidate of candidateParts) {
+    const normalized = normalizeDamageParts(candidate);
+    if (normalized.length) return normalized;
+  }
+
+  const activity = resolveMessageActivity(message, item);
+  const activityParts = normalizeDamageParts(activity?.damage?.parts);
+  if (activityParts.length) return activityParts;
+
+  return normalizeDamageParts(item?.system?.damage?.parts);
+}
+
+function resolveMessageActivity(message, item) {
+  if (!item) return null;
+
+  const flags = message?.flags?.dnd5e ?? {};
+  const rollFlag = flags?.roll ?? {};
+  const activityId = toTrimmedStringOrNull(
+    rollFlag?.activityId ?? flags?.activityId ?? rollFlag?.activity?.id
+  );
+  const activityUuid = toTrimmedStringOrNull(
+    rollFlag?.activityUuid ?? flags?.activityUuid ?? rollFlag?.activity?.uuid
+  );
+
+  const activities = item?.system?.activities;
+  if (!activities) return null;
+
+  if (activityId) {
+    if (Array.isArray(activities)) {
+      const found = activities.find((entry) => String(entry?.id ?? "") === activityId);
+      if (found) return found;
+    } else if (typeof activities === "object") {
+      if (activities[activityId]) return activities[activityId];
+      const found = Object.values(activities).find(
+        (entry) => String(entry?.id ?? "") === activityId
+      );
+      if (found) return found;
+    }
+  }
+
+  if (activityUuid) {
+    const maybeId = activityUuid.split(".").pop();
+    if (maybeId && typeof activities === "object" && activities[maybeId]) {
+      return activities[maybeId];
+    }
+  }
+
+  return null;
+}
+
+function normalizeDamageParts(parts) {
+  if (!Array.isArray(parts)) return [];
+
+  const out = [];
+  for (const part of parts) {
+    if (!part) continue;
+    if (Array.isArray(part)) {
+      const formula = part[0] ?? null;
+      const type = part[1] ?? null;
+      out.push([formula, type]);
+      continue;
+    }
+    if (typeof part === "object") {
+      const formula =
+        part?.formula ??
+        part?.number ??
+        part?.roll ??
+        part?.value ??
+        part?.base ??
+        null;
+      const type =
+        part?.damageType ??
+        part?.type ??
+        part?.types ??
+        part?.damageTypes ??
+        part?.damage ??
+        null;
+      out.push([formula, type]);
+    }
+  }
+  return out;
 }
 
 function extractDamageTypeTagsFromFormula(formula) {
@@ -614,34 +742,56 @@ function mapDamageTypeLabel(raw) {
   const value = toTrimmedStringOrNull(raw);
   if (!value) return null;
 
-  const cfg = CONFIG?.DND5E?.damageTypes ?? {};
+  const known = getKnownDamageTypeMap();
   const cleaned = value.replace(/[[\]()]/g, " ").replace(/\s+/g, " ").trim();
   if (!cleaned) return null;
 
   const simpleKey = cleaned.toLowerCase();
   if (simpleKey === "damage" || simpleKey === "healing") return null;
-  if (cfg[simpleKey]) return localizeDamageTypeEntry(cfg[simpleKey], value);
+  if (known.has(simpleKey)) return known.get(simpleKey);
 
   const prefixed = simpleKey.startsWith("damage.") ? simpleKey.slice("damage.".length) : simpleKey;
-  if (cfg[prefixed]) return localizeDamageTypeEntry(cfg[prefixed], prefixed);
+  if (known.has(prefixed)) return known.get(prefixed);
 
   const tokens = simpleKey.split(/[^a-z]+/).filter(Boolean);
   for (const token of tokens) {
-    if (cfg[token]) return localizeDamageTypeEntry(cfg[token], token);
+    if (known.has(token)) return known.get(token);
   }
 
   if (game?.i18n?.has?.(cleaned)) {
     const localized = game.i18n.localize(cleaned);
-    const cleaned = toTrimmedStringOrNull(localized);
-    if (cleaned) return cleaned;
+    const localText = toTrimmedStringOrNull(localized)?.toLowerCase();
+    if (localText && known.has(localText)) return known.get(localText);
   }
 
-  if (/\d/.test(simpleKey)) return null;
-  if (!/^[a-z][a-z\s-]{0,30}$/i.test(cleaned)) return null;
+  return null;
+}
 
-  const withoutDamage = cleaned.replace(/\bdamage\b/gi, "").trim();
-  if (withoutDamage) return withoutDamage;
-  return cleaned;
+function getKnownDamageTypeMap() {
+  const map = new Map();
+  const cfg = CONFIG?.DND5E?.damageTypes ?? {};
+
+  const add = (key, label) => {
+    const k = toTrimmedStringOrNull(key)?.toLowerCase();
+    const v = toTrimmedStringOrNull(label);
+    if (!k || !v) return;
+    map.set(k, v);
+  };
+
+  for (const [key, entry] of Object.entries(cfg)) {
+    const label = localizeDamageTypeEntry(entry, key);
+    add(key, label);
+    add(`damage.${key}`, label);
+    add(label, label);
+
+    if (typeof entry === "string") add(entry, label);
+    if (entry && typeof entry === "object") {
+      add(entry.label, label);
+      add(entry.name, label);
+    }
+  }
+
+  return map;
 }
 
 function localizeDamageTypeEntry(entry, fallback) {
@@ -781,6 +931,28 @@ async function promptEnhanceRerollCounts(buckets) {
   const content = renderEnhanceDialogContent(buckets);
   const dialogV2 = foundry?.applications?.api?.DialogV2;
 
+  if (dialogV2?.prompt) {
+    try {
+      const value = await dialogV2.prompt({
+        window: { title: "Enhance Damage" },
+        content,
+        modal: true,
+        rejectClose: false,
+        ok: {
+          label: "Reroll",
+          icon: '<i class="fas fa-check"></i>',
+          callback: (event, button, dialog) => {
+            const root = resolveEnhanceDialogRoot(event, button, dialog);
+            return readEnhanceDialogCountsFromForm(root, buckets);
+          },
+        },
+      });
+      if (isEnhanceCountsObject(value)) return value;
+    } catch {
+      // Continue to fallbacks.
+    }
+  }
+
   if (typeof Dialog === "function") {
     return new Promise((resolve) => {
       let settled = false;
@@ -811,27 +983,6 @@ async function promptEnhanceRerollCounts(buckets) {
 
       dialog.render(true);
     });
-  }
-
-  if (dialogV2?.prompt) {
-    try {
-      return await dialogV2.prompt({
-        window: { title: "Enhance Damage" },
-        content,
-        modal: true,
-        rejectClose: false,
-        ok: {
-          label: "Reroll",
-          icon: '<i class="fas fa-check"></i>',
-          callback: (event, button, dialog) => {
-            const root = resolveEnhanceDialogRoot(event, button, dialog);
-            return readEnhanceDialogCountsFromForm(root, buckets);
-          },
-        },
-      });
-    } catch {
-      return null;
-    }
   }
 
   const fallback = {};
