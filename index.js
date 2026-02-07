@@ -372,6 +372,7 @@ function renderEnhanceDialogContent(buckets) {
               max="${bucket.dice.length}"
               value="0"
               step="1"
+              name="enhance-bucket-${index}"
               data-enhance-bucket="${index}"
               style="width: 5em;"
             />
@@ -382,7 +383,7 @@ function renderEnhanceDialogContent(buckets) {
     .join("");
 
   return `
-    <form class="ns-enhance-damage">
+    <div class="ns-enhance-damage">
       <p>Set how many of the lowest dice to reroll for each damage bucket.</p>
       <table style="width: 100%; border-collapse: collapse;">
         <thead>
@@ -395,7 +396,7 @@ function renderEnhanceDialogContent(buckets) {
         </thead>
         <tbody>${rows}</tbody>
       </table>
-    </form>
+    </div>
   `;
 }
 
@@ -413,8 +414,60 @@ function readEnhanceDialogCounts(html, buckets) {
   return counts;
 }
 
+function readEnhanceDialogCountsFromForm(form, buckets) {
+  const counts = {};
+  for (let index = 0; index < buckets.length; index += 1) {
+    const bucket = buckets[index];
+    const input =
+      form?.elements?.namedItem?.(`enhance-bucket-${index}`) ??
+      form?.querySelector?.(`[data-enhance-bucket="${index}"]`);
+    const raw = input?.value;
+    const amount = Math.floor(toNumber(raw, 0));
+    counts[bucket.key] = Math.max(0, Math.min(bucket.dice.length, amount));
+  }
+  return counts;
+}
+
+async function promptEnhanceRerollCountsFallback(buckets) {
+  const counts = {};
+
+  for (const bucket of buckets) {
+    const damageType = String(bucket.damageType ?? "damage");
+    const diceValues = bucket.dice.map((die) => die.value).join(", ");
+    const response = window.prompt(
+      `Enhance Damage\n${damageType} d${bucket.faces}\nRolled: ${diceValues}\nHow many lowest dice to reroll? (0-${bucket.dice.length})`,
+      "0"
+    );
+    if (response == null) return null;
+
+    const amount = Math.floor(toNumber(response, 0));
+    counts[bucket.key] = Math.max(0, Math.min(bucket.dice.length, amount));
+  }
+
+  return counts;
+}
+
 async function promptEnhanceRerollCounts(buckets) {
   const content = renderEnhanceDialogContent(buckets);
+  const dialogV2 = foundry?.applications?.api?.DialogV2;
+
+  if (dialogV2?.prompt) {
+    try {
+      return await dialogV2.prompt({
+        window: { title: "Enhance Damage" },
+        content,
+        modal: true,
+        rejectClose: false,
+        ok: {
+          label: "Reroll",
+          icon: '<i class="fas fa-check"></i>',
+          callback: (_event, button) => readEnhanceDialogCountsFromForm(button?.form, buckets),
+        },
+      });
+    } catch {
+      return null;
+    }
+  }
 
   if (typeof Dialog === "function") {
     return new Promise((resolve) => {
@@ -449,9 +502,10 @@ async function promptEnhanceRerollCounts(buckets) {
   }
 
   const fallback = {};
-  for (const bucket of buckets) {
-    fallback[bucket.key] = 0;
+  if (typeof window?.prompt === "function") {
+    return promptEnhanceRerollCountsFallback(buckets);
   }
+  for (const bucket of buckets) fallback[bucket.key] = 0;
   return fallback;
 }
 
