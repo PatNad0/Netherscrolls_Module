@@ -29,6 +29,7 @@ const SETTINGS = {
   apiKey: "nsApiKey",
   syncButton: "showSyncButton",
   debug: "debugMode",
+  devEnhancedDamage: "devEnhancedDamage",
 };
 
 Hooks.once("init", () => {
@@ -80,6 +81,15 @@ Hooks.once("init", () => {
     type: Boolean,
     default: false,
   });
+
+  game.settings.register(MODULE_ID, SETTINGS.devEnhancedDamage, {
+    name: "[DEV] enhanced damage",
+    hint: "Developer toggle for enhanced damage behavior.",
+    scope: "world",
+    config: true,
+    type: Boolean,
+    default: false,
+  });
 });
 
 Hooks.once("ready", () => {
@@ -103,6 +113,10 @@ Hooks.on("renderActorSheetV2", (app, html) => {
   injectSyncButtonV2(app, html);
 });
 
+Hooks.on("getChatLogEntryContext", (_html, options) => {
+  registerEnhancedDamageContextOption(options);
+});
+
 let rerollInitHandler = null;
 let npcDeathSaveHandler = null;
 
@@ -121,6 +135,82 @@ function isSyncButtonEnabled() {
 
 function isDebugEnabled() {
   return Boolean(game?.settings?.get(MODULE_ID, SETTINGS.debug));
+}
+
+function isEnhancedDamageEnabled() {
+  return Boolean(game?.settings?.get(MODULE_ID, SETTINGS.devEnhancedDamage));
+}
+
+function registerEnhancedDamageContextOption(options) {
+  if (!Array.isArray(options)) return;
+  if (options.some((option) => option?.name === "Enhance")) return;
+
+  options.push({
+    name: "Enhance",
+    icon: '<i class="fas fa-magic"></i>',
+    condition: (li) => {
+      if (!isEnhancedDamageEnabled()) return false;
+      const message = getContextMenuMessage(li);
+      return canEnhanceDamageMessage(message);
+    },
+    callback: async (li) => {
+      const message = getContextMenuMessage(li);
+      if (!canEnhanceDamageMessage(message)) return;
+      await repostDamageMessage(message);
+    },
+  });
+}
+
+function getContextMenuMessage(li) {
+  const messageId =
+    li?.data?.("messageId") ??
+    li?.attr?.("data-message-id") ??
+    li?.[0]?.dataset?.messageId ??
+    li?.dataset?.messageId ??
+    null;
+  if (!messageId) return null;
+  return game?.messages?.get(messageId) ?? null;
+}
+
+function canEnhanceDamageMessage(message) {
+  if (!message) return false;
+
+  const canCreate =
+    typeof game?.user?.can === "function" ? game.user.can("CHAT_MESSAGE_CREATE") : true;
+  if (!canCreate) return false;
+
+  if (!Array.isArray(message.rolls) || message.rolls.length === 0) return false;
+
+  const type = foundry?.utils?.getProperty?.(message, "flags.dnd5e.roll.type");
+  if (typeof type === "string" && /(damage|healing)/i.test(type)) return true;
+
+  const rolls = foundry?.utils?.getProperty?.(message, "flags.dnd5e.rolls");
+  if (
+    Array.isArray(rolls) &&
+    rolls.some((entry) => /(damage|healing)/i.test(String(entry?.type ?? "")))
+  ) {
+    return true;
+  }
+
+  return message.rolls.some((roll) => {
+    const rollName = String(roll?.constructor?.name ?? "");
+    const rollType = String(roll?.options?.type ?? "");
+    return /damage/i.test(rollName) || /(damage|healing)/i.test(rollType);
+  });
+}
+
+async function repostDamageMessage(message) {
+  try {
+    const source = foundry?.utils?.deepClone?.(message.toObject()) ?? message.toObject();
+    delete source._id;
+    delete source._stats;
+    source.user = game?.user?.id ?? source.user;
+    source.timestamp = Date.now();
+    await ChatMessage.create(source);
+  } catch (err) {
+    console.error(`${MODULE_ID} | Enhance damage failed.`, err);
+    ui?.notifications?.error?.("Enhance damage failed. Check console for details.");
+  }
 }
 
 function isActorSheetApp(app) {
