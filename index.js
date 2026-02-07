@@ -244,9 +244,7 @@ async function runEnhanceDamageFlow(message) {
   }
 
   let selectedCounts = await promptEnhanceRerollCounts(buckets);
-  if (!isEnhanceCountsObject(selectedCounts)) {
-    selectedCounts = await promptEnhanceRerollCountsFallback(buckets);
-  }
+  if (selectedCounts == null) return;
   if (!isEnhanceCountsObject(selectedCounts)) return;
   if (getSelectedEnhanceCountTotal(selectedCounts) <= 0) return;
 
@@ -465,6 +463,9 @@ function getRollDamageType(message, roll, rollIndex, typeResolutionLog = null) {
     : null;
 
   const candidates = [];
+  pushDamageTypeCandidate(candidates, "roll.options.type", options.type);
+  pushDamageTypeCandidate(candidates, "roll.options.types", options.types);
+  pushDamageTypeCandidate(candidates, "roll.options.rollType", options.rollType);
   pushDamageTypeCandidate(candidates, "roll.options.damageType", options.damageType);
   pushDamageTypeCandidate(candidates, "roll.options.damageTypes", options.damageTypes);
   pushDamageTypeCandidate(candidates, "roll.options.damage", options.damage);
@@ -482,13 +483,19 @@ function getRollDamageType(message, roll, rollIndex, typeResolutionLog = null) {
   pushDamageTypeCandidate(candidates, "flags.roll.options.damageTypes", entry?.options?.damageTypes);
   pushDamageTypeCandidate(candidates, "flags.roll.options.damage", entry?.options?.damage);
   pushDamageTypeCandidate(candidates, "flags.roll.options.parts", entry?.options?.parts);
+  pushDamageTypeCandidate(candidates, "flags.roll.options.type", entry?.options?.type);
+  pushDamageTypeCandidate(candidates, "flags.roll.options.types", entry?.options?.types);
   pushDamageTypeCandidate(candidates, "flags.roll.options.flavor", entry?.options?.flavor);
   pushDamageTypeCandidate(candidates, "flags.roll.flavor", entry?.flavor);
 
+  pushDamageTypeCandidate(candidates, "flags.single.type", single?.type);
+  pushDamageTypeCandidate(candidates, "flags.single.types", single?.types);
   pushDamageTypeCandidate(candidates, "flags.single.damageType", single?.damageType);
   pushDamageTypeCandidate(candidates, "flags.single.damageTypes", single?.damageTypes);
   pushDamageTypeCandidate(candidates, "flags.single.damage", single?.damage);
   pushDamageTypeCandidate(candidates, "flags.single.parts", single?.parts);
+  pushDamageTypeCandidate(candidates, "flags.single.options.type", single?.options?.type);
+  pushDamageTypeCandidate(candidates, "flags.single.options.types", single?.options?.types);
   pushDamageTypeCandidate(candidates, "flags.single.options.damageType", single?.options?.damageType);
   pushDamageTypeCandidate(candidates, "flags.single.options.damageTypes", single?.options?.damageTypes);
   pushDamageTypeCandidate(candidates, "flags.single.options.damage", single?.options?.damage);
@@ -1124,6 +1131,7 @@ async function promptEnhanceRerollCounts(buckets) {
           },
         },
       });
+      if (value == null) return null;
       if (isEnhanceCountsObject(value)) return value;
     } catch {
       // Continue to fallbacks.
