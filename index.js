@@ -235,8 +235,11 @@ async function runEnhanceDamageFlow(message) {
     return;
   }
 
-  const selectedCounts = await promptEnhanceRerollCounts(buckets);
-  if (!selectedCounts) return;
+  let selectedCounts = await promptEnhanceRerollCounts(buckets);
+  if (!isEnhanceCountsObject(selectedCounts)) {
+    selectedCounts = await promptEnhanceRerollCountsFallback(buckets);
+  }
+  if (!isEnhanceCountsObject(selectedCounts)) return;
 
   await repostDamageMessage(message, buckets, selectedCounts);
 }
@@ -334,25 +337,178 @@ function getRollDamageType(message, roll, rollIndex) {
   const entry = getDnd5eFlaggedRollEntry(message, rollIndex);
   const single = message?.flags?.dnd5e?.roll ?? {};
   const options = roll?.options ?? {};
+  const terms = Array.isArray(roll?.terms) ? roll.terms : [];
 
   const candidates = [
     options.damageType,
     Array.isArray(options.damageTypes) ? options.damageTypes.join(", ") : null,
+    options.damage,
+    options.parts,
+    options.flavor,
+    roll?.flavor,
+    roll?.formula,
+    roll?._formula,
     entry?.damageType,
     Array.isArray(entry?.damageTypes) ? entry.damageTypes.join(", ") : null,
+    entry?.damage,
+    entry?.parts,
+    entry?.options?.damageType,
+    entry?.options?.damageTypes,
+    entry?.options?.damage,
+    entry?.options?.parts,
+    entry?.options?.flavor,
+    entry?.flavor,
     single?.damageType,
     Array.isArray(single?.damageTypes) ? single.damageTypes.join(", ") : null,
-    options.flavor,
+    single?.damage,
+    single?.parts,
+    single?.options?.damageType,
+    single?.options?.damageTypes,
+    single?.options?.damage,
+    single?.options?.parts,
+    single?.options?.flavor,
+    single?.flavor,
+    ...extractDamageTypeTagsFromFormula(roll?.formula),
+    ...extractDamageTypeTagsFromFormula(roll?._formula),
+    ...terms.flatMap((term) => [
+      term?.flavor,
+      term?.options?.flavor,
+      term?.options?.damageType,
+      term?.options?.damageTypes,
+      term?.options?.damage,
+      term?.options?.parts,
+      term?.type,
+    ]),
   ];
 
   for (const candidate of candidates) {
-    const value = toTrimmedStringOrNull(candidate);
-    if (value) return value;
+    const value = normalizeDamageTypeLabel(candidate);
+    if (value && !/^(damage|healing)$/i.test(value)) return value;
   }
 
   const kind = String(options.type ?? entry?.type ?? single?.type ?? "").toLowerCase();
   if (kind === "healing") return "healing";
   return "damage";
+}
+
+function extractDamageTypeTagsFromFormula(formula) {
+  const text = toTrimmedStringOrNull(formula);
+  if (!text) return [];
+  const tags = [];
+  const regex = /\[([^\]]+)\]/g;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    const tag = toTrimmedStringOrNull(match[1]);
+    if (tag) tags.push(tag);
+  }
+  return tags;
+}
+
+function normalizeDamageTypeLabel(value) {
+  const labels = [];
+  collectDamageTypeLabels(value, labels);
+  if (!labels.length) return null;
+
+  const seen = new Set();
+  const unique = [];
+  for (const label of labels) {
+    const key = String(label).toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(label);
+  }
+  return unique.join(", ");
+}
+
+function collectDamageTypeLabels(value, out) {
+  if (value == null) return;
+
+  if (typeof value === "string") {
+    const str = toTrimmedStringOrNull(value);
+    if (!str) return;
+    const parts = str.split(/[,/|]/).map((part) => toTrimmedStringOrNull(part)).filter(Boolean);
+    for (const part of parts) {
+      const mapped = mapDamageTypeLabel(part);
+      if (mapped) out.push(mapped);
+    }
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const entry of value) collectDamageTypeLabels(entry, out);
+    return;
+  }
+
+  if (value instanceof Set) {
+    for (const entry of value) collectDamageTypeLabels(entry, out);
+    return;
+  }
+
+  if (typeof value === "object") {
+    const typedValue = value?.damageType ?? value?.type ?? value?.value ?? value?.id ?? value?.name;
+    if (typedValue != null) collectDamageTypeLabels(typedValue, out);
+    if (value?.label != null) collectDamageTypeLabels(value.label, out);
+    if (value?.damageTypes != null) collectDamageTypeLabels(value.damageTypes, out);
+    if (value?.types != null) collectDamageTypeLabels(value.types, out);
+    if (value?.parts != null) collectDamageTypeLabels(value.parts, out);
+
+    const trueKeys = Object.entries(value)
+      .filter(([, flag]) => flag === true)
+      .map(([key]) => key);
+    if (trueKeys.length) {
+      for (const key of trueKeys) collectDamageTypeLabels(key, out);
+      return;
+    }
+  }
+}
+
+function mapDamageTypeLabel(raw) {
+  const value = toTrimmedStringOrNull(raw);
+  if (!value) return null;
+
+  const cfg = CONFIG?.DND5E?.damageTypes ?? {};
+  const cleaned = value.replace(/[[\]()]/g, " ").replace(/\s+/g, " ").trim();
+  if (!cleaned) return null;
+
+  const simpleKey = cleaned.toLowerCase();
+  if (simpleKey === "damage" || simpleKey === "healing") return null;
+  if (cfg[simpleKey]) return localizeDamageTypeEntry(cfg[simpleKey], value);
+
+  const prefixed = simpleKey.startsWith("damage.") ? simpleKey.slice("damage.".length) : simpleKey;
+  if (cfg[prefixed]) return localizeDamageTypeEntry(cfg[prefixed], prefixed);
+
+  const tokens = simpleKey.split(/[^a-z]+/).filter(Boolean);
+  for (const token of tokens) {
+    if (cfg[token]) return localizeDamageTypeEntry(cfg[token], token);
+  }
+
+  if (game?.i18n?.has?.(cleaned)) {
+    const localized = game.i18n.localize(cleaned);
+    const cleaned = toTrimmedStringOrNull(localized);
+    if (cleaned) return cleaned;
+  }
+
+  if (/\d/.test(simpleKey)) return null;
+  if (!/^[a-z][a-z\s-]{0,30}$/i.test(cleaned)) return null;
+
+  const withoutDamage = cleaned.replace(/\bdamage\b/gi, "").trim();
+  if (withoutDamage) return withoutDamage;
+  return cleaned;
+}
+
+function localizeDamageTypeEntry(entry, fallback) {
+  if (typeof entry === "string") {
+    if (game?.i18n?.has?.(entry)) return game.i18n.localize(entry);
+    return entry;
+  }
+  if (entry && typeof entry === "object") {
+    if (typeof entry.label === "string") {
+      if (game?.i18n?.has?.(entry.label)) return game.i18n.localize(entry.label);
+      return entry.label;
+    }
+    if (typeof entry.name === "string") return entry.name;
+  }
+  return fallback;
 }
 
 function renderEnhanceDialogContent(buckets) {
@@ -428,6 +584,32 @@ function readEnhanceDialogCountsFromForm(form, buckets) {
   return counts;
 }
 
+function isEnhanceCountsObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function resolveEnhanceDialogRoot(event, button, dialog) {
+  const eventTarget = event?.currentTarget ?? event?.target ?? null;
+  const fromEvent =
+    eventTarget?.closest?.(".window-content, .dialog-content, .app, .application, .dialog") ??
+    null;
+  if (fromEvent?.querySelector) return fromEvent;
+
+  const dialogElement = dialog?.element ?? dialog?.window?.element ?? null;
+  const dialogNode = dialogElement?.[0] ?? dialogElement;
+  if (dialogNode?.querySelector) return dialogNode;
+
+  const buttonElement = button?.element ?? null;
+  const buttonNode = buttonElement?.[0] ?? buttonElement;
+  if (buttonNode?.closest) {
+    const fromButton =
+      buttonNode.closest(".window-content, .dialog-content, .app, .application, .dialog") ?? null;
+    if (fromButton?.querySelector) return fromButton;
+  }
+
+  return document;
+}
+
 async function promptEnhanceRerollCountsFallback(buckets) {
   const counts = {};
 
@@ -461,7 +643,10 @@ async function promptEnhanceRerollCounts(buckets) {
         ok: {
           label: "Reroll",
           icon: '<i class="fas fa-check"></i>',
-          callback: (_event, button) => readEnhanceDialogCountsFromForm(button?.form, buckets),
+          callback: (event, button, dialog) => {
+            const root = resolveEnhanceDialogRoot(event, button, dialog);
+            return readEnhanceDialogCountsFromForm(root, buckets);
+          },
         },
       });
     } catch {
@@ -511,9 +696,7 @@ async function promptEnhanceRerollCounts(buckets) {
 
 function randomDieResult(faces) {
   const sides = Math.max(1, Math.floor(toNumber(faces, 0)));
-  const uniform =
-    typeof CONFIG?.Dice?.randomUniform === "function" ? CONFIG.Dice.randomUniform() : Math.random();
-  return Math.floor(uniform * sides) + 1;
+  return Math.floor(Math.random() * sides) + 1;
 }
 
 function recomputeRollData(rollData) {
