@@ -116,6 +116,13 @@ Hooks.on("renderActorSheetV2", (app, html) => {
 Hooks.on("getChatLogEntryContext", (_html, options) => {
   registerEnhancedDamageContextOption(options);
 });
+Hooks.on("getChatMessageContextOptions", (_app, options) => {
+  registerEnhancedDamageContextOption(options);
+});
+Hooks.on("getDocumentContextOptions", (app, options) => {
+  if (!isChatContextApplication(app)) return;
+  registerEnhancedDamageContextOption(options);
+});
 
 let rerollInitHandler = null;
 let npcDeathSaveHandler = null;
@@ -141,6 +148,14 @@ function isEnhancedDamageEnabled() {
   return Boolean(game?.settings?.get(MODULE_ID, SETTINGS.devEnhancedDamage));
 }
 
+function isChatContextApplication(app) {
+  if (!app) return false;
+  const name = String(app?.constructor?.name ?? "");
+  if (/ChatLog|ChatPopout/i.test(name)) return true;
+  const tabName = String(app?.tabName ?? "");
+  return tabName === "chat";
+}
+
 function registerEnhancedDamageContextOption(options) {
   if (!Array.isArray(options)) return;
   if (options.some((option) => option?.name === "Enhance")) return;
@@ -162,11 +177,23 @@ function registerEnhancedDamageContextOption(options) {
 }
 
 function getContextMenuMessage(li) {
+  const target =
+    li?.[0] ??
+    (typeof li?.get === "function" ? li.get(0) : null) ??
+    (li instanceof HTMLElement ? li : null);
+  const entry =
+    target?.closest?.("[data-message-id], [data-document-id], [data-entry-id]") ?? target;
+
   const messageId =
     li?.data?.("messageId") ??
+    li?.data?.("documentId") ??
+    li?.data?.("entryId") ??
     li?.attr?.("data-message-id") ??
-    li?.[0]?.dataset?.messageId ??
-    li?.dataset?.messageId ??
+    li?.attr?.("data-document-id") ??
+    li?.attr?.("data-entry-id") ??
+    entry?.dataset?.messageId ??
+    entry?.dataset?.documentId ??
+    entry?.dataset?.entryId ??
     null;
   if (!messageId) return null;
   return game?.messages?.get(messageId) ?? null;
