@@ -95,6 +95,7 @@ Hooks.once("init", () => {
 Hooks.once("ready", () => {
   toggleRerollInitHook(game.settings.get(MODULE_ID, SETTINGS.rerollInit) === true);
   toggleNpcDeathSaveHook(game.settings.get(MODULE_ID, SETTINGS.npcDeathSave) === true);
+  initEnhanceDialogInputHandlers();
 });
 
 Hooks.on("renderApplicationV1", (app, html) => {
@@ -126,6 +127,7 @@ Hooks.on("getDocumentContextOptions", (app, options) => {
 
 let rerollInitHandler = null;
 let npcDeathSaveHandler = null;
+let enhanceDialogInputHandlersBound = false;
 
 function rerenderActorSheets() {
   const apps = Object.values(ui?.windows ?? {});
@@ -146,6 +148,73 @@ function isDebugEnabled() {
 
 function isEnhancedDamageEnabled() {
   return Boolean(game?.settings?.get(MODULE_ID, SETTINGS.devEnhancedDamage));
+}
+
+function initEnhanceDialogInputHandlers() {
+  if (enhanceDialogInputHandlersBound) return;
+  if (typeof document?.addEventListener !== "function") return;
+
+  document.addEventListener("click", onEnhanceDialogControlClick);
+  document.addEventListener("input", onEnhanceDialogInputEvent);
+  document.addEventListener("change", onEnhanceDialogInputEvent);
+  enhanceDialogInputHandlersBound = true;
+}
+
+function onEnhanceDialogControlClick(event) {
+  const button = event?.target?.closest?.(".ns-enhance-step");
+  if (!button) return;
+
+  const bucket = toTrimmedStringOrNull(button.dataset?.enhanceBucket);
+  if (!bucket) return;
+
+  const root = button.closest(".ns-enhance-damage") ?? document;
+  const input = root?.querySelector?.(`[data-enhance-input="${bucket}"]`);
+  if (!input) return;
+
+  const step = Number(button.dataset?.enhanceStep ?? 0);
+  if (!Number.isFinite(step) || step === 0) return;
+
+  adjustEnhanceDialogInput(input, step > 0 ? 1 : -1);
+  event.preventDefault();
+}
+
+function onEnhanceDialogInputEvent(event) {
+  const input = event?.target;
+  if (!(input instanceof HTMLInputElement)) return;
+  if (!input.matches?.("[data-enhance-input]")) return;
+  clampEnhanceDialogInputValue(input);
+}
+
+function adjustEnhanceDialogInput(input, delta) {
+  if (!(input instanceof HTMLInputElement)) return;
+
+  const { min, max } = getEnhanceDialogInputLimits(input);
+  const current = Number(input.value);
+  const base = Number.isFinite(current) ? Math.floor(current) : min;
+  const next = Math.max(min, Math.min(max, base + delta));
+  input.value = String(next);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function clampEnhanceDialogInputValue(input) {
+  if (!(input instanceof HTMLInputElement)) return;
+
+  const { min, max } = getEnhanceDialogInputLimits(input);
+  const current = Number(input.value);
+  const next = Number.isFinite(current) ? Math.floor(current) : min;
+  const clamped = Math.max(min, Math.min(max, next));
+  if (String(clamped) !== String(input.value)) input.value = String(clamped);
+}
+
+function getEnhanceDialogInputLimits(input) {
+  const rawMin = Number(input?.min);
+  const rawMax = Number(input?.max);
+  const min = Number.isFinite(rawMin) ? rawMin : 0;
+  const max = Number.isFinite(rawMax) ? rawMax : Number.POSITIVE_INFINITY;
+  return {
+    min: Math.floor(min),
+    max: Math.floor(max),
+  };
 }
 
 function isChatContextApplication(app) {
@@ -1004,16 +1073,35 @@ function renderEnhanceDialogContent(buckets) {
           <td>d${bucket.faces}</td>
           <td>${diceText}</td>
           <td>
-            <input
-              type="number"
-              min="0"
-              max="${bucket.dice.length}"
-              value="0"
-              step="1"
-              name="enhance-bucket-${index}"
-              data-enhance-bucket="${index}"
-              style="width: 5em;"
-            />
+            <div class="ns-enhance-stepper" data-enhance-bucket="${index}">
+              <button
+                type="button"
+                class="ns-enhance-step"
+                data-enhance-step="-1"
+                data-enhance-bucket="${index}"
+                aria-label="Decrease reroll count"
+                title="Decrease"
+              >&#9660;</button>
+              <input
+                type="number"
+                min="0"
+                max="${bucket.dice.length}"
+                value="0"
+                step="1"
+                inputmode="numeric"
+                name="enhance-bucket-${index}"
+                data-enhance-input="${index}"
+                class="ns-enhance-input"
+              />
+              <button
+                type="button"
+                class="ns-enhance-step"
+                data-enhance-step="1"
+                data-enhance-bucket="${index}"
+                aria-label="Increase reroll count"
+                title="Increase"
+              >&#9650;</button>
+            </div>
           </td>
         </tr>
       `;
@@ -1043,8 +1131,8 @@ function readEnhanceDialogCounts(html, buckets) {
   for (let index = 0; index < buckets.length; index += 1) {
     const bucket = buckets[index];
     const input =
-      html?.find?.(`[data-enhance-bucket="${index}"]`)?.first?.() ??
-      html?.find?.(`[data-enhance-bucket="${index}"]`);
+      html?.find?.(`[data-enhance-input="${index}"]`)?.first?.() ??
+      html?.find?.(`[data-enhance-input="${index}"]`);
     const raw = typeof input?.val === "function" ? input.val() : input?.value;
     const amount = Math.floor(toNumber(raw, 0));
     counts[bucket.key] = Math.max(0, Math.min(bucket.dice.length, amount));
@@ -1058,7 +1146,7 @@ function readEnhanceDialogCountsFromForm(form, buckets) {
     const bucket = buckets[index];
     const input =
       form?.elements?.namedItem?.(`enhance-bucket-${index}`) ??
-      form?.querySelector?.(`[data-enhance-bucket="${index}"]`);
+      form?.querySelector?.(`[data-enhance-input="${index}"]`);
     const raw = input?.value;
     const amount = Math.floor(toNumber(raw, 0));
     counts[bucket.key] = Math.max(0, Math.min(bucket.dice.length, amount));

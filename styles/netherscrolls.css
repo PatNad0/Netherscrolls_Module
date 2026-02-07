@@ -35,3 +35,30 @@
   max-height: 360px;
   overflow: auto;
 }
+
+.ns-enhance-damage table {
+  width: 100%;
+}
+
+.ns-enhance-stepper {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+}
+
+.ns-enhance-stepper .ns-enhance-step {
+  width: 1.5rem;
+  min-width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  line-height: 1;
+  text-align: center;
+}
+
+.ns-enhance-stepper .ns-enhance-input {
+  width: 3.2rem;
+  min-width: 3.2rem;
+  text-align: center;
+}
