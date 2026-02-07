@@ -229,7 +229,15 @@ function canEnhanceDamageMessage(message) {
 }
 
 async function runEnhanceDamageFlow(message) {
-  const buckets = collectEnhanceBuckets(message);
+  const typeResolution = [];
+  const buckets = collectEnhanceBuckets(message, typeResolution);
+  if (isDebugEnabled()) {
+    await postEnhanceDebugMessage(
+      message,
+      "Enhance | Parsed Damage Data",
+      buildEnhanceDebugSnapshot(message, buckets, typeResolution)
+    );
+  }
   if (!buckets.length) {
     ui?.notifications?.warn?.("Enhance: no damage dice were found in this message.");
     return;
@@ -242,10 +250,20 @@ async function runEnhanceDamageFlow(message) {
   if (!isEnhanceCountsObject(selectedCounts)) return;
   if (getSelectedEnhanceCountTotal(selectedCounts) <= 0) return;
 
-  await repostDamageMessage(message, buckets, selectedCounts);
+  if (isDebugEnabled()) {
+    await postEnhanceDebugMessage(message, "Enhance | Selected Counts", {
+      selectedCounts,
+      requested: getSelectedEnhanceCountTotal(selectedCounts),
+    });
+  }
+
+  const result = await repostDamageMessage(message, buckets, selectedCounts);
+  if (isDebugEnabled()) {
+    await postEnhanceDebugMessage(message, "Enhance | Repost Result", result ?? null);
+  }
 }
 
-function collectEnhanceBuckets(message) {
+function collectEnhanceBuckets(message, typeResolutionLog = null) {
   const buckets = new Map();
   const messageRolls = Array.isArray(message?.rolls) ? message.rolls : [];
 
@@ -253,7 +271,7 @@ function collectEnhanceBuckets(message) {
     const roll = messageRolls[rollIndex];
     if (!isDamageLikeRoll(message, roll, rollIndex)) continue;
 
-    const damageType = getRollDamageType(message, roll, rollIndex);
+    const damageType = getRollDamageType(message, roll, rollIndex, typeResolutionLog);
     const terms = Array.isArray(roll?.terms) ? roll.terms : [];
 
     for (let termIndex = 0; termIndex < terms.length; termIndex += 1) {
@@ -309,6 +327,102 @@ function collectEnhanceBuckets(message) {
   return list;
 }
 
+async function postEnhanceDebugMessage(message, title, data) {
+  if (!isDebugEnabled()) return;
+  try {
+    const actor = resolveMessageActor(message);
+    const speaker = actor
+      ? ChatMessage.getSpeaker({ actor })
+      : message?.speaker ?? ChatMessage.getSpeaker();
+    const safeTitle = escapeHtml(String(title ?? "Enhance Debug"));
+    const content = `<p><strong>${safeTitle}</strong></p>${renderSyncPayload(data)}`;
+    await ChatMessage.create({ speaker, content });
+  } catch (err) {
+    console.warn(`${MODULE_ID} | Failed to post enhance debug message.`, err);
+  }
+}
+
+function buildEnhanceDebugSnapshot(message, buckets, typeResolutionLog) {
+  const messageRolls = Array.isArray(message?.rolls) ? message.rolls : [];
+  return {
+    messageId: message?.id ?? null,
+    messageSpeaker: sanitizeDebugValue(message?.speaker ?? null, 2),
+    dnd5eFlags: sanitizeDebugValue(message?.flags?.dnd5e ?? null, 3),
+    rolls: messageRolls.map((roll, rollIndex) => summarizeRollForDebug(roll, rollIndex)),
+    typeResolution: sanitizeDebugValue(typeResolutionLog ?? [], 4),
+    buckets: summarizeEnhanceBuckets(buckets),
+  };
+}
+
+function summarizeRollForDebug(roll, rollIndex) {
+  const terms = Array.isArray(roll?.terms) ? roll.terms : [];
+  const diceTerms = terms
+    .map((term, termIndex) => {
+      const faces = Number(term?.faces);
+      if (!Number.isFinite(faces) || faces <= 0) return null;
+      const results = Array.isArray(term?.results)
+        ? term.results
+            .filter((result) => result?.active !== false && result?.discarded !== true)
+            .map((result) => Number(result?.result))
+            .filter((value) => Number.isFinite(value))
+        : [];
+      return {
+        termIndex,
+        faces,
+        results,
+        flavor: toTrimmedStringOrNull(term?.flavor ?? term?.options?.flavor),
+      };
+    })
+    .filter(Boolean);
+
+  return {
+    rollIndex,
+    formula: toTrimmedStringOrNull(roll?.formula ?? roll?._formula),
+    options: sanitizeDebugValue(roll?.options ?? null, 3),
+    diceTerms,
+  };
+}
+
+function summarizeEnhanceBuckets(buckets) {
+  if (!Array.isArray(buckets)) return [];
+  return buckets.map((bucket) => ({
+    key: bucket?.key ?? null,
+    damageType: bucket?.damageType ?? null,
+    faces: bucket?.faces ?? null,
+    diceCount: Array.isArray(bucket?.dice) ? bucket.dice.length : 0,
+    diceResults: Array.isArray(bucket?.dice) ? bucket.dice.map((die) => die?.value) : [],
+  }));
+}
+
+function sanitizeDebugValue(value, depth = 2) {
+  if (depth <= 0) {
+    if (Array.isArray(value)) return `[Array(${value.length})]`;
+    if (value && typeof value === "object") return "[Object]";
+    return value;
+  }
+
+  if (value == null) return value;
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    const limited = value.slice(0, 20);
+    return limited.map((entry) => sanitizeDebugValue(entry, depth - 1));
+  }
+
+  if (typeof value === "object") {
+    const out = {};
+    const entries = Object.entries(value).slice(0, 40);
+    for (const [key, entry] of entries) {
+      out[key] = sanitizeDebugValue(entry, depth - 1);
+    }
+    return out;
+  }
+
+  return String(value);
+}
+
 function isDamageLikeRoll(message, roll, rollIndex) {
   const rollType = String(roll?.options?.type ?? "").toLowerCase();
   if (/(damage|healing)/.test(rollType)) return true;
@@ -334,68 +448,131 @@ function getDnd5eFlaggedRollEntry(message, rollIndex) {
   return flagged[rollIndex] ?? null;
 }
 
-function getRollDamageType(message, roll, rollIndex) {
+function getRollDamageType(message, roll, rollIndex, typeResolutionLog = null) {
   const entry = getDnd5eFlaggedRollEntry(message, rollIndex);
   const single = message?.flags?.dnd5e?.roll ?? {};
   const options = roll?.options ?? {};
   const terms = Array.isArray(roll?.terms) ? roll.terms : [];
 
-  const candidates = [
-    options.damageType,
-    Array.isArray(options.damageTypes) ? options.damageTypes.join(", ") : null,
-    options.damage,
-    options.parts,
-    options.flavor,
-    roll?.flavor,
-    roll?.formula,
-    roll?._formula,
-    entry?.damageType,
-    Array.isArray(entry?.damageTypes) ? entry.damageTypes.join(", ") : null,
-    entry?.damage,
-    entry?.parts,
-    entry?.options?.damageType,
-    entry?.options?.damageTypes,
-    entry?.options?.damage,
-    entry?.options?.parts,
-    entry?.options?.flavor,
-    entry?.flavor,
-    single?.damageType,
-    Array.isArray(single?.damageTypes) ? single.damageTypes.join(", ") : null,
-    single?.damage,
-    single?.parts,
-    single?.options?.damageType,
-    single?.options?.damageTypes,
-    single?.options?.damage,
-    single?.options?.parts,
-    single?.options?.flavor,
-    single?.flavor,
+  const trace = Array.isArray(typeResolutionLog)
+    ? {
+        rollIndex,
+        formula: toTrimmedStringOrNull(roll?.formula ?? roll?._formula),
+        candidates: [],
+        fallback: null,
+        resolved: null,
+      }
+    : null;
+
+  const candidates = [];
+  pushDamageTypeCandidate(candidates, "roll.options.damageType", options.damageType);
+  pushDamageTypeCandidate(candidates, "roll.options.damageTypes", options.damageTypes);
+  pushDamageTypeCandidate(candidates, "roll.options.damage", options.damage);
+  pushDamageTypeCandidate(candidates, "roll.options.parts", options.parts);
+  pushDamageTypeCandidate(candidates, "roll.options.flavor", options.flavor);
+  pushDamageTypeCandidate(candidates, "roll.flavor", roll?.flavor);
+  pushDamageTypeCandidate(candidates, "roll.formula", roll?.formula);
+  pushDamageTypeCandidate(candidates, "roll._formula", roll?._formula);
+
+  pushDamageTypeCandidate(candidates, "flags.roll.damageType", entry?.damageType);
+  pushDamageTypeCandidate(candidates, "flags.roll.damageTypes", entry?.damageTypes);
+  pushDamageTypeCandidate(candidates, "flags.roll.damage", entry?.damage);
+  pushDamageTypeCandidate(candidates, "flags.roll.parts", entry?.parts);
+  pushDamageTypeCandidate(candidates, "flags.roll.options.damageType", entry?.options?.damageType);
+  pushDamageTypeCandidate(candidates, "flags.roll.options.damageTypes", entry?.options?.damageTypes);
+  pushDamageTypeCandidate(candidates, "flags.roll.options.damage", entry?.options?.damage);
+  pushDamageTypeCandidate(candidates, "flags.roll.options.parts", entry?.options?.parts);
+  pushDamageTypeCandidate(candidates, "flags.roll.options.flavor", entry?.options?.flavor);
+  pushDamageTypeCandidate(candidates, "flags.roll.flavor", entry?.flavor);
+
+  pushDamageTypeCandidate(candidates, "flags.single.damageType", single?.damageType);
+  pushDamageTypeCandidate(candidates, "flags.single.damageTypes", single?.damageTypes);
+  pushDamageTypeCandidate(candidates, "flags.single.damage", single?.damage);
+  pushDamageTypeCandidate(candidates, "flags.single.parts", single?.parts);
+  pushDamageTypeCandidate(candidates, "flags.single.options.damageType", single?.options?.damageType);
+  pushDamageTypeCandidate(candidates, "flags.single.options.damageTypes", single?.options?.damageTypes);
+  pushDamageTypeCandidate(candidates, "flags.single.options.damage", single?.options?.damage);
+  pushDamageTypeCandidate(candidates, "flags.single.options.parts", single?.options?.parts);
+  pushDamageTypeCandidate(candidates, "flags.single.options.flavor", single?.options?.flavor);
+  pushDamageTypeCandidate(candidates, "flags.single.flavor", single?.flavor);
+
+  const formulaTags = [
     ...extractDamageTypeTagsFromFormula(roll?.formula),
     ...extractDamageTypeTagsFromFormula(roll?._formula),
-    ...terms.flatMap((term) => [
-      term?.flavor,
-      term?.options?.flavor,
-      term?.options?.damageType,
-      term?.options?.damageTypes,
-      term?.options?.damage,
-      term?.options?.parts,
-      term?.type,
-    ]),
   ];
+  for (let index = 0; index < formulaTags.length; index += 1) {
+    pushDamageTypeCandidate(candidates, `roll.formulaTag[${index}]`, formulaTags[index]);
+  }
+
+  for (let termIndex = 0; termIndex < terms.length; termIndex += 1) {
+    const term = terms[termIndex];
+    pushDamageTypeCandidate(candidates, `roll.terms[${termIndex}].flavor`, term?.flavor);
+    pushDamageTypeCandidate(candidates, `roll.terms[${termIndex}].options.flavor`, term?.options?.flavor);
+    pushDamageTypeCandidate(candidates, `roll.terms[${termIndex}].options.damageType`, term?.options?.damageType);
+    pushDamageTypeCandidate(candidates, `roll.terms[${termIndex}].options.damageTypes`, term?.options?.damageTypes);
+    pushDamageTypeCandidate(candidates, `roll.terms[${termIndex}].options.damage`, term?.options?.damage);
+    pushDamageTypeCandidate(candidates, `roll.terms[${termIndex}].options.parts`, term?.options?.parts);
+    pushDamageTypeCandidate(candidates, `roll.terms[${termIndex}].type`, term?.type);
+  }
 
   for (const candidate of candidates) {
-    const value = normalizeDamageTypeLabel(candidate);
-    if (value && !/^(damage|healing)$/i.test(value)) return value;
+    const normalized = normalizeDamageTypeLabel(candidate.value);
+    if (trace) {
+      trace.candidates.push({
+        source: candidate.source,
+        raw: sanitizeDebugValue(candidate.value, 3),
+        normalized,
+      });
+    }
+    if (normalized && !/^(damage|healing)$/i.test(normalized)) {
+      if (trace) {
+        trace.resolved = { source: candidate.source, value: normalized };
+        typeResolutionLog.push(trace);
+      }
+      return normalized;
+    }
   }
 
   const contentType = getContentDamageTypeByRollIndex(message, rollIndex);
-  if (contentType) return contentType;
+  if (contentType) {
+    if (trace) {
+      trace.fallback = "message.content";
+      trace.resolved = { source: "message.content", value: contentType };
+      typeResolutionLog.push(trace);
+    }
+    return contentType;
+  }
 
   const itemType = getItemDamageTypeByRollIndex(message, rollIndex);
-  if (itemType) return itemType;
+  if (itemType) {
+    if (trace) {
+      trace.fallback = "item.damage.parts";
+      trace.resolved = { source: "item.damage.parts", value: itemType };
+      typeResolutionLog.push(trace);
+    }
+    return itemType;
+  }
 
   const kind = String(options.type ?? entry?.type ?? single?.type ?? "").toLowerCase();
-  if (kind === "healing") return "healing";
+  if (kind === "healing") {
+    if (trace) {
+      trace.fallback = "roll.kind";
+      trace.resolved = { source: "roll.kind", value: "healing" };
+      typeResolutionLog.push(trace);
+    }
+    return "healing";
+  }
+  if (trace) {
+    trace.fallback = "default";
+    trace.resolved = { source: "default", value: "damage" };
+    typeResolutionLog.push(trace);
+  }
   return "damage";
+}
+
+function pushDamageTypeCandidate(candidates, source, value) {
+  if (value == null) return;
+  candidates.push({ source, value });
 }
 
 function buildEnhanceBucketKey(damageType, faces) {
@@ -838,7 +1015,7 @@ function renderEnhanceDialogContent(buckets) {
 
   return `
     <div class="ns-enhance-damage">
-      <p>Set how many of the lowest dice to reroll for each damage bucket.</p>
+      <p>Set how many of the lowest dice to reroll for each damage.</p>
       <table style="width: 100%; border-collapse: collapse;">
         <thead>
           <tr>
@@ -1133,22 +1310,38 @@ async function repostDamageMessage(message, buckets = null, selectedCounts = nul
   try {
     const source = foundry?.utils?.deepClone?.(message.toObject()) ?? message.toObject();
     let changedDiceCount = 0;
+    const requested = getSelectedEnhanceCountTotal(selectedCounts);
     if (Array.isArray(buckets) && selectedCounts) {
       changedDiceCount = applyEnhanceRerolls(source, message, buckets, selectedCounts);
-      const requested = getSelectedEnhanceCountTotal(selectedCounts);
       if (requested > 0 && changedDiceCount === 0) {
         ui?.notifications?.warn?.("Enhance: no dice could be rerolled from this message.");
-        return;
+        return {
+          success: false,
+          reason: "no-dice-rerolled",
+          requested,
+          changedDiceCount,
+        };
       }
     }
     delete source._id;
     delete source._stats;
     source.user = game?.user?.id ?? source.user;
     source.timestamp = Date.now();
-    await ChatMessage.create(source);
+    const created = await ChatMessage.create(source);
+    return {
+      success: true,
+      requested,
+      changedDiceCount,
+      messageId: created?.id ?? null,
+    };
   } catch (err) {
     console.error(`${MODULE_ID} | Enhance damage failed.`, err);
     ui?.notifications?.error?.("Enhance damage failed. Check console for details.");
+    return {
+      success: false,
+      reason: "exception",
+      error: String(err?.message ?? err),
+    };
   }
 }
 
