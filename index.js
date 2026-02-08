@@ -271,13 +271,6 @@ function getContextMenuMessage(li) {
 function canEnhanceDamageMessage(message) {
   if (!message) return false;
 
-  const canCreate =
-    game?.user?.isGM === true ||
-    (typeof game?.user?.can === "function"
-      ? game.user.can("MESSAGE_CREATE") || game.user.can("CHAT_MESSAGE_CREATE")
-      : true);
-  if (!canCreate) return false;
-
   const type = String(message?.flags?.dnd5e?.roll?.type ?? "");
   if (/(damage|healing)/i.test(type)) return true;
 
