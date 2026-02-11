@@ -1634,12 +1634,14 @@ function buildActorSyncPayload(actor) {
   const system = actor?.system ?? {};
   const attributes = system.attributes ?? {};
   const abilities = system.abilities ?? {};
+  const currency = system.currency ?? {};
   const { items, spells, feats } = splitActorItems(actor);
   const characterId = getActorCharacterId(actor);
   const payload = {
     characterName: actor?.name ?? "",
     proficiencyBonus: toNumber(attributes.prof),
     initiative: getInitiativeValue(attributes, abilities),
+    armorClass: getArmorClassValue(attributes),
     hp: {
       current: toNumber(attributes.hp?.value),
       max: toNumber(attributes.hp?.max),
@@ -1647,6 +1649,13 @@ function buildActorSyncPayload(actor) {
     },
     hitDice: buildHitDice(actor),
     spellSlots: buildSpellSlots(system.spells),
+    currency: {
+      pp: toNumber(currency.pp),
+      gp: toNumber(currency.gp),
+      sp: toNumber(currency.sp),
+      cp: toNumber(currency.cp),
+    },
+    exhaustion: toNumber(attributes.exhaustion),
     abilities: buildAbilities(abilities),
     savingThrows: buildSavingThrows(abilities, attributes.prof),
     skills: buildSkills(actor, system.skills, abilities, system.bonuses, attributes.prof),
@@ -2084,6 +2093,15 @@ function getInitiativeValue(attributes, abilities) {
   const bonus = toNumber(init.bonus);
   const mod = getAbilityMod(abilities?.dex ?? {});
   return mod + bonus;
+}
+
+function getArmorClassValue(attributes) {
+  const ac = attributes?.ac ?? {};
+  if (ac.value != null) return toNumber(ac.value);
+  if (ac.total != null) return toNumber(ac.total);
+  if (ac.flat != null) return toNumber(ac.flat);
+  if (typeof ac === "number" || typeof ac === "string") return toNumber(ac);
+  return 0;
 }
 
 function getAbilityMod(ability) {
