@@ -1,6 +1,28 @@
 const MODULE_ID = "netherscrolls-module";
 const PLACEHOLDER_CHARACTER_ID = "PLACEHOLDER";
 const ABILITY_KEYS = ["str", "dex", "con", "int", "wis", "cha"];
+const IMPORT_TYPES = [
+  {
+    key: "classes",
+    label: "Classes",
+    icon: "fa-solid fa-graduation-cap",
+  },
+  {
+    key: "items",
+    label: "Items",
+    icon: "fa-solid fa-suitcase",
+  },
+  {
+    key: "spells",
+    label: "Spells",
+    icon: "fa-solid fa-wand-sparkles",
+  },
+  {
+    key: "monster",
+    label: "Monster",
+    icon: "fa-solid fa-dragon",
+  },
+];
 const SKILL_KEY_TO_NAME = {
   acr: "acrobatics",
   ani: "animalHandling",
@@ -27,6 +49,7 @@ const SETTINGS = {
   rerollInit: "rerollInitEachRound",
   npcDeathSave: "npcDeathSaveEachTurn",
   apiKey: "nsApiKey",
+  importFromNetherscroll: "importFromNetherscroll",
   syncButton: "showSyncButton",
   debug: "debugMode",
   devEnhancedDamage: "devEnhancedDamage",
@@ -63,6 +86,15 @@ Hooks.once("init", () => {
     default: "",
   });
 
+  game.settings.registerMenu(MODULE_ID, SETTINGS.importFromNetherscroll, {
+    name: "Import from Netherscroll [EXPERIMENTAL]",
+    label: "Open Importer",
+    hint: "Import classes, items, spells, and monsters from the Netherscroll website.",
+    icon: "fa-solid fa-cloud-arrow-down",
+    type: NetherscrollsImportSettings,
+    restricted: true,
+  });
+
   game.settings.register(MODULE_ID, SETTINGS.syncButton, {
     name: "Sync button",
     hint: "Show the sync button on actor sheets.",
@@ -91,6 +123,83 @@ Hooks.once("init", () => {
     default: false,
   });
 });
+
+class NetherscrollsImportSettings extends FormApplication {
+  static get defaultOptions() {
+    return foundry.utils.mergeObject(super.defaultOptions, {
+      id: "netherscrolls-import-settings",
+      title: "Import from Netherscroll [EXPERIMENTAL]",
+      template: `modules/${MODULE_ID}/templates/import-from-netherscroll.hbs`,
+      width: 640,
+      height: "auto",
+      classes: ["netherscrolls-import-window"],
+      submitOnChange: false,
+      closeOnSubmit: false,
+    });
+  }
+
+  getData(options = {}) {
+    const data = super.getData(options);
+    const apiKey = getNetherscrollsApiKey();
+    const today = new Date().toISOString().slice(0, 10);
+
+    return {
+      ...data,
+      hasApiKey: Boolean(apiKey),
+      importTypes: IMPORT_TYPES,
+      defaultSinceDate: today,
+    };
+  }
+
+  activateListeners(html) {
+    super.activateListeners(html);
+
+    const root = html?.[0] ?? html;
+    const sinceCheckbox = root?.querySelector?.('[name="sinceEnabled"]');
+    const sinceDate = root?.querySelector?.('[name="sinceDate"]');
+    const sincePanel = root?.querySelector?.(".ns-import-since-panel");
+
+    const updateSinceState = () => {
+      if (!sinceCheckbox || !sinceDate) return;
+      const enabled = Boolean(sinceCheckbox.checked);
+      sinceDate.disabled = !enabled;
+      sincePanel?.classList?.toggle("is-since-enabled", enabled);
+    };
+
+    sinceCheckbox?.addEventListener?.("change", updateSinceState);
+    updateSinceState();
+  }
+
+  async _updateObject(_event, formData) {
+    if (!getNetherscrollsApiKey()) {
+      ui?.notifications?.warn?.(
+        "Netherscrolls API Key is missing. Set it in Module Settings."
+      );
+      return;
+    }
+
+    const selectedTypes = IMPORT_TYPES.filter((type) =>
+      isImportTypeSelected(formData, type.key)
+    );
+    if (!selectedTypes.length) {
+      ui?.notifications?.warn?.("Select at least one Netherscroll import type.");
+      return;
+    }
+
+    const sinceEnabled = Boolean(formData?.sinceEnabled);
+    const sinceDate = String(formData?.sinceDate ?? "").trim();
+    if (sinceEnabled && !sinceDate) {
+      ui?.notifications?.warn?.("Choose a date or disable Since.");
+      return;
+    }
+
+    const range = sinceEnabled ? `since ${sinceDate}` : "since forever";
+    const labels = selectedTypes.map((type) => type.label.toLowerCase()).join(", ");
+    ui?.notifications?.info?.(
+      `Netherscrolls import preview: ${labels} ${range}.`
+    );
+  }
+}
 
 Hooks.once("ready", () => {
   toggleRerollInitHook(game.settings.get(MODULE_ID, SETTINGS.rerollInit) === true);
@@ -151,6 +260,14 @@ function isDebugEnabled() {
 
 function isEnhancedDamageEnabled() {
   return Boolean(game?.settings?.get(MODULE_ID, SETTINGS.devEnhancedDamage));
+}
+
+function getNetherscrollsApiKey() {
+  return String(game?.settings?.get(MODULE_ID, SETTINGS.apiKey) ?? "").trim();
+}
+
+function isImportTypeSelected(formData, key) {
+  return Boolean(formData?.[`importTypes.${key}`] ?? formData?.importTypes?.[key]);
 }
 
 function initEnhanceDialogInputHandlers() {

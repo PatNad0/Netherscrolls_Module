@@ -2,7 +2,7 @@
   "id": "netherscrolls-module",
   "title": "Netherscrolls Module",
   "description": "My personnal module to do some fun stuff :3.",
-  "version": "1.2.135",
+  "version": "1.2.137",
   "authors": [
     {
       "name": "Pat"
@@ -20,6 +20,56 @@
       "lang": "en",
       "name": "English",
       "path": "lang/en.json"
+    }
+  ],
+  "packs": [
+    {
+      "name": "classes",
+      "label": "Classes",
+      "path": "./packs/classes",
+      "type": "Item",
+      "system": "dnd5e"
+    },
+    {
+      "name": "items",
+      "label": "Items",
+      "path": "./packs/items",
+      "type": "Item",
+      "system": "dnd5e"
+    },
+    {
+      "name": "spells",
+      "label": "Spells",
+      "path": "./packs/spells",
+      "type": "Item",
+      "system": "dnd5e"
+    },
+    {
+      "name": "feats",
+      "label": "Feats",
+      "path": "./packs/feats",
+      "type": "Item",
+      "system": "dnd5e"
+    },
+    {
+      "name": "monster",
+      "label": "Monster",
+      "path": "./packs/monster",
+      "type": "Actor",
+      "system": "dnd5e"
+    }
+  ],
+  "packFolders": [
+    {
+      "name": "Netherscrolls",
+      "sorting": "m",
+      "packs": [
+        "classes",
+        "items",
+        "spells",
+        "feats",
+        "monster"
+      ]
     }
   ],
   "esmodules": [
