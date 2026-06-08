@@ -32,10 +32,19 @@ const IMPORT_PACKS = {
 const NETHERSCROLLS_API_BASE = "https://api.netherscrolls.ca/api/foundry";
 const SYNC_ENDPOINT = `${NETHERSCROLLS_API_BASE}/sync`;
 const NETHERSCROLLS_IMPORT_ENDPOINTS = {
+  items: `${NETHERSCROLLS_API_BASE}/import/items`,
   spells: `${NETHERSCROLLS_API_BASE}/import/spells`,
 };
 const NETHERSCROLLS_DEFAULT_IMAGE = "https://i.postimg.cc/zfYC8nN2/image.png";
 const NETHERSCROLLS_MAX_SPELL_LEVEL = 15;
+const NETHERSCROLLS_ITEM_FOLDERS = [
+  { type: "weapon", label: "Weapons", sort: 1000 },
+  { type: "equipment", label: "Equipment", sort: 2000 },
+  { type: "consumable", label: "Consumables", sort: 3000 },
+  { type: "tool", label: "Tools", sort: 4000 },
+  { type: "container", label: "Containers", sort: 5000 },
+  { type: "loot", label: "Loot", sort: 6000 },
+];
 const NETHERSCROLLS_SPELL_LEVEL_FOLDERS = Array.from(
   { length: NETHERSCROLLS_MAX_SPELL_LEVEL + 1 },
   (_value, level) => ({
@@ -83,6 +92,129 @@ const NETHERSCROLLS_DAMAGE_TYPES = [
   "slashing",
   "thunder",
 ];
+const NETHERSCROLLS_ITEM_TYPES = new Set([
+  "weapon",
+  "equipment",
+  "consumable",
+  "tool",
+  "container",
+  "loot",
+]);
+const NETHERSCROLLS_ITEM_RARITIES = new Set([
+  "common",
+  "uncommon",
+  "rare",
+  "veryRare",
+  "legendary",
+  "artifact",
+]);
+const NETHERSCROLLS_ITEM_VALID_PROPERTIES = {
+  weapon: new Set(["ada", "amm", "fin", "fir", "foc", "hvy", "lgt", "lod", "mgc", "rch", "rel", "ret", "sil", "spc", "thr", "two", "ver"]),
+  equipment: new Set(["ada", "foc", "mgc", "stealthDisadvantage"]),
+  consumable: new Set(["ada", "amm", "foc", "mgc", "ret", "sil"]),
+  tool: new Set(["foc", "mgc"]),
+  container: new Set(["mgc", "weightlessContents"]),
+  loot: new Set(["mgc"]),
+};
+const NETHERSCROLLS_ITEM_PROPERTY_ALIASES = {
+  adamantine: "ada",
+  ada: "ada",
+  ammunition: "amm",
+  ammo: "amm",
+  amm: "amm",
+  finesse: "fin",
+  fin: "fin",
+  firearm: "fir",
+  fir: "fir",
+  focus: "foc",
+  foc: "foc",
+  heavy: "hvy",
+  hvy: "hvy",
+  light: "lgt",
+  lgt: "lgt",
+  loading: "lod",
+  lod: "lod",
+  magic: "mgc",
+  magical: "mgc",
+  mgc: "mgc",
+  reach: "rch",
+  rch: "rch",
+  reload: "rel",
+  rel: "rel",
+  returning: "ret",
+  ret: "ret",
+  silver: "sil",
+  silvered: "sil",
+  sil: "sil",
+  special: "spc",
+  spc: "spc",
+  "stealth disadvantage": "stealthDisadvantage",
+  stealthdisadvantage: "stealthDisadvantage",
+  thrown: "thr",
+  thr: "thr",
+  "two handed": "two",
+  "two-handed": "two",
+  twohanded: "two",
+  two: "two",
+  versatile: "ver",
+  ver: "ver",
+  weightless: "weightlessContents",
+  "weightless contents": "weightlessContents",
+  weightlesscontents: "weightlessContents",
+};
+const NETHERSCROLLS_WEAPON_TYPE_BY_NAME = {
+  battleaxe: "martialM",
+  blowgun: "martialR",
+  club: "simpleM",
+  dagger: "simpleM",
+  dart: "simpleR",
+  flail: "martialM",
+  glaive: "martialM",
+  greataxe: "martialM",
+  greatclub: "simpleM",
+  greatsword: "martialM",
+  halberd: "martialM",
+  handaxe: "simpleM",
+  "hand crossbow": "martialR",
+  "heavy crossbow": "martialR",
+  javelin: "simpleM",
+  lance: "martialM",
+  "light crossbow": "simpleR",
+  "light hammer": "simpleM",
+  longbow: "martialR",
+  longsword: "martialM",
+  mace: "simpleM",
+  maul: "martialM",
+  morningstar: "martialM",
+  musket: "martialR",
+  pike: "martialM",
+  pistol: "martialR",
+  quarterstaff: "simpleM",
+  rapier: "martialM",
+  scimitar: "martialM",
+  shortbow: "simpleR",
+  shortsword: "martialM",
+  sickle: "simpleM",
+  sling: "simpleR",
+  spear: "simpleM",
+  trident: "martialM",
+  warhammer: "martialM",
+  warpick: "martialM",
+  whip: "martialM",
+};
+const ACTOR_SHEET_ROOT_SELECTOR = ".app, .application, .window-app";
+const ACTOR_SHEET_SCROLLABLE_SELECTOR = [
+  ".window-content",
+  ".sheet-body",
+  ".sheet-content",
+  ".tab.active",
+  ".scrollable",
+  "[data-tab].active",
+  "[data-scrollable]",
+  "form",
+].join(",");
+const ACTOR_SHEET_SCROLL_RESTORE_MS = 1200;
+const ACTOR_SHEET_SCROLL_RESTORE_DELAYS = [0, 16, 50, 120, 250, 500, 1250];
 const NETHERSCROLLS_NUMBER_WORDS = {
   one: 1,
   two: 2,
@@ -312,23 +444,21 @@ class NetherscrollsImportSettings extends foundry.applications.api.HandlebarsApp
       ui?.notifications?.warn?.(`Import endpoint not configured yet for: ${labels}.`);
     }
 
-    const spellRequest = requests.find((request) => request.typeKey === "spells");
-    if (spellRequest) {
+    let importedAny = false;
+    for (const request of requests) {
       try {
-        const response = await sendNetherscrollsImportRequest(spellRequest);
+        const response = await sendNetherscrollsImportRequest(request);
         const result = await applyNetherscrollsImportResponse(response);
-        const imported = result?.spells?.created ?? 0;
-        const updated = result?.spells?.updated ?? 0;
-        const removed = result?.spells?.deleted ?? 0;
-        ui?.notifications?.info?.(
-          `Netherscrolls spells imported: ${imported} created, ${updated} updated, ${removed} removed.`
-        );
+        importedAny = true;
+        ui?.notifications?.info?.(formatNetherscrollsImportResult(request.typeKey, result));
       } catch (err) {
-        console.error(`${MODULE_ID} | Netherscrolls spell import failed.`, err);
+        console.error(`${MODULE_ID} | Netherscrolls ${request.typeKey} import failed.`, err);
         ui?.notifications?.error?.(
-          `Netherscrolls spell import failed: ${err?.message ?? err}`
+          `Netherscrolls ${getNetherscrollsImportTypeLabel(request.typeKey)} import failed: ${err?.message ?? err}`
         );
       }
+    }
+    if (importedAny) {
       return;
     }
 
@@ -343,24 +473,29 @@ class NetherscrollsImportSettings extends foundry.applications.api.HandlebarsApp
 Hooks.once("ready", () => {
   toggleRerollInitHook(game.settings.get(MODULE_ID, SETTINGS.rerollInit) === true);
   toggleNpcDeathSaveHook(game.settings.get(MODULE_ID, SETTINGS.npcDeathSave) === true);
+  initActorSheetStabilityHandlers();
   initEnhanceDialogInputHandlers();
   initChatNumberActionHandlers();
 });
 
 Hooks.on("renderApplicationV1", (app, html) => {
   injectSyncButtonV1(app, html);
+  restoreActorRelatedSheetScroll(app, html);
 });
 
 Hooks.on("renderApplicationV2", (app, element) => {
   injectSyncButtonV2(app, element);
+  restoreActorRelatedSheetScroll(app, element);
 });
 
 Hooks.on("renderActorSheet", (app, html) => {
   injectSyncButtonV1(app, html);
+  restoreActorRelatedSheetScroll(app, html);
 });
 
 Hooks.on("renderActorSheetV2", (app, html) => {
   injectSyncButtonV2(app, html);
+  restoreActorRelatedSheetScroll(app, html);
 });
 
 Hooks.on("getChatLogEntryContext", (_html, options) => {
@@ -379,6 +514,8 @@ let npcDeathSaveHandler = null;
 let enhanceDialogInputHandlersBound = false;
 let chatNumberActionHandlersBound = false;
 let chatNumberActionToolbar = null;
+let actorSheetStabilityHandlersBound = false;
+const actorSheetScrollSnapshots = new Map();
 
 function rerenderActorSheets() {
   const apps = Object.values(ui?.windows ?? {});
@@ -399,6 +536,322 @@ function isDebugEnabled() {
 
 function isEnhancedDamageEnabled() {
   return Boolean(game?.settings?.get(MODULE_ID, SETTINGS.devEnhancedDamage));
+}
+
+function initActorSheetStabilityHandlers() {
+  if (actorSheetStabilityHandlersBound) return;
+  if (typeof document?.addEventListener !== "function") return;
+
+  for (const eventName of ["pointerdown", "mousedown", "click", "change", "input", "submit"]) {
+    document.addEventListener(eventName, rememberActorRelatedSheetScrollFromEvent, true);
+  }
+  actorSheetStabilityHandlersBound = true;
+}
+
+function rememberActorRelatedSheetScrollFromEvent(event) {
+  const target = event?.target;
+  if (!isElementNode(target)) return;
+
+  const root = target.closest?.(ACTOR_SHEET_ROOT_SELECTOR);
+  if (!root) return;
+
+  const app = getApplicationFromRoot(root);
+  if (!isActorRelatedSheetApp(app) && !isActorRelatedSheetRoot(root)) return;
+
+  rememberActorRelatedSheetScroll(app, root, target);
+  scheduleActorRelatedSheetScrollRestore(app, root);
+}
+
+function restoreActorRelatedSheetScroll(app, htmlOrElement) {
+  if (!isActorRelatedSheetApp(app)) return;
+
+  const root = getApplicationRootFromRender(app, htmlOrElement);
+  if (!root) return;
+
+  scheduleActorRelatedSheetScrollRestore(app, root);
+}
+
+function rememberActorRelatedSheetScroll(app, root, target = null) {
+  if (!isElementNode(root)) return;
+
+  const key = getActorRelatedSheetKey(app, root);
+  if (!key) return;
+
+  const containers = getActorSheetScrollContainers(root, target)
+    .map((element, index) => ({
+      locator: getActorSheetScrollContainerLocator(element, root, index),
+      top: Number(element.scrollTop ?? 0),
+      left: Number(element.scrollLeft ?? 0),
+    }))
+    .filter((entry) => entry.top > 0 || entry.left > 0);
+
+  const windowTop = Number(globalThis.scrollY ?? 0);
+  const windowLeft = Number(globalThis.scrollX ?? 0);
+  if (!containers.length && windowTop <= 0 && windowLeft <= 0) return;
+
+  actorSheetScrollSnapshots.set(key, {
+    created: Date.now(),
+    containers,
+    focus: getActorSheetFocusLocator(root, target),
+    windowTop,
+    windowLeft,
+  });
+}
+
+function scheduleActorRelatedSheetScrollRestore(app, root) {
+  const key = getActorRelatedSheetKey(app, root);
+  const snapshot = key ? actorSheetScrollSnapshots.get(key) : null;
+  if (!key || !snapshot || Date.now() - snapshot.created > ACTOR_SHEET_SCROLL_RESTORE_MS) return;
+
+  for (const delay of ACTOR_SHEET_SCROLL_RESTORE_DELAYS) {
+    if (delay === 0 && typeof globalThis.requestAnimationFrame === "function") {
+      globalThis.requestAnimationFrame(() => applyActorRelatedSheetScrollSnapshot(app, root, key));
+    } else {
+      setTimeout(() => applyActorRelatedSheetScrollSnapshot(app, root, key), delay);
+    }
+  }
+}
+
+function applyActorRelatedSheetScrollSnapshot(app, root, key) {
+  const snapshot = actorSheetScrollSnapshots.get(key);
+  if (!snapshot) return;
+
+  if (Date.now() - snapshot.created > ACTOR_SHEET_SCROLL_RESTORE_MS) {
+    actorSheetScrollSnapshots.delete(key);
+    return;
+  }
+
+  const liveRoot = getLiveApplicationRoot(app, root);
+  if (!liveRoot) return;
+
+  for (const entry of snapshot.containers) {
+    const element = findActorSheetScrollContainer(liveRoot, entry.locator);
+    if (!element) continue;
+    if (entry.top > 0) element.scrollTop = entry.top;
+    if (entry.left > 0) element.scrollLeft = entry.left;
+  }
+
+  if ((snapshot.windowTop > 0 || snapshot.windowLeft > 0) && typeof globalThis.scrollTo === "function") {
+    globalThis.scrollTo(snapshot.windowLeft, snapshot.windowTop);
+  }
+
+  restoreActorSheetFocus(liveRoot, snapshot.focus);
+}
+
+function getApplicationRootFromRender(app, htmlOrElement) {
+  const element = getElementFromHookArgument(htmlOrElement);
+  const root = element?.closest?.(ACTOR_SHEET_ROOT_SELECTOR) ?? null;
+  if (root) return root;
+
+  const appElement = getElementFromHookArgument(app?.element);
+  const appRoot = appElement?.closest?.(ACTOR_SHEET_ROOT_SELECTOR) ?? null;
+  if (appRoot) return appRoot;
+
+  const appId = getApplicationId(app);
+  if (!appId || typeof document?.querySelector !== "function") return null;
+
+  return (
+    document.querySelector(`[data-appid="${cssAttributeValue(appId)}"]`) ??
+    document.querySelector(`[data-application-id="${cssAttributeValue(appId)}"]`) ??
+    document.getElementById?.(String(appId)) ??
+    null
+  );
+}
+
+function getLiveApplicationRoot(app, fallbackRoot) {
+  if (fallbackRoot?.isConnected) return fallbackRoot;
+  return getApplicationRootFromRender(app, null);
+}
+
+function getElementFromHookArgument(value) {
+  if (isElementNode(value)) return value;
+  if (isElementNode(value?.[0])) return value[0];
+  if (typeof value?.get === "function") {
+    const element = value.get(0);
+    if (isElementNode(element)) return element;
+  }
+  return null;
+}
+
+function getApplicationFromRoot(root) {
+  const appId = getApplicationId(null, root);
+  if (!appId) return null;
+
+  const windows = globalThis.ui?.windows ?? {};
+  const fromWindows = windows[appId] ?? windows[Number(appId)];
+  if (fromWindows) return fromWindows;
+
+  const instances = globalThis.foundry?.applications?.instances;
+  return instances?.get?.(appId) ?? instances?.get?.(Number(appId)) ?? null;
+}
+
+function getApplicationId(app, root = null) {
+  return (
+    root?.dataset?.appid ??
+    root?.dataset?.appId ??
+    root?.dataset?.applicationId ??
+    root?.dataset?.applicationid ??
+    app?.appId ??
+    app?.id ??
+    null
+  );
+}
+
+function getActorRelatedSheetKey(app, root) {
+  const appId = getApplicationId(app, root);
+  if (appId != null && appId !== "") return `app:${appId}`;
+
+  const actor = getActorFromApp(app);
+  const actorId = actor?.uuid ?? actor?.id ?? actor?._id ?? null;
+  if (actorId) return `actor:${actorId}`;
+
+  if (root?.id) return `root:${root.id}`;
+  return null;
+}
+
+function isActorRelatedSheetRoot(root) {
+  if (!isElementNode(root)) return false;
+  const classes = String(root.className ?? "");
+  if (/\bactor\b/i.test(classes)) return true;
+  return Boolean(root.querySelector?.(".actor, [data-actor-id], [data-actor-uuid]"));
+}
+
+function getActorSheetScrollContainers(root, target = null) {
+  const elements = [root, ...Array.from(root.querySelectorAll?.(ACTOR_SHEET_SCROLLABLE_SELECTOR) ?? [])];
+
+  let current = isElementNode(target) ? target : null;
+  while (current && current !== root) {
+    if (isPotentialScrollContainer(current)) elements.push(current);
+    current = current.parentElement;
+  }
+
+  const seen = new Set();
+  return elements.filter((element) => {
+    if (!isElementNode(element) || seen.has(element)) return false;
+    seen.add(element);
+    return isPotentialScrollContainer(element);
+  });
+}
+
+function isPotentialScrollContainer(element) {
+  if (!isElementNode(element)) return false;
+  return (
+    Number(element.scrollTop ?? 0) > 0 ||
+    Number(element.scrollLeft ?? 0) > 0 ||
+    Number(element.scrollHeight ?? 0) - Number(element.clientHeight ?? 0) > 1 ||
+    Number(element.scrollWidth ?? 0) - Number(element.clientWidth ?? 0) > 1
+  );
+}
+
+function getActorSheetScrollContainerLocator(element, root, fallbackIndex) {
+  if (element === root) return { type: "root" };
+
+  for (const className of ["window-content", "sheet-body", "sheet-content", "scrollable"]) {
+    if (element.classList?.contains(className)) {
+      return {
+        type: "class",
+        value: className,
+        index: getElementMatchIndex(root.querySelectorAll?.(`.${className}`), element),
+      };
+    }
+  }
+
+  const tab = element.dataset?.tab;
+  if (tab) {
+    return {
+      type: "tab",
+      value: tab,
+      index: getElementMatchIndex(root.querySelectorAll?.("[data-tab]"), element, (candidate) => {
+        return candidate?.dataset?.tab === tab;
+      }),
+    };
+  }
+
+  if (element.id) return { type: "id", value: element.id };
+  return { type: "index", value: fallbackIndex };
+}
+
+function findActorSheetScrollContainer(root, locator) {
+  if (!locator) return null;
+  if (locator.type === "root") return root;
+
+  if (locator.type === "class") {
+    const matches = Array.from(root.querySelectorAll?.(`.${locator.value}`) ?? []);
+    return matches[locator.index] ?? matches[0] ?? null;
+  }
+
+  if (locator.type === "tab") {
+    const matches = Array.from(root.querySelectorAll?.("[data-tab]") ?? []).filter((element) => {
+      return element?.dataset?.tab === locator.value;
+    });
+    return matches[locator.index] ?? matches[0] ?? null;
+  }
+
+  if (locator.type === "id") {
+    return root.querySelector?.(`#${cssIdentifier(locator.value)}`) ?? null;
+  }
+
+  if (locator.type === "index") {
+    return getActorSheetScrollContainers(root)[locator.value] ?? null;
+  }
+
+  return null;
+}
+
+function getActorSheetFocusLocator(root, target = null) {
+  const active = document?.activeElement;
+  const element = root.contains?.(active) ? active : target;
+  if (!isFocusableSheetField(element)) return null;
+
+  const name = element.getAttribute?.("name");
+  if (name) return { type: "name", value: name };
+  if (element.id) return { type: "id", value: element.id };
+  return null;
+}
+
+function restoreActorSheetFocus(root, locator) {
+  if (!locator) return;
+
+  let element = null;
+  if (locator.type === "name") {
+    element = root.querySelector?.(`[name="${cssAttributeValue(locator.value)}"]`) ?? null;
+  } else if (locator.type === "id") {
+    element = root.querySelector?.(`#${cssIdentifier(locator.value)}`) ?? null;
+  }
+
+  if (!isFocusableSheetField(element) || document?.activeElement === element) return;
+
+  try {
+    element.focus({ preventScroll: true });
+  } catch {
+    element.focus();
+  }
+}
+
+function isFocusableSheetField(element) {
+  if (!isElementNode(element)) return false;
+  return Boolean(element.matches?.("input, select, textarea, [contenteditable='true']"));
+}
+
+function getElementMatchIndex(elements, target, filter = null) {
+  const matches = Array.from(elements ?? []).filter((element) => {
+    return !filter || filter(element);
+  });
+  const index = matches.indexOf(target);
+  return index >= 0 ? index : 0;
+}
+
+function isElementNode(value) {
+  return Boolean(value && value.nodeType === 1);
+}
+
+function cssIdentifier(value) {
+  const text = String(value ?? "");
+  return globalThis.CSS?.escape?.(text) ?? text.replace(/[^a-zA-Z0-9_-]/g, "\\$&");
+}
+
+function cssAttributeValue(value) {
+  return String(value ?? "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
 function getNetherscrollsApiKey() {
@@ -492,7 +945,25 @@ function buildNetherscrollsImportDestinationPlan(selectedTypes) {
     );
   }
 
+  if (destinations.items) {
+    destinations.items.folderRule = "Items / {type}";
+    destinations.items.types = NETHERSCROLLS_ITEM_FOLDERS.map((folder) => folder.label);
+  }
+
   return destinations;
+}
+
+function formatNetherscrollsImportResult(typeKey, result) {
+  const label = getNetherscrollsImportTypeLabel(typeKey);
+  const imported = result?.[typeKey]?.created ?? 0;
+  const updated = result?.[typeKey]?.updated ?? 0;
+  const removed = result?.[typeKey]?.deleted ?? 0;
+  return `Netherscrolls ${label} imported: ${imported} created, ${updated} updated, ${removed} removed.`;
+}
+
+function getNetherscrollsImportTypeLabel(typeKey) {
+  const definition = IMPORT_TYPES.find((type) => type.key === typeKey);
+  return definition?.label?.toLowerCase?.() ?? String(typeKey ?? "content");
 }
 
 async function sendNetherscrollsImportRequest(importRequest) {
@@ -511,12 +982,70 @@ async function sendNetherscrollsImportRequest(importRequest) {
 
 async function applyNetherscrollsImportResponse(data) {
   const result = {};
+  const items = getNetherscrollsResponseDataset(data, "items");
+  if (Array.isArray(items)) {
+    result.items = await importNetherscrollsItems(items);
+  }
+
   const spells = getNetherscrollsResponseDataset(data, "spells");
   if (Array.isArray(spells)) {
     result.spells = await importNetherscrollsSpells(spells);
   }
 
   return result;
+}
+
+async function importNetherscrollsItems(items) {
+  const pack = getNetherscrollsImportPack("items");
+  if (!pack) throw new Error("Netherscrolls Items compendium pack was not found.");
+  await ensureNetherscrollsImportPackWritable(pack);
+
+  const existingByNetherId = await getCompendiumDocumentsByNetherId(pack);
+  const itemData = [];
+  const deleteIds = [];
+  const folderCache = new Map();
+  await ensureNetherscrollsItemFolderTree(pack, folderCache);
+
+  for (const item of items) {
+    const netherscrollsId = getNetherscrollsSourceId(item);
+    if (isNetherscrollsDeleted(item)) {
+      const existing = netherscrollsId
+        ? existingByNetherId.get(String(netherscrollsId))
+        : null;
+      if (existing?.id) deleteIds.push(existing.id);
+      continue;
+    }
+
+    const prepared = normalizeNetherscrollsItemData(item);
+    if (netherscrollsId && existingByNetherId.has(String(netherscrollsId))) {
+      prepared._id = existingByNetherId.get(String(netherscrollsId)).id;
+    }
+    const folder = await ensureNetherscrollsItemFolder(pack, prepared, folderCache);
+    if (folder?.id) prepared.folder = folder.id;
+    itemData.push(prepared);
+  }
+
+  const ItemClass = Item?.implementation ?? Item;
+  if (deleteIds.length) {
+    await ItemClass.deleteDocuments(deleteIds, { pack: pack.collection });
+  }
+
+  const updates = itemData.filter((item) => item._id);
+  const creates = itemData.filter((item) => !item._id);
+  if (updates.length) {
+    await ItemClass.updateDocuments(updates, { pack: pack.collection });
+  }
+
+  if (!creates.length) {
+    return { created: 0, updated: updates.length, deleted: deleteIds.length };
+  }
+
+  const created = await ItemClass.createDocuments(creates, { pack: pack.collection });
+  return {
+    created: created.length,
+    updated: updates.length,
+    deleted: deleteIds.length,
+  };
 }
 
 async function importNetherscrollsSpells(spells) {
@@ -577,7 +1106,7 @@ async function ensureNetherscrollsImportPackWritable(pack) {
     await pack.configure({ locked: false });
   }
   if (pack.locked) {
-    throw new Error("Unlock the Netherscrolls Spells compendium before importing.");
+    throw new Error(`Unlock the ${pack.title ?? pack.collection ?? "Netherscrolls"} compendium before importing.`);
   }
 }
 
@@ -596,7 +1125,7 @@ function getNetherscrollsResponseDataset(data, dataKey) {
   if (Array.isArray(data?.[dataKey])) return data[dataKey];
   if (data?.meta?.dataKey === dataKey && Array.isArray(data?.data)) return data.data;
   if (Array.isArray(data?.data?.[dataKey])) return data.data[dataKey];
-  return [];
+  return null;
 }
 
 function getNetherscrollsSourceId(data) {
@@ -611,6 +1140,589 @@ function isNetherscrollsDeleted(data) {
 function getNetherscrollsImportPack(typeKey) {
   const packName = IMPORT_PACKS[typeKey] ?? typeKey;
   return game?.packs?.get?.(`${MODULE_ID}.${packName}`) ?? null;
+}
+
+function normalizeNetherscrollsItemData(item) {
+  if (item?.foundry || item?.document) {
+    return normalizeNetherscrollsFoundryItemData(item);
+  }
+
+  const source = duplicateNetherscrollsData(item);
+  const netherscrollsId = getNetherscrollsSourceId(item);
+  const itemType = normalizeNetherscrollsItemDocumentType(source);
+  const descriptionHtml = toTrimmedStringOrNull(
+    item?.descriptionHtml ?? item?.description ?? source.descriptionHtml ?? source.description
+  );
+  const sourceName = toTrimmedStringOrNull(source.source);
+  const itemData = {
+    name: toTrimmedStringOrNull(source.name) ?? "Netherscrolls Item",
+    type: itemType,
+    img: toTrimmedStringOrNull(source.img ?? source.image) ?? NETHERSCROLLS_DEFAULT_IMAGE,
+    sort: 0,
+    ownership: {
+      default: 0,
+    },
+    system: buildNetherscrollsItemSystem(source, {
+      itemType,
+      descriptionHtml,
+      netherscrollsId,
+      sourceName,
+    }),
+    effects: [],
+  };
+
+  applyNetherscrollsImportFlags(itemData, source, netherscrollsId);
+  return itemData;
+}
+
+function normalizeNetherscrollsFoundryItemData(item) {
+  const source = duplicateNetherscrollsData(item?.foundry ?? item?.document);
+  const netherscrollsId = getNetherscrollsSourceId(item);
+  source.name = toTrimmedStringOrNull(source.name) ?? "Netherscrolls Item";
+  source.type = normalizeNetherscrollsItemDocumentType({
+    ...item,
+    type: source.type,
+    system: source.system,
+  });
+  source.img = toTrimmedStringOrNull(source.img ?? source.image) ?? NETHERSCROLLS_DEFAULT_IMAGE;
+  source.sort ??= 0;
+  source.ownership ??= { default: 0 };
+  source.effects ??= [];
+
+  const descriptionHtml = toTrimmedStringOrNull(
+    source.system?.description?.value ?? item?.descriptionHtml ?? item?.description
+  );
+  const sourceName = toTrimmedStringOrNull(item?.source ?? source?.system?.source?.book);
+  const defaults = buildNetherscrollsItemSystem(
+    {
+      ...item,
+      system: source.system,
+      type: source.type,
+      properties: item?.properties ?? source.system?.properties,
+    },
+    {
+      itemType: source.type,
+      descriptionHtml,
+      netherscrollsId,
+      sourceName,
+    }
+  );
+  source.system = mergeNetherscrollsDefaults(defaults, source.system ?? {});
+  source.system.identifier ??=
+    netherscrollsId ? `netherscrolls-${netherscrollsId}` : slugifyNetherscrollsIdentifier(source.name);
+  source.system.source = buildNetherscrollsItemSource(sourceName, {
+    ...item,
+    system: {
+      ...(item?.system ?? {}),
+      source: source.system.source,
+    },
+  });
+
+  applyNetherscrollsImportFlags(source, item, netherscrollsId);
+  return source;
+}
+
+function buildNetherscrollsItemSystem(source, { itemType, descriptionHtml, netherscrollsId, sourceName }) {
+  const system = {
+    description: {
+      value: descriptionHtml ?? "",
+      chat: "",
+    },
+    identifier:
+      toTrimmedStringOrNull(source?.system?.identifier) ??
+      (netherscrollsId ? `netherscrolls-${netherscrollsId}` : slugifyNetherscrollsIdentifier(source?.name)),
+    source: buildNetherscrollsItemSource(sourceName, source),
+    identified: true,
+    unidentified: {
+      name: "",
+      description: "",
+    },
+    quantity: normalizeNetherscrollsItemQuantity(source),
+    weight: normalizeNetherscrollsItemWeight(source),
+    price: normalizeNetherscrollsItemPrice(source),
+    rarity: normalizeNetherscrollsItemRarity(source?.system?.rarity ?? source?.rarity),
+    properties: normalizeNetherscrollsItemProperties(source, itemType),
+  };
+
+  if (isNetherscrollsEquippableItemType(itemType)) {
+    system.attunement = normalizeNetherscrollsItemAttunement(source?.system?.attunement ?? source?.attunement);
+    system.attuned = Boolean(source?.system?.attuned ?? source?.attuned ?? false);
+    system.equipped = Boolean(source?.system?.equipped ?? source?.equipped ?? false);
+  }
+
+  applyNetherscrollsItemTypeSystem(system, source, itemType);
+  return system;
+}
+
+function applyNetherscrollsItemTypeSystem(system, source, itemType) {
+  if (itemType === "weapon") {
+    system.activities = source?.system?.activities ?? {};
+    system.ammunition = normalizeNetherscrollsWeaponAmmunition(source);
+    system.armor = {
+      value: Math.max(0, toNumber(source?.system?.armor?.value ?? source?.armor?.value, 0)),
+    };
+    system.damage = {
+      base: normalizeNetherscrollsItemDamagePart(
+        source?.system?.damage?.base ?? source?.damage?.base ?? source?.damage,
+        getNetherscrollsItemDamageType(source)
+      ),
+      versatile: normalizeNetherscrollsItemDamagePart(
+        source?.system?.damage?.versatile ?? source?.damage?.versatile ?? source?.versatileDamage,
+        getNetherscrollsItemDamageType(source)
+      ),
+    };
+    system.magicalBonus = normalizeNetherscrollsMagicalBonus(source);
+    system.mastery = toTrimmedStringOrNull(source?.system?.mastery ?? source?.mastery) ?? "";
+    system.proficient = normalizeNetherscrollsNullableNumber(source?.system?.proficient ?? source?.proficient);
+    system.range = normalizeNetherscrollsWeaponRange(source);
+    system.type = normalizeNetherscrollsItemSubtype(source, "weapon");
+    return;
+  }
+
+  if (itemType === "equipment") {
+    system.activities = source?.system?.activities ?? {};
+    system.armor = normalizeNetherscrollsEquipmentArmor(source);
+    system.proficient = normalizeNetherscrollsNullableNumber(source?.system?.proficient ?? source?.proficient);
+    system.strength = normalizeNetherscrollsNullableNumber(
+      source?.system?.strength ?? source?.armor?.strength ?? source?.strength
+    );
+    system.type = normalizeNetherscrollsItemSubtype(source, "equipment");
+    return;
+  }
+
+  if (itemType === "consumable") {
+    system.activities = source?.system?.activities ?? {};
+    system.damage = {
+      base: normalizeNetherscrollsItemDamagePart(
+        source?.system?.damage?.base ?? source?.damage?.base ?? source?.damage,
+        getNetherscrollsItemDamageType(source)
+      ),
+      replace: Boolean(source?.system?.damage?.replace ?? source?.damage?.replace ?? false),
+    };
+    system.magicalBonus = normalizeNetherscrollsMagicalBonus(source);
+    system.type = normalizeNetherscrollsItemSubtype(source, "consumable");
+    system.uses = normalizeNetherscrollsItemUses(source);
+    return;
+  }
+
+  if (itemType === "tool") {
+    system.activities = source?.system?.activities ?? {};
+    system.ability = normalizeNetherscrollsSaveAbility(source?.system?.ability ?? source?.ability) ?? "";
+    system.bonus = sanitizeNetherscrollsBonusFormula(source?.system?.bonus ?? source?.bonus);
+    system.chatFlavor = toTrimmedStringOrNull(source?.system?.chatFlavor ?? source?.chatFlavor) ?? "";
+    system.proficient = normalizeNetherscrollsNullableNumber(source?.system?.proficient ?? source?.proficient);
+    system.type = normalizeNetherscrollsItemSubtype(source, "tool");
+    return;
+  }
+
+  if (itemType === "container") {
+    system.capacity = normalizeNetherscrollsItemCapacity(source);
+    system.quantity = 1;
+    return;
+  }
+
+  system.type = normalizeNetherscrollsItemSubtype(source, "loot");
+}
+
+function normalizeNetherscrollsItemDocumentType(source) {
+  const raw = toTrimmedStringOrNull(
+    source?.type ?? source?.itemType ?? source?.documentType ?? source?.system?.documentType
+  )?.toLowerCase();
+  if (NETHERSCROLLS_ITEM_TYPES.has(raw)) return raw;
+  if (raw === "armor" || raw === "shield") return "equipment";
+  if (raw === "backpack" || raw === "bag") return "container";
+  if (raw === "ammunition" || raw === "ammo" || raw === "potion" || raw === "scroll") return "consumable";
+  if (raw === "art" || raw === "gem" || raw === "treasure" || raw === "trade") return "loot";
+  if (source?.armor && Object.keys(source.armor).length) return "equipment";
+  return "loot";
+}
+
+function normalizeNetherscrollsItemSubtype(source, itemType) {
+  const explicit = source?.system?.type;
+  if (explicit && typeof explicit === "object") {
+    const value = normalizeNetherscrollsItemSubtypeValue(
+      explicit.value ?? explicit.type ?? source?.subtype,
+      itemType,
+      source
+    );
+    return buildNetherscrollsItemTypeObject(itemType, value, {
+      subtype: explicit.subtype,
+      baseItem: explicit.baseItem,
+    });
+  }
+
+  const value = normalizeNetherscrollsItemSubtypeValue(
+    source?.subtype ??
+      source?.itemSubtype ??
+      source?.weaponType ??
+      source?.equipmentType ??
+      source?.consumableType ??
+      source?.toolType ??
+      source?.lootType ??
+      source?.armor?.type ??
+      source?.type,
+    itemType,
+    source
+  );
+  return buildNetherscrollsItemTypeObject(itemType, value);
+}
+
+function buildNetherscrollsItemTypeObject(itemType, value, source = {}) {
+  const type = {
+    value: value ?? "",
+  };
+  if (itemType === "consumable" || itemType === "loot") {
+    type.subtype = toTrimmedStringOrNull(source.subtype) ?? "";
+  } else {
+    type.baseItem = toTrimmedStringOrNull(source.baseItem) ?? "";
+  }
+  return type;
+}
+
+function normalizeNetherscrollsItemSubtypeValue(value, itemType, source = {}) {
+  const raw = toTrimmedStringOrNull(value)?.toLowerCase();
+  const label = raw?.replace(/[_-]+/g, " ").trim();
+  if (itemType === "weapon") {
+    if (["simplem", "simple melee", "simple melee weapon"].includes(label)) return "simpleM";
+    if (["simpler", "simple ranged", "simple ranged weapon"].includes(label)) return "simpleR";
+    if (["martialm", "martial melee", "martial melee weapon"].includes(label)) return "martialM";
+    if (["martialr", "martial ranged", "martial ranged weapon"].includes(label)) return "martialR";
+    if (["natural", "improv", "improvised", "siege"].includes(label)) {
+      return label === "improvised" ? "improv" : label;
+    }
+    const nameType = NETHERSCROLLS_WEAPON_TYPE_BY_NAME[normalizeNetherscrollsItemNameKey(source?.name)];
+    return nameType ?? "simpleM";
+  }
+
+  if (itemType === "equipment") {
+    if (["light", "medium", "heavy", "natural", "shield", "clothing", "focus", "trinket"].includes(label)) {
+      return label;
+    }
+    if (label === "light armor") return "light";
+    if (label === "medium armor") return "medium";
+    if (label === "heavy armor") return "heavy";
+    if (/\bshield\b/i.test(String(source?.name ?? ""))) return "shield";
+    return source?.armor && Object.keys(source.armor).length ? "light" : "trinket";
+  }
+
+  if (itemType === "consumable") {
+    if (["ammo", "ammunition"].includes(label)) return "ammo";
+    if (["potion", "poison", "food", "scroll", "wand", "rod", "trinket"].includes(label)) return label;
+    if (/\b(potion|elixir)\b/i.test(String(source?.name ?? ""))) return "potion";
+    if (/\bscroll\b/i.test(String(source?.name ?? ""))) return "scroll";
+    if (normalizeNetherscrollsItemProperties(source, "consumable").includes("amm")) return "ammo";
+    return "trinket";
+  }
+
+  if (itemType === "loot") {
+    if (["art", "gear", "gem", "junk", "material", "resource", "trade", "treasure"].includes(label)) {
+      return label;
+    }
+    return "gear";
+  }
+
+  return raw ?? itemType;
+}
+
+function normalizeNetherscrollsItemNameKey(name) {
+  return String(name ?? "")
+    .toLowerCase()
+    .replace(/\s*\([^)]*\)\s*/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function normalizeNetherscrollsItemQuantity(source) {
+  const value = normalizeNetherscrollsNullableNumber(source?.system?.quantity ?? source?.quantity);
+  return Math.max(1, Math.trunc(value ?? 1));
+}
+
+function normalizeNetherscrollsItemWeight(source) {
+  const weight = source?.system?.weight ?? source?.weight;
+  if (weight && typeof weight === "object") {
+    return {
+      value: Math.max(0, toNumber(weight.value ?? weight.lb ?? weight.lbs ?? weight.pounds ?? 0)),
+      units: normalizeNetherscrollsWeightUnit(weight.units ?? weight.unit ?? (weight.kg != null ? "kg" : "lb")),
+    };
+  }
+  return {
+    value: Math.max(0, toNumber(weight, 0)),
+    units: "lb",
+  };
+}
+
+function normalizeNetherscrollsWeightUnit(value) {
+  const unit = toTrimmedStringOrNull(value)?.toLowerCase();
+  if (unit === "kg" || unit === "kilogram" || unit === "kilograms") return "kg";
+  if (unit === "ton" || unit === "tons") return "ton";
+  return "lb";
+}
+
+function normalizeNetherscrollsItemPrice(source) {
+  const price = source?.system?.price ?? source?.price;
+  if (price && typeof price === "object") {
+    const directValue = normalizeNetherscrollsNullableNumber(price.value ?? price.amount);
+    if (directValue != null) {
+      return {
+        value: Math.max(0, directValue),
+        denomination: normalizeNetherscrollsCurrencyDenomination(price.denomination ?? price.currency),
+      };
+    }
+
+    for (const denomination of ["pp", "gp", "ep", "sp", "cp"]) {
+      const value = normalizeNetherscrollsNullableNumber(price[denomination]);
+      if (value != null) {
+        return {
+          value: Math.max(0, value),
+          denomination,
+        };
+      }
+    }
+  }
+  return {
+    value: Math.max(0, toNumber(price, 0)),
+    denomination: "gp",
+  };
+}
+
+function normalizeNetherscrollsCurrencyDenomination(value) {
+  const denomination = toTrimmedStringOrNull(value)?.toLowerCase();
+  return ["pp", "gp", "ep", "sp", "cp"].includes(denomination) ? denomination : "gp";
+}
+
+function normalizeNetherscrollsItemRarity(value) {
+  const raw = toTrimmedStringOrNull(value);
+  if (!raw) return "";
+  const normalized = raw.toLowerCase().replace(/[_-]+/g, " ").trim();
+  if (normalized === "mundane" || normalized === "none") return "";
+  if (normalized === "very rare") return "veryRare";
+  if (NETHERSCROLLS_ITEM_RARITIES.has(normalized)) return normalized;
+  return "";
+}
+
+function normalizeNetherscrollsItemAttunement(value) {
+  if (value === 1 || value === 2 || value === true) return "required";
+  const normalized = toTrimmedStringOrNull(value)?.toLowerCase();
+  if (!normalized || normalized === "0" || normalized === "false" || normalized === "none") return "";
+  if (normalized === "required" || normalized.includes("requires attunement")) return "required";
+  if (normalized === "optional") return "optional";
+  return "";
+}
+
+function normalizeNetherscrollsItemProperties(source, itemType) {
+  const values = [
+    ...(Array.isArray(source?.system?.properties) ? source.system.properties : []),
+    ...(Array.isArray(source?.properties) ? source.properties : []),
+    ...(Array.isArray(source?.tags) ? source.tags : []),
+  ];
+  if (typeof source?.system?.properties === "string") values.push(source.system.properties);
+  if (typeof source?.properties === "string") values.push(source.properties);
+  if (typeof source?.tags === "string") values.push(source.tags);
+  if (source?.system?.properties instanceof Set) values.push(...source.system.properties);
+  if (source?.properties instanceof Set) values.push(...source.properties);
+  if (source?.system?.properties && typeof source.system.properties === "object" && !Array.isArray(source.system.properties)) {
+    values.push(...Object.keys(source.system.properties).filter((key) => source.system.properties[key]));
+  }
+  if (source?.properties && typeof source.properties === "object" && !Array.isArray(source.properties)) {
+    values.push(...Object.keys(source.properties).filter((key) => source.properties[key]));
+  }
+
+  const properties = new Set();
+  for (const value of values) {
+    const property = normalizeNetherscrollsItemProperty(value);
+    if (property) properties.add(property);
+  }
+
+  const rarity = normalizeNetherscrollsItemRarity(source?.system?.rarity ?? source?.rarity);
+  const attunement = normalizeNetherscrollsItemAttunement(source?.system?.attunement ?? source?.attunement);
+  if (source?.magical === true || source?.isMagic === true || attunement || (rarity && rarity !== "common")) {
+    properties.add("mgc");
+  }
+
+  const valid = NETHERSCROLLS_ITEM_VALID_PROPERTIES[itemType] ?? null;
+  return Array.from(properties).filter((property) => !valid || valid.has(property));
+}
+
+function normalizeNetherscrollsItemProperty(value) {
+  const raw = toTrimmedStringOrNull(value);
+  if (!raw) return null;
+  const key = raw.toLowerCase().replace(/[_]+/g, " ").trim();
+  return NETHERSCROLLS_ITEM_PROPERTY_ALIASES[key] ?? raw;
+}
+
+function isNetherscrollsEquippableItemType(itemType) {
+  return ["weapon", "equipment", "consumable", "tool", "container"].includes(itemType);
+}
+
+function normalizeNetherscrollsWeaponAmmunition(source) {
+  const ammunition = source?.system?.ammunition ?? source?.ammunition;
+  if (ammunition && typeof ammunition === "object") {
+    return {
+      type: toTrimmedStringOrNull(ammunition.type) ?? "",
+    };
+  }
+  return {
+    type: toTrimmedStringOrNull(ammunition) ?? "",
+  };
+}
+
+function normalizeNetherscrollsItemDamagePart(value, fallbackType = null) {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    if ("number" in value || "denomination" in value || "custom" in value) {
+      return buildNetherscrollsActivityPart({
+        ...value,
+        types: normalizeNetherscrollsItemDamageTypes(value.types ?? value.type ?? value.damageType, fallbackType),
+      });
+    }
+    if (Array.isArray(value.parts) && value.parts.length) {
+      return normalizeNetherscrollsItemDamagePart(value.parts[0], fallbackType);
+    }
+  }
+
+  if (Array.isArray(value)) {
+    const formula = toTrimmedStringOrNull(value[0]);
+    const type = normalizeNetherscrollsDamageType(value[1]) ?? fallbackType;
+    return formula
+      ? removeBlankNetherscrollsDamageTypes(parseNetherscrollsDicePart(formula, type ?? ""))
+      : buildNetherscrollsEmptyDamagePart(type);
+  }
+
+  const formula = parseNetherscrollsFormulaFromUnknown(value);
+  if (!formula) return buildNetherscrollsEmptyDamagePart(fallbackType);
+  return removeBlankNetherscrollsDamageTypes(parseNetherscrollsDicePart(formula, fallbackType ?? ""));
+}
+
+function normalizeNetherscrollsItemDamageTypes(value, fallbackType = null) {
+  const values = Array.isArray(value) ? value : [value];
+  const types = values.map(normalizeNetherscrollsDamageType).filter(Boolean);
+  if (!types.length && fallbackType) types.push(fallbackType);
+  return types;
+}
+
+function buildNetherscrollsEmptyDamagePart(type = null) {
+  return {
+    number: null,
+    denomination: 0,
+    bonus: "",
+    types: type ? [type] : [],
+    custom: {
+      enabled: false,
+      formula: "",
+    },
+    scaling: {
+      mode: "whole",
+      number: null,
+      formula: "",
+    },
+  };
+}
+
+function removeBlankNetherscrollsDamageTypes(part) {
+  return {
+    ...part,
+    types: Array.isArray(part?.types) ? part.types.filter(Boolean) : [],
+  };
+}
+
+function getNetherscrollsItemDamageType(source) {
+  return normalizeNetherscrollsDamageType(
+    Array.isArray(source?.damageTypes) ? source.damageTypes[0] : source?.damageType
+  );
+}
+
+function normalizeNetherscrollsMagicalBonus(source) {
+  return sanitizeNetherscrollsBonusFormula(
+    source?.system?.magicalBonus ?? source?.magicalBonus ?? source?.bonus
+  );
+}
+
+function normalizeNetherscrollsWeaponRange(source) {
+  const range = source?.system?.range ?? source?.range;
+  if (range && typeof range === "object") {
+    return {
+      value: normalizeNetherscrollsNullableNumber(range.value ?? range.distance),
+      long: normalizeNetherscrollsNullableNumber(range.long),
+      reach: normalizeNetherscrollsNullableNumber(range.reach),
+      units: toTrimmedStringOrNull(range.units ?? range.unit) ?? "ft",
+    };
+  }
+
+  const parsed = parseNetherscrollsRangeText(range);
+  return {
+    value: normalizeNetherscrollsNullableNumber(parsed?.value),
+    long: null,
+    reach: null,
+    units: parsed?.units ?? "ft",
+  };
+}
+
+function normalizeNetherscrollsEquipmentArmor(source) {
+  const armor = source?.system?.armor ?? source?.armor ?? {};
+  return {
+    value: Math.max(0, toNumber(armor.value ?? armor.ac ?? armor.armorClass, 0)),
+    magicalBonus: sanitizeNetherscrollsBonusFormula(armor.magicalBonus ?? source?.magicalBonus),
+    dex: normalizeNetherscrollsNullableNumber(armor.dex ?? armor.dexterity),
+  };
+}
+
+function normalizeNetherscrollsItemUses(source) {
+  const uses = source?.system?.uses ?? source?.uses ?? {};
+  return {
+    spent: Math.max(0, toNumber(uses.spent, 0)),
+    max: toTrimmedStringOrNull(uses.max) ?? "",
+    recovery: Array.isArray(uses.recovery) ? uses.recovery : [],
+    autoDestroy: Boolean(uses.autoDestroy),
+  };
+}
+
+function normalizeNetherscrollsItemCapacity(source) {
+  const capacity = source?.system?.capacity ?? source?.capacity ?? {};
+  const count = normalizeNetherscrollsNullableNumber(capacity.count ?? capacity.items);
+  const result = {
+    volume: {
+      value: Math.max(0, toNumber(capacity.volume?.value ?? capacity.volume, 0)),
+      units: toTrimmedStringOrNull(capacity.volume?.units ?? capacity.volumeUnits) ?? "ft3",
+    },
+    weight: {
+      value: Math.max(0, toNumber(capacity.weight?.value ?? capacity.weight, 0)),
+      units: normalizeNetherscrollsWeightUnit(capacity.weight?.units ?? capacity.weightUnits),
+    },
+  };
+  if (count != null) result.count = Math.max(0, Math.trunc(count));
+  return result;
+}
+
+function normalizeNetherscrollsNullableNumber(value) {
+  const number = toNumberOrNull(value);
+  return number == null ? null : number;
+}
+
+function buildNetherscrollsItemSource(sourceName, source = {}) {
+  return buildNetherscrollsSpellSource(sourceName, source);
+}
+
+function applyNetherscrollsImportFlags(documentData, source, netherscrollsId) {
+  if (!netherscrollsId) return;
+  documentData.flags = documentData.flags ?? {};
+  documentData.flags[MODULE_ID] = {
+    ...(documentData.flags[MODULE_ID] ?? {}),
+    netherscrollsId,
+  };
+
+  const lastRev = toTrimmedStringOrNull(source?.lastRev);
+  if (lastRev) documentData.flags[MODULE_ID].lastRev = lastRev;
+  if (Array.isArray(source?.tags)) documentData.flags[MODULE_ID].tags = source.tags;
+  if (source?.isHomebrew != null) documentData.flags[MODULE_ID].isHomebrew = Boolean(source.isHomebrew);
+}
+
+function mergeNetherscrollsDefaults(defaults, data) {
+  if (foundry?.utils?.mergeObject) {
+    return foundry.utils.mergeObject(defaults, data, { inplace: false });
+  }
+  return {
+    ...defaults,
+    ...(data ?? {}),
+  };
 }
 
 function normalizeNetherscrollsSpellData(spell) {
@@ -1489,6 +2601,37 @@ function toNetherscrollsNumber(value) {
 function duplicateNetherscrollsData(value) {
   if (foundry?.utils?.deepClone) return foundry.utils.deepClone(value ?? {});
   return JSON.parse(JSON.stringify(value ?? {}));
+}
+
+async function ensureNetherscrollsItemFolderTree(pack, folderCache) {
+  for (const folderDefinition of NETHERSCROLLS_ITEM_FOLDERS) {
+    await findOrCreatePackFolder(pack, {
+      cache: folderCache,
+      name: folderDefinition.label,
+      type: "Item",
+      parent: null,
+      sort: folderDefinition.sort,
+    });
+  }
+}
+
+async function ensureNetherscrollsItemFolder(pack, itemData, folderCache) {
+  const folderDefinition = getNetherscrollsItemFolder(itemData);
+  return findOrCreatePackFolder(pack, {
+    cache: folderCache,
+    name: folderDefinition.label,
+    type: "Item",
+    parent: null,
+    sort: folderDefinition.sort,
+  });
+}
+
+function getNetherscrollsItemFolder(itemData) {
+  const type = normalizeNetherscrollsItemDocumentType(itemData);
+  return (
+    NETHERSCROLLS_ITEM_FOLDERS.find((folder) => folder.type === type) ??
+    NETHERSCROLLS_ITEM_FOLDERS.find((folder) => folder.type === "loot")
+  );
 }
 
 async function ensureNetherscrollsSpellFolderTree(pack, folderCache) {
@@ -3282,9 +4425,15 @@ function serializeRollDataEntry(rollData, format) {
 
 function isActorSheetApp(app) {
   if (!app) return false;
-  if (getActorFromApp(app)) return true;
+  if (app?.actor?.documentName === "Actor") return true;
+  if (app?.document?.documentName === "Actor") return true;
+  if (app?.object?.documentName === "Actor") return true;
   const name = app?.constructor?.name ?? "";
   return name.includes("ActorSheet");
+}
+
+function isActorRelatedSheetApp(app) {
+  return Boolean(getActorFromApp(app));
 }
 
 function getActorFromApp(app) {
@@ -4136,6 +5285,7 @@ async function applyLinkedIds(actor, linked) {
   await apply(itemLinks, "equipment");
   await apply(itemLinks, "consumable");
   await apply(itemLinks, "tool");
+  await apply(itemLinks, "container");
   await apply(itemLinks, "loot");
   await apply(spellLinks, "spell");
   await apply(featLinks, "feat");
