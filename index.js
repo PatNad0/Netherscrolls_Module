@@ -60,6 +60,41 @@ const NETHERSCROLLS_UNKNOWN_SPELL_SCHOOL = {
   aliases: [],
   sort: 9000,
 };
+const NETHERSCROLLS_ABILITY_LABELS = {
+  str: ["str", "strength"],
+  dex: ["dex", "dexterity"],
+  con: ["con", "constitution"],
+  int: ["int", "intelligence"],
+  wis: ["wis", "wisdom"],
+  cha: ["cha", "charisma"],
+};
+const NETHERSCROLLS_DAMAGE_TYPES = [
+  "acid",
+  "bludgeoning",
+  "cold",
+  "fire",
+  "force",
+  "lightning",
+  "necrotic",
+  "piercing",
+  "poison",
+  "psychic",
+  "radiant",
+  "slashing",
+  "thunder",
+];
+const NETHERSCROLLS_NUMBER_WORDS = {
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+};
 const SKILL_KEY_TO_NAME = {
   acr: "acrobatics",
   ani: "animalHandling",
@@ -562,18 +597,29 @@ function normalizeNetherscrollsSpellData(spell) {
   );
   const sourceName = toTrimmedStringOrNull(source.source);
   const school = getNetherscrollsSpellSchool(source);
+  const inferred = inferNetherscrollsSpellFields(source, descriptionHtml);
   const itemData = {
     name: toTrimmedStringOrNull(source.name) ?? "Netherscrolls Spell",
     type: "spell",
     img: toTrimmedStringOrNull(source.img ?? source.image) ?? NETHERSCROLLS_DEFAULT_IMAGE,
     system: {
+      activities: inferred.activity ? { [inferred.activity._id]: inferred.activity } : {},
+      activation: inferred.activation,
       description: {
         value: descriptionHtml ?? "",
+        chat: "",
       },
+      duration: inferred.duration,
       level: getNetherscrollsSpellLevel(source),
+      materials: inferred.materials,
+      properties: inferred.properties,
+      range: inferred.range,
       school: getNetherscrollsSpellSchoolSystemKey(school),
+      target: inferred.target,
     },
   };
+  const sourceClass = getNetherscrollsPrimarySpellClass(source);
+  if (sourceClass) itemData.system.sourceClass = sourceClass;
 
   if (sourceName) {
     itemData.system.source = {
@@ -612,6 +658,23 @@ function normalizeNetherscrollsFoundrySpellData(spell) {
   source.system.school = getNetherscrollsSpellSchoolSystemKey(
     getNetherscrollsSpellSchool(source)
   );
+  const inferred = inferNetherscrollsSpellFields(
+    spell,
+    source.system?.description?.value ?? spell?.descriptionHtml ?? spell?.description
+  );
+  source.system.activation ??= inferred.activation;
+  source.system.duration ??= inferred.duration;
+  source.system.materials ??= inferred.materials;
+  if (!Array.isArray(source.system.properties) || !source.system.properties.length) {
+    source.system.properties = inferred.properties;
+  }
+  source.system.range ??= inferred.range;
+  source.system.target ??= inferred.target;
+  if (!source.system.activities || !Object.keys(source.system.activities).length) {
+    source.system.activities = inferred.activity ? { [inferred.activity._id]: inferred.activity } : {};
+  }
+  const sourceClass = getNetherscrollsPrimarySpellClass(spell);
+  if (sourceClass) source.system.sourceClass ??= sourceClass;
   if (netherscrollsId) {
     source.flags = source.flags ?? {};
     source.flags[MODULE_ID] = {
@@ -623,6 +686,669 @@ function normalizeNetherscrollsFoundrySpellData(spell) {
       `netherscrolls-${netherscrollsId}`;
   }
   return source;
+}
+
+function inferNetherscrollsSpellFields(source, descriptionHtml) {
+  const text = normalizeNetherscrollsSpellText(descriptionHtml);
+  const primaryText = getNetherscrollsPrimarySpellText(text);
+  const activation = inferNetherscrollsSpellActivation(source, text);
+  const properties = inferNetherscrollsSpellProperties(source, text);
+  const duration = inferNetherscrollsSpellDuration(source, text);
+  const range = inferNetherscrollsSpellRange(source, text);
+  const target = inferNetherscrollsSpellTarget(source, text);
+  const materials = inferNetherscrollsSpellMaterials(source, text);
+  const saveAbility = inferNetherscrollsSpellSaveAbility(source, primaryText);
+  const healing = inferNetherscrollsSpellHealing(source, primaryText);
+  const damage = inferNetherscrollsSpellDamage(source, primaryText);
+  const attack = inferNetherscrollsSpellAttack(source, primaryText);
+  const activity = buildNetherscrollsSpellActivity(source, {
+    activation,
+    damage,
+    duration,
+    healing,
+    properties,
+    range,
+    saveAbility,
+    target,
+    text: primaryText,
+    attack,
+  });
+
+  return {
+    activation,
+    activity,
+    duration,
+    materials,
+    properties,
+    range,
+    target,
+  };
+}
+
+function normalizeNetherscrollsSpellText(value) {
+  const raw = toTrimmedStringOrNull(value);
+  if (!raw) return "";
+  const stripped =
+    foundry?.utils?.stripHTML?.(raw) ?? String(raw).replace(/<[^>]*>/g, " ");
+  return stripped
+    .replace(/\[\[\/save\s+([a-z]{3})[^\]]*\]\]/gi, "$1 saving throw")
+    .replace(/&nbsp;|&#160;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/\u00a0/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getNetherscrollsPrimarySpellText(text) {
+  return String(text ?? "").split(/\bat higher levels?\b/i)[0].trim();
+}
+
+function inferNetherscrollsSpellActivation(source, text) {
+  const explicit = source?.system?.activation ?? source?.activation;
+  if (explicit && typeof explicit === "object") {
+    return {
+      type: toTrimmedStringOrNull(explicit.type) ?? "action",
+      value: toNumber(explicit.value ?? 1, 1),
+      condition: toTrimmedStringOrNull(explicit.condition) ?? "",
+    };
+  }
+
+  const raw =
+    toTrimmedStringOrNull(source?.castingTime) ??
+    toTrimmedStringOrNull(source?.casting_time) ??
+    getNetherscrollsMetadataLine(text, "Casting Time") ??
+    "";
+  const activation = parseNetherscrollsActivationText(raw || text);
+  return activation ?? { type: "action", value: 1, condition: "" };
+}
+
+function parseNetherscrollsActivationText(value) {
+  const text = String(value ?? "").toLowerCase();
+  if (!text) return null;
+  const valueMatch = /\b(\d+)\b/.exec(text);
+  const count = valueMatch ? Number(valueMatch[1]) : 1;
+  const condition = toTrimmedStringOrNull(String(value).split(",").slice(1).join(","));
+
+  if (/\breaction\b/.test(text)) return { type: "reaction", value: count, condition: condition ?? "" };
+  if (/\bbonus action\b/.test(text)) return { type: "bonus", value: count, condition: "" };
+  if (/\baction\b/.test(text)) return { type: "action", value: count, condition: "" };
+  if (/\bminute\b/.test(text)) return { type: "minute", value: count, condition: "" };
+  if (/\bhour\b/.test(text)) return { type: "hour", value: count, condition: "" };
+  if (/\bday\b/.test(text)) return { type: "day", value: count, condition: "" };
+  return null;
+}
+
+function inferNetherscrollsSpellDuration(source, text) {
+  const explicit = source?.system?.duration ?? source?.duration;
+  if (explicit && typeof explicit === "object") {
+    return {
+      value: String(explicit.value ?? ""),
+      units: toTrimmedStringOrNull(explicit.units ?? explicit.unit) ?? "inst",
+    };
+  }
+
+  const raw =
+    toTrimmedStringOrNull(source?.duration) ??
+    getNetherscrollsMetadataLine(text, "Duration") ??
+    inferNetherscrollsDurationPhrase(text);
+  return parseNetherscrollsDurationText(raw) ?? { value: "0", units: "inst" };
+}
+
+function inferNetherscrollsDurationPhrase(text) {
+  const source = String(text ?? "");
+  const untilTurn = /\buntil the (?:start|end) of (?:your|the target'?s|its) next turn\b/i.exec(source);
+  if (untilTurn) return "1 round";
+  const lastsFor = /\b(?:lasts?|remain|remains|persists?) for (?:up to )?(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(round|minute|hour|day|month|year)s?\b/i.exec(source);
+  if (lastsFor) return `${lastsFor[1]} ${lastsFor[2]}`;
+  if (/\binstantaneous\b/i.test(source)) return "instantaneous";
+  if (/\buntil dispelled\b/i.test(source)) return "until dispelled";
+  return null;
+}
+
+function parseNetherscrollsDurationText(value) {
+  const raw = toTrimmedStringOrNull(value);
+  if (!raw) return null;
+  const text = raw.toLowerCase();
+  if (/\binstantaneous\b/.test(text)) return { value: "0", units: "inst" };
+  if (/\buntil dispelled\b/.test(text)) return { value: "", units: "disp" };
+  if (/\bpermanent\b/.test(text)) return { value: "", units: "perm" };
+
+  const match = /(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(turn|round|minute|hour|day|month|year)s?\b/i.exec(raw);
+  if (!match) return null;
+  return {
+    value: String(toNetherscrollsNumber(match[1]) ?? match[1]),
+    units: match[2].toLowerCase(),
+  };
+}
+
+function inferNetherscrollsSpellProperties(source, text) {
+  const properties = new Set();
+  const explicit = source?.system?.properties ?? source?.properties;
+  if (Array.isArray(explicit)) {
+    explicit.forEach((property) => addNetherscrollsSpellProperty(properties, property));
+  }
+
+  const componentTypes = source?.componentTypes ?? source?.components ?? source?.component_types;
+  collectNetherscrollsComponents(componentTypes, properties);
+  const metadataComponents = getNetherscrollsMetadataLine(text, "Components");
+  collectNetherscrollsComponents(metadataComponents, properties);
+  const durationText =
+    toTrimmedStringOrNull(source?.duration) ?? getNetherscrollsMetadataLine(text, "Duration");
+
+  if (source?.concentration === true || /\bconcentration\b/i.test(String(durationText ?? ""))) {
+    properties.add("concentration");
+  }
+  if (source?.ritual === true || source?.isRitual === true) properties.add("ritual");
+
+  return Array.from(properties);
+}
+
+function collectNetherscrollsComponents(value, properties) {
+  if (!value) return;
+  if (Array.isArray(value)) {
+    value.forEach((component) => collectNetherscrollsComponents(component, properties));
+    return;
+  }
+  if (typeof value === "object") {
+    for (const [key, enabled] of Object.entries(value)) {
+      if (enabled) addNetherscrollsSpellProperty(properties, key);
+    }
+    return;
+  }
+
+  const text = String(value);
+  if (/\bV\b|vocal|verbal/i.test(text)) properties.add("vocal");
+  if (/\bS\b|somatic/i.test(text)) properties.add("somatic");
+  if (/\bM\b|material/i.test(text)) properties.add("material");
+}
+
+function addNetherscrollsSpellProperty(properties, value) {
+  const key = String(value ?? "").toLowerCase();
+  if (key === "v" || key === "verbal" || key === "vocal") properties.add("vocal");
+  if (key === "s" || key === "somatic") properties.add("somatic");
+  if (key === "m" || key === "material") properties.add("material");
+  if (key === "concentration") properties.add("concentration");
+  if (key === "ritual") properties.add("ritual");
+}
+
+function inferNetherscrollsSpellMaterials(source, text) {
+  const explicit = source?.system?.materials ?? source?.materials;
+  if (explicit && typeof explicit === "object") {
+    return {
+      value: String(explicit.value ?? ""),
+      consumed: Boolean(explicit.consumed),
+      cost: toNumber(explicit.cost, 0),
+      supply: toNumber(explicit.supply, 0),
+    };
+  }
+
+  const value =
+    toTrimmedStringOrNull(source?.componentMaterial) ??
+    toTrimmedStringOrNull(source?.material) ??
+    toTrimmedStringOrNull(source?.component_material) ??
+    parseNetherscrollsMaterialText(text);
+  return {
+    value: value ?? "",
+    consumed: /\bconsume[ds]?\b/i.test(value ?? ""),
+    cost: 0,
+    supply: 0,
+  };
+}
+
+function parseNetherscrollsMaterialText(text) {
+  const components = getNetherscrollsMetadataLine(text, "Components");
+  const match = /\bM\b\s*\(([^)]+)\)/i.exec(components ?? "");
+  return toTrimmedStringOrNull(match?.[1]);
+}
+
+function inferNetherscrollsSpellRange(source, text) {
+  const explicit = source?.system?.range ?? source?.range;
+  if (explicit && typeof explicit === "object") {
+    return normalizeNetherscrollsRangeObject(explicit);
+  }
+
+  const raw =
+    toTrimmedStringOrNull(source?.range) ??
+    getNetherscrollsMetadataLine(text, "Range") ??
+    inferNetherscrollsRangePhrase(text);
+  return parseNetherscrollsRangeText(raw) ?? { value: "", units: "self" };
+}
+
+function normalizeNetherscrollsRangeObject(range) {
+  const units = toTrimmedStringOrNull(range.units ?? range.unit) ?? "ft";
+  const value = range.value ?? range.distance ?? "";
+  return value === "" || value == null
+    ? { units }
+    : { value: String(value), units };
+}
+
+function inferNetherscrollsRangePhrase(text) {
+  const source = String(text ?? "");
+  const within = /\bwithin\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(?:-| )?(feet|foot|ft|mile|miles)\b/i.exec(source);
+  if (within) return `${within[1]} ${within[2]}`;
+  if (/\bmelee spell attack\b/i.test(source) || /\btouch (?:a|one|the)?\s*creature\b/i.test(source)) return "touch";
+  if (/\byou can see\b/i.test(source)) return "sight";
+  return null;
+}
+
+function parseNetherscrollsRangeText(value) {
+  const raw = toTrimmedStringOrNull(value);
+  if (!raw) return null;
+  const text = raw.toLowerCase();
+  if (/\bself\b/.test(text)) return { units: "self" };
+  if (/\btouch\b/.test(text)) return { units: "touch" };
+  if (/\bsight\b/.test(text)) return { units: "sight" };
+  if (/\bunlimited\b/.test(text)) return { units: "any" };
+
+  const match = /(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(?:-| )?(feet|foot|ft|mile|miles)\b/i.exec(raw);
+  if (!match) return null;
+  return {
+    value: String(toNetherscrollsNumber(match[1]) ?? match[1]),
+    units: /^mile/i.test(match[2]) ? "mi" : "ft",
+  };
+}
+
+function inferNetherscrollsSpellTarget(source, text) {
+  const explicit = source?.system?.target ?? source?.target;
+  if (explicit && typeof explicit === "object") return explicit;
+
+  const target = {
+    affects: {
+      count: "",
+      type: "",
+      choice: false,
+      special: "",
+    },
+    template: {
+      count: "",
+      contiguous: false,
+      type: "",
+      size: "",
+      width: "",
+      height: "",
+      units: "ft",
+    },
+  };
+
+  const sourceText = String(text ?? "");
+  const countMatch = /\b(?:up to\s+)?(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(creature|object|target)s?\b/i.exec(sourceText);
+  if (countMatch) {
+    target.affects.count = String(toNetherscrollsNumber(countMatch[1]) ?? countMatch[1]);
+    target.affects.type = countMatch[2].toLowerCase() === "target" ? "" : countMatch[2].toLowerCase();
+  } else if (/\ba creature\b|\bone creature\b|\bthe target\b/i.test(sourceText)) {
+    target.affects.count = "1";
+    target.affects.type = "creature";
+  }
+
+  const template = inferNetherscrollsTemplateTarget(sourceText);
+  if (template) target.template = { ...target.template, ...template };
+  return target;
+}
+
+function inferNetherscrollsTemplateTarget(text) {
+  const source = String(text ?? "");
+  const sphere = /(\d+)\s*(?:-| )?foot(?:-| )?radius sphere/i.exec(source);
+  if (sphere) return { type: "sphere", size: sphere[1], units: "ft" };
+  const cone = /(\d+)\s*(?:-| )?foot cone/i.exec(source);
+  if (cone) return { type: "cone", size: cone[1], units: "ft" };
+  const cube = /(\d+)\s*(?:-| )?foot cube/i.exec(source);
+  if (cube) return { type: "cube", size: cube[1], units: "ft" };
+  const line = /(\d+)\s*(?:-| )?foot(?:-| )?long(?:,?\s*(\d+)\s*(?:-| )?foot(?:-| )?wide)? line/i.exec(source);
+  if (line) return { type: "line", size: line[1], width: line[2] ?? "", units: "ft" };
+  return null;
+}
+
+function inferNetherscrollsSpellSaveAbility(source, text) {
+  const explicit =
+    source?.saveAbilities ??
+    source?.saveAbility ??
+    source?.save?.ability ??
+    source?.system?.save?.ability;
+  const explicitAbility = normalizeNetherscrollsSaveAbility(explicit);
+  if (explicitAbility) return explicitAbility;
+
+  const saveCommand = /\b(str|dex|con|int|wis|cha) saving throw\b/i.exec(text);
+  if (saveCommand) return saveCommand[1].toLowerCase();
+
+  for (const [ability, aliases] of Object.entries(NETHERSCROLLS_ABILITY_LABELS)) {
+    if (aliases.some((alias) => new RegExp(`\\b${alias}\\s+saving throw\\b`, "i").test(text))) {
+      return ability;
+    }
+  }
+  return null;
+}
+
+function normalizeNetherscrollsSaveAbility(value) {
+  const raw = Array.isArray(value) ? value[0] : value;
+  const normalized = toTrimmedStringOrNull(raw)?.toLowerCase();
+  if (!normalized) return null;
+  for (const [ability, aliases] of Object.entries(NETHERSCROLLS_ABILITY_LABELS)) {
+    if (ability === normalized || aliases.includes(normalized)) return ability;
+  }
+  return null;
+}
+
+function inferNetherscrollsSpellAttack(source, text) {
+  const explicit = toTrimmedStringOrNull(source?.actionType ?? source?.attackType);
+  const content = `${explicit ?? ""} ${text ?? ""}`;
+  if (/\bmelee spell attack\b|\bmsak\b/i.test(content)) return "melee";
+  if (/\branged spell attack\b|\brsak\b/i.test(content)) return "ranged";
+  return null;
+}
+
+function inferNetherscrollsSpellHealing(source, text) {
+  const explicit = source?.healing ?? source?.heal;
+  const explicitFormula = parseNetherscrollsFormulaFromUnknown(explicit);
+  const formula =
+    explicitFormula ??
+    parseNetherscrollsHealingFormula(text) ??
+    null;
+  if (!formula) return null;
+  return {
+    ...parseNetherscrollsDicePart(formula, "healing"),
+    scaling: inferNetherscrollsScaling(text, "healing"),
+  };
+}
+
+function inferNetherscrollsSpellDamage(source, text) {
+  const explicit = source?.damage;
+  const explicitFormula = parseNetherscrollsFormulaFromUnknown(explicit);
+  const explicitType = normalizeNetherscrollsDamageType(
+    Array.isArray(source?.damageTypes) ? source.damageTypes[0] : source?.damageType
+  );
+  const parsed =
+    explicitFormula
+      ? {
+          formula: explicitFormula,
+          type: explicitType ?? inferNetherscrollsDamageType(text),
+        }
+      : parseNetherscrollsDamageFormula(text);
+  if (!parsed?.formula || !parsed?.type) return null;
+  return {
+    ...parseNetherscrollsDicePart(parsed.formula, parsed.type),
+    scaling: inferNetherscrollsScaling(text, "damage"),
+  };
+}
+
+function parseNetherscrollsFormulaFromUnknown(value) {
+  if (value == null) return null;
+  if (typeof value === "string" || typeof value === "number") {
+    return toTrimmedStringOrNull(value);
+  }
+  if (Array.isArray(value)) {
+    return parseNetherscrollsFormulaFromUnknown(value[0]);
+  }
+  return toTrimmedStringOrNull(value.formula ?? value.value ?? value.damage ?? value.healing);
+}
+
+function parseNetherscrollsHealingFormula(text) {
+  const source = String(text ?? "");
+  const match =
+    /\bregains?\s+(?:hit points )?(?:equal to\s+)?(\d+d\d+(?:\s*\+\s*(?:your spellcasting ability modifier|your \w+ modifier|@mod|\d+))?|\d+)\s+hit points\b/i.exec(source) ??
+    /\brestore[sd]?\s+(\d+d\d+(?:\s*\+\s*(?:your spellcasting ability modifier|your \w+ modifier|@mod|\d+))?|\d+)\s+hit points\b/i.exec(source);
+  return normalizeNetherscrollsFormula(match?.[1]);
+}
+
+function parseNetherscrollsDamageFormula(text) {
+  const typePattern = NETHERSCROLLS_DAMAGE_TYPES.join("|");
+  const regex = new RegExp(
+    `\\b(\\d+d\\d+(?:\\s*\\+\\s*(?:your spellcasting ability modifier|your \\w+ modifier|@mod|\\d+))?|\\d+)\\s+(${typePattern})\\s+damage\\b`,
+    "i"
+  );
+  const match = regex.exec(String(text ?? ""));
+  if (!match) return null;
+  return {
+    formula: normalizeNetherscrollsFormula(match[1]),
+    type: normalizeNetherscrollsDamageType(match[2]),
+  };
+}
+
+function inferNetherscrollsDamageType(text) {
+  const source = String(text ?? "").toLowerCase();
+  return NETHERSCROLLS_DAMAGE_TYPES.find((type) => source.includes(`${type} damage`)) ?? null;
+}
+
+function normalizeNetherscrollsDamageType(value) {
+  const normalized = toTrimmedStringOrNull(value)?.toLowerCase();
+  if (!normalized) return null;
+  if (normalized === "heal" || normalized === "healing") return "healing";
+  return NETHERSCROLLS_DAMAGE_TYPES.includes(normalized) ? normalized : null;
+}
+
+function normalizeNetherscrollsFormula(value) {
+  const raw = toTrimmedStringOrNull(value);
+  if (!raw) return null;
+  return raw
+    .replace(/your spellcasting ability modifier/gi, "@mod")
+    .replace(/your \w+ modifier/gi, "@mod")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function parseNetherscrollsDicePart(formula, type) {
+  const normalized = normalizeNetherscrollsFormula(formula);
+  const dice = /^(\d+)d(\d+)(?:\s*([+-])\s*(.+))?$/i.exec(normalized ?? "");
+  if (dice) {
+    const bonusValue = normalizeNetherscrollsFormula(dice[4]);
+    return {
+      number: Number(dice[1]),
+      denomination: Number(dice[2]),
+      bonus: bonusValue ? `${dice[3] === "-" ? "-" : ""}${bonusValue}` : "",
+      types: [type],
+      custom: {
+        enabled: false,
+        formula: "",
+      },
+    };
+  }
+
+  return {
+    number: null,
+    denomination: 0,
+    bonus: normalized ?? "",
+    types: [type],
+    custom: {
+      enabled: false,
+      formula: "",
+    },
+  };
+}
+
+function inferNetherscrollsScaling(text, kind) {
+  const source = String(text ?? "");
+  const scalingText = source.split(/\bat higher levels?\b/i).slice(1).join(" ");
+  const formulaMatch =
+    /\b(?:damage|healing|amount of healing|amount)\s+increases? by\s+(\d+d\d+|\d+)/i.exec(scalingText) ??
+    /\bincreases? by\s+(\d+d\d+|\d+)/i.exec(scalingText);
+  const formula = normalizeNetherscrollsFormula(formulaMatch?.[1]);
+  const dice = /^(\d+)d(\d+)$/i.exec(formula ?? "");
+  if (dice) {
+    return {
+      mode: "whole",
+      number: Number(dice[1]),
+      formula: "",
+    };
+  }
+  return {
+    mode: "whole",
+    number: null,
+    formula: formula ?? "",
+  };
+}
+
+function buildNetherscrollsSpellActivity(source, inferred) {
+  const type = getNetherscrollsActivityType(source, inferred);
+  if (!type) return null;
+
+  const activity = buildNetherscrollsBaseActivity(source, type, inferred);
+  if (type === "attack") {
+    activity.attack = {
+      ability: "spellcasting",
+      bonus: "",
+      critical: {},
+      flat: false,
+      type: {
+        value: inferred.attack ?? "ranged",
+        classification: "spell",
+      },
+    };
+    if (inferred.damage) activity.damage = buildNetherscrollsActivityDamage(inferred.damage);
+  } else if (type === "save") {
+    activity.save = {
+      ability: [inferred.saveAbility],
+      dc: {
+        formula: "",
+        calculation: "spellcasting",
+      },
+    };
+    activity.damage = buildNetherscrollsActivityDamage(inferred.damage, inferred.text);
+  } else if (type === "heal") {
+    activity.healing = buildNetherscrollsActivityPart(inferred.healing);
+  } else if (type === "damage") {
+    activity.damage = buildNetherscrollsActivityDamage(inferred.damage);
+  }
+
+  return activity;
+}
+
+function getNetherscrollsActivityType(source, inferred) {
+  const explicit = toTrimmedStringOrNull(source?.actionType ?? source?.activityType)?.toLowerCase();
+  if (explicit === "save" || explicit === "attack" || explicit === "heal" || explicit === "damage") {
+    return explicit;
+  }
+  if (inferred.healing) return "heal";
+  if (inferred.attack) return "attack";
+  if (inferred.saveAbility) return "save";
+  if (inferred.damage) return "damage";
+  return null;
+}
+
+function buildNetherscrollsBaseActivity(source, type, inferred) {
+  const id = buildNetherscrollsActivityId(source, type);
+  const range = inferred.range ?? { units: "self" };
+  const duration = inferred.duration ?? { value: "0", units: "inst" };
+  return {
+    type,
+    _id: id,
+    sort: 0,
+    activation: {
+      type: inferred.activation?.type ?? "action",
+      override: false,
+    },
+    consumption: {
+      spellSlot: true,
+      targets: [],
+      scaling: {
+        allowed: false,
+        max: "",
+      },
+    },
+    description: {
+      chatFlavor: inferNetherscrollsChatFlavor(inferred.text),
+    },
+    duration: {
+      value: duration.value ?? "",
+      units: duration.units ?? "inst",
+      concentration: inferred.properties?.includes("concentration") ?? false,
+      override: false,
+    },
+    effects: [],
+    range: {
+      ...range,
+      override: false,
+    },
+    target: {
+      ...(inferred.target ?? {}),
+      override: false,
+      prompt: true,
+    },
+    uses: {
+      spent: 0,
+      recovery: [],
+    },
+    flags: {},
+    visibility: {
+      level: {},
+      requireAttunement: false,
+      requireIdentification: false,
+      requireMagic: false,
+    },
+  };
+}
+
+function buildNetherscrollsActivityDamage(damage, text = null) {
+  const activityDamage = {
+    parts: damage ? [buildNetherscrollsActivityPart(damage)] : [],
+    critical: {},
+    includeBase: true,
+  };
+  if (text != null) activityDamage.onSave = inferNetherscrollsOnSave(text);
+  return activityDamage;
+}
+
+function buildNetherscrollsActivityPart(part) {
+  return {
+    number: part?.number ?? null,
+    denomination: part?.denomination ?? 0,
+    bonus: part?.bonus ?? "",
+    types: part?.types ?? [],
+    custom: part?.custom ?? {
+      enabled: false,
+      formula: "",
+    },
+    scaling: part?.scaling ?? {
+      mode: "whole",
+      number: null,
+      formula: "",
+    },
+  };
+}
+
+function inferNetherscrollsOnSave(text) {
+  return /\bhalf (?:as much )?damage\b|\btakes? half\b/i.test(String(text ?? ""))
+    ? "half"
+    : "none";
+}
+
+function inferNetherscrollsChatFlavor(text) {
+  const match = /\bhas no effect on ([^.]+)\./i.exec(String(text ?? ""));
+  return match ? `Restriction: Unaffected: ${match[1]}` : "";
+}
+
+function buildNetherscrollsActivityId(source, type) {
+  const base = `${type}${source?.netherscrollsId ?? source?._id ?? source?.id ?? source?.name ?? ""}`;
+  const hash = hashNetherscrollsString(base);
+  return `ns${type.slice(0, 4)}${hash}`.slice(0, 16);
+}
+
+function hashNetherscrollsString(value) {
+  let hash = 0;
+  const text = String(value ?? "");
+  for (let i = 0; i < text.length; i += 1) {
+    hash = (hash * 31 + text.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash).toString(36);
+}
+
+function getNetherscrollsMetadataLine(text, label) {
+  const regex = new RegExp(`\\b${label}\\s*:\\s*([^\\n.]+)`, "i");
+  return toTrimmedStringOrNull(regex.exec(String(text ?? ""))?.[1]);
+}
+
+function getNetherscrollsPrimarySpellClass(source) {
+  const classes = source?.classes ?? source?.system?.classes;
+  const first = Array.isArray(classes) ? classes[0] : classes;
+  return toTrimmedStringOrNull(first)?.toLowerCase() ?? null;
+}
+
+function toNetherscrollsNumber(value) {
+  const normalized = toTrimmedStringOrNull(value)?.toLowerCase();
+  if (!normalized) return null;
+  const numeric = Number(normalized);
+  if (Number.isFinite(numeric)) return numeric;
+  return NETHERSCROLLS_NUMBER_WORDS[normalized] ?? null;
 }
 
 function duplicateNetherscrollsData(value) {
