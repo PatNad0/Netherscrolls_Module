@@ -1,8 +1,5 @@
 <form class="ns-import-form" autocomplete="off">
   <header class="ns-import-header">
-    <div>
-      <h2>Import from Netherscroll <span>[EXPERIMENTAL]</span></h2>
-    </div>
     <div class="ns-import-api-status {{#if hasApiKey}}is-ready{{else}}is-missing{{/if}}">
       <i class="{{#if hasApiKey}}fa-solid fa-key{{else}}fa-solid fa-triangle-exclamation{{/if}}"></i>
       <span>{{#if hasApiKey}}API key ready{{else}}API key missing{{/if}}</span>
@@ -20,25 +17,6 @@
             <span>{{label}}</span>
           </label>
         {{/each}}
-      </div>
-    </fieldset>
-
-    <fieldset class="ns-import-panel ns-import-spell-routing">
-      <legend>Spells</legend>
-      <div class="ns-import-tree">
-        <div>Netherscrolls</div>
-        <div><span></span>Spells</div>
-        <div><span></span><span></span>Level1</div>
-        <div><span></span><span></span><span></span>School</div>
-      </div>
-      <div class="ns-import-school-list">
-        {{#each spellSchools}}
-          <span>{{label}}</span>
-        {{/each}}
-      </div>
-      <div class="ns-import-default-image">
-        <img src="{{defaultDocumentImage}}" alt="">
-        <span>Default image</span>
       </div>
     </fieldset>
 

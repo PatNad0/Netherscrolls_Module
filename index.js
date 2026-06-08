@@ -41,22 +41,24 @@ const NETHERSCROLLS_SPELL_LEVEL_FOLDERS = Array.from(
   (_value, level) => ({
     level,
     label: `Level${level}`,
+    sort: (level + 1) * 1000,
   })
 );
 const NETHERSCROLLS_SPELL_SCHOOLS = [
-  { key: "abj", label: "Abjuration", aliases: ["abjuration"] },
-  { key: "con", label: "Conjuration", aliases: ["conjuration"] },
-  { key: "div", label: "Divination", aliases: ["divination"] },
-  { key: "enc", label: "Enchantment", aliases: ["enchantment"] },
-  { key: "evo", label: "Evocation", aliases: ["evocation"] },
-  { key: "ill", label: "Illusion", aliases: ["illusion"] },
-  { key: "nec", label: "Necromancy", aliases: ["necromancy"] },
-  { key: "trs", label: "Transmutation", aliases: ["transmutation", "tra"] },
+  { key: "abj", label: "Abjuration", aliases: ["abjuration"], sort: 1000 },
+  { key: "con", label: "Conjuration", aliases: ["conjuration"], sort: 2000 },
+  { key: "div", label: "Divination", aliases: ["divination"], sort: 3000 },
+  { key: "enc", label: "Enchantment", aliases: ["enchantment"], sort: 4000 },
+  { key: "evo", label: "Evocation", aliases: ["evocation"], sort: 5000 },
+  { key: "ill", label: "Illusion", aliases: ["illusion"], sort: 6000 },
+  { key: "nec", label: "Necromancy", aliases: ["necromancy"], sort: 7000 },
+  { key: "trs", label: "Transmutation", aliases: ["transmutation", "tra"], sort: 8000 },
 ];
 const NETHERSCROLLS_UNKNOWN_SPELL_SCHOOL = {
   key: "unknown",
   label: "Unsorted",
   aliases: [],
+  sort: 9000,
 };
 const SKILL_KEY_TO_NAME = {
   acr: "acrobatics",
@@ -163,7 +165,7 @@ class NetherscrollsImportSettings extends FormApplication {
       id: "netherscrolls-import-settings",
       title: "Import from Netherscroll [EXPERIMENTAL]",
       template: `modules/${MODULE_ID}/templates/import-from-netherscroll.hbs`,
-      width: 640,
+      width: 520,
       height: "auto",
       classes: ["netherscrolls-import-window"],
       submitOnChange: false,
@@ -181,8 +183,6 @@ class NetherscrollsImportSettings extends FormApplication {
       hasApiKey: Boolean(apiKey),
       importTypes: IMPORT_TYPES,
       defaultSinceDate: today,
-      defaultDocumentImage: NETHERSCROLLS_DEFAULT_IMAGE,
-      spellSchools: NETHERSCROLLS_SPELL_SCHOOLS,
     };
   }
 
@@ -637,6 +637,7 @@ async function ensureNetherscrollsSpellFolderTree(pack, folderCache) {
       name: levelDefinition.label,
       type: "Item",
       parent: null,
+      sort: levelDefinition.sort,
     });
 
     for (const schoolDefinition of NETHERSCROLLS_SPELL_SCHOOLS) {
@@ -645,6 +646,7 @@ async function ensureNetherscrollsSpellFolderTree(pack, folderCache) {
         name: schoolDefinition.label,
         type: "Item",
         parent: levelFolder,
+        sort: schoolDefinition.sort,
       });
     }
   }
@@ -659,6 +661,7 @@ async function ensureNetherscrollsSpellFolder(pack, spellData, folderCache) {
     name: levelDefinition.label,
     type: "Item",
     parent: null,
+    sort: levelDefinition.sort,
   });
 
   return findOrCreatePackFolder(pack, {
@@ -666,10 +669,11 @@ async function ensureNetherscrollsSpellFolder(pack, spellData, folderCache) {
     name: schoolDefinition.label,
     type: "Item",
     parent: levelFolder,
+    sort: schoolDefinition.sort,
   });
 }
 
-async function findOrCreatePackFolder(pack, { cache, name, type, parent }) {
+async function findOrCreatePackFolder(pack, { cache, name, type, parent, sort = null }) {
   const parentId = getDocumentId(parent);
   const cacheKey = `${parentId ?? "root"}:${type}:${name}`;
   if (cache?.has(cacheKey)) return cache.get(cacheKey);
@@ -681,6 +685,7 @@ async function findOrCreatePackFolder(pack, { cache, name, type, parent }) {
   });
 
   if (existing) {
+    await updatePackFolderSort(existing, pack, sort);
     cache?.set(cacheKey, existing);
     return existing;
   }
@@ -690,13 +695,29 @@ async function findOrCreatePackFolder(pack, { cache, name, type, parent }) {
     {
       name,
       type,
-      sorting: "a",
+      sorting: "m",
       folder: parentId,
+      sort: sort ?? 0,
     },
     { pack: pack.collection }
   );
   cache?.set(cacheKey, created);
   return created;
+}
+
+async function updatePackFolderSort(folder, pack, sort) {
+  if (sort == null) return;
+  const needsUpdate = Number(folder?.sort) !== Number(sort) || folder?.sorting !== "m";
+  if (!needsUpdate) return;
+  if (typeof folder?.update !== "function") return;
+
+  await folder.update(
+    {
+      sort,
+      sorting: "m",
+    },
+    { pack: pack.collection }
+  );
 }
 
 function getPackFolders(pack) {
