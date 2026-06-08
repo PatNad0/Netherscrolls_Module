@@ -23,6 +23,41 @@ const IMPORT_TYPES = [
     icon: "fa-solid fa-dragon",
   },
 ];
+const IMPORT_PACKS = {
+  classes: "classes",
+  items: "items",
+  spells: "spells",
+  monster: "monster",
+};
+const NETHERSCROLLS_API_BASE = "https://api.netherscrolls.ca/api/foundry";
+const SYNC_ENDPOINT = `${NETHERSCROLLS_API_BASE}/sync`;
+const NETHERSCROLLS_IMPORT_ENDPOINTS = {
+  spells: `${NETHERSCROLLS_API_BASE}/import/spells`,
+};
+const NETHERSCROLLS_DEFAULT_IMAGE = "https://i.postimg.cc/zfYC8nN2/image.png";
+const NETHERSCROLLS_MAX_SPELL_LEVEL = 15;
+const NETHERSCROLLS_SPELL_LEVEL_FOLDERS = Array.from(
+  { length: NETHERSCROLLS_MAX_SPELL_LEVEL + 1 },
+  (_value, level) => ({
+    level,
+    label: `Level${level}`,
+  })
+);
+const NETHERSCROLLS_SPELL_SCHOOLS = [
+  { key: "abj", label: "Abjuration", aliases: ["abjuration"] },
+  { key: "con", label: "Conjuration", aliases: ["conjuration"] },
+  { key: "div", label: "Divination", aliases: ["divination"] },
+  { key: "enc", label: "Enchantment", aliases: ["enchantment"] },
+  { key: "evo", label: "Evocation", aliases: ["evocation"] },
+  { key: "ill", label: "Illusion", aliases: ["illusion"] },
+  { key: "nec", label: "Necromancy", aliases: ["necromancy"] },
+  { key: "trs", label: "Transmutation", aliases: ["transmutation", "tra"] },
+];
+const NETHERSCROLLS_UNKNOWN_SPELL_SCHOOL = {
+  key: "unknown",
+  label: "Unsorted",
+  aliases: [],
+};
 const SKILL_KEY_TO_NAME = {
   acr: "acrobatics",
   ani: "animalHandling",
@@ -43,8 +78,6 @@ const SKILL_KEY_TO_NAME = {
   ste: "stealth",
   sur: "survival",
 };
-const SYNC_ENDPOINT = "https://api.netherscrolls.ca/api/foundry/sync";
-
 const SETTINGS = {
   rerollInit: "rerollInitEachRound",
   npcDeathSave: "npcDeathSaveEachTurn",
@@ -148,6 +181,8 @@ class NetherscrollsImportSettings extends FormApplication {
       hasApiKey: Boolean(apiKey),
       importTypes: IMPORT_TYPES,
       defaultSinceDate: today,
+      defaultDocumentImage: NETHERSCROLLS_DEFAULT_IMAGE,
+      spellSchools: NETHERSCROLLS_SPELL_SCHOOLS,
     };
   }
 
@@ -171,7 +206,8 @@ class NetherscrollsImportSettings extends FormApplication {
   }
 
   async _updateObject(_event, formData) {
-    if (!getNetherscrollsApiKey()) {
+    const apiKey = getNetherscrollsApiKey();
+    if (!apiKey) {
       ui?.notifications?.warn?.(
         "Netherscrolls API Key is missing. Set it in Module Settings."
       );
@@ -193,10 +229,57 @@ class NetherscrollsImportSettings extends FormApplication {
       return;
     }
 
+    const since = sinceEnabled ? normalizeNetherscrollsSinceDate(sinceDate) : null;
+    if (sinceEnabled && !since) {
+      ui?.notifications?.warn?.("Choose a valid Since date.");
+      return;
+    }
+
+    const requests = buildNetherscrollsImportRequests({
+      apiKey,
+      selectedTypes,
+      sinceDate: since,
+    });
+    const destinationPlan = buildNetherscrollsImportDestinationPlan(selectedTypes);
+    if (isDebugEnabled()) {
+      console.info(`${MODULE_ID} | Netherscrolls import requests prepared.`, {
+        requests: requests.map(sanitizeNetherscrollsImportRequest),
+        destinations: destinationPlan,
+      });
+    }
+
+    const unsupportedTypes = selectedTypes.filter(
+      (type) => !NETHERSCROLLS_IMPORT_ENDPOINTS[type.key]
+    );
+    if (unsupportedTypes.length) {
+      const labels = unsupportedTypes.map((type) => type.label.toLowerCase()).join(", ");
+      ui?.notifications?.warn?.(`Import endpoint not configured yet for: ${labels}.`);
+    }
+
+    const spellRequest = requests.find((request) => request.typeKey === "spells");
+    if (spellRequest) {
+      try {
+        const response = await sendNetherscrollsImportRequest(spellRequest);
+        const result = await applyNetherscrollsImportResponse(response);
+        const imported = result?.spells?.created ?? 0;
+        const updated = result?.spells?.updated ?? 0;
+        const removed = result?.spells?.deleted ?? 0;
+        ui?.notifications?.info?.(
+          `Netherscrolls spells imported: ${imported} created, ${updated} updated, ${removed} removed.`
+        );
+      } catch (err) {
+        console.error(`${MODULE_ID} | Netherscrolls spell import failed.`, err);
+        ui?.notifications?.error?.(
+          `Netherscrolls spell import failed: ${err?.message ?? err}`
+        );
+      }
+      return;
+    }
+
     const range = sinceEnabled ? `since ${sinceDate}` : "since forever";
     const labels = selectedTypes.map((type) => type.label.toLowerCase()).join(", ");
     ui?.notifications?.info?.(
-      `Netherscrolls import preview: ${labels} ${range}.`
+      `Netherscrolls import request prepared: ${labels} ${range}.`
     );
   }
 }
@@ -268,6 +351,412 @@ function getNetherscrollsApiKey() {
 
 function isImportTypeSelected(formData, key) {
   return Boolean(formData?.[`importTypes.${key}`] ?? formData?.importTypes?.[key]);
+}
+
+function normalizeNetherscrollsSinceDate(value) {
+  const raw = toTrimmedStringOrNull(value);
+  if (!raw) return null;
+  const date = new Date(raw);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function buildNetherscrollsImportRequests({ apiKey, selectedTypes, sinceDate }) {
+  return selectedTypes
+    .map((type) =>
+      buildNetherscrollsImportRequest({
+        apiKey,
+        typeKey: type.key,
+        sinceDate,
+      })
+    )
+    .filter(Boolean);
+}
+
+function buildNetherscrollsImportRequest({ apiKey, typeKey, sinceDate }) {
+  const endpoint = NETHERSCROLLS_IMPORT_ENDPOINTS[typeKey];
+  if (!endpoint) return null;
+
+  const url = new URL(endpoint);
+  if (sinceDate) url.searchParams.set("since", sinceDate);
+
+  return {
+    typeKey,
+    url: url.toString(),
+    options: {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        "x-api-key": apiKey,
+      },
+    },
+    payload: {
+      dataset: typeKey,
+      since: sinceDate || null,
+    },
+  };
+}
+
+function sanitizeNetherscrollsImportRequest(request) {
+  return {
+    ...request,
+    options: {
+      ...request.options,
+      headers: {
+        ...request.options?.headers,
+        "x-api-key": request.options?.headers?.["x-api-key"] ? "<redacted>" : "",
+      },
+    },
+  };
+}
+
+function buildNetherscrollsImportDestinationPlan(selectedTypes) {
+  const destinations = {};
+  for (const type of selectedTypes) {
+    const packName = IMPORT_PACKS[type.key] ?? type.key;
+    destinations[type.key] = {
+      pack: `${MODULE_ID}.${packName}`,
+      defaultImage: NETHERSCROLLS_DEFAULT_IMAGE,
+    };
+  }
+
+  if (destinations.spells) {
+    destinations.spells.folderRule = "Spells / Level{level} / {school}";
+    destinations.spells.levels = NETHERSCROLLS_SPELL_LEVEL_FOLDERS.map(
+      (level) => level.label
+    );
+    destinations.spells.schools = NETHERSCROLLS_SPELL_SCHOOLS.map(
+      (school) => school.label
+    );
+  }
+
+  return destinations;
+}
+
+async function sendNetherscrollsImportRequest(importRequest) {
+  const response = await fetch(importRequest.url, importRequest.options);
+  const data = await response.json().catch(() => null);
+  if (!response.ok) {
+    const message =
+      data?.error?.message ??
+      data?.message ??
+      `Import failed (${response.status} ${response.statusText}).`;
+    throw new Error(message);
+  }
+
+  return data;
+}
+
+async function applyNetherscrollsImportResponse(data) {
+  const result = {};
+  const spells = getNetherscrollsResponseDataset(data, "spells");
+  if (Array.isArray(spells)) {
+    result.spells = await importNetherscrollsSpells(spells);
+  }
+
+  return result;
+}
+
+async function importNetherscrollsSpells(spells) {
+  const pack = getNetherscrollsImportPack("spells");
+  if (!pack) throw new Error("Netherscrolls Spells compendium pack was not found.");
+  await ensureNetherscrollsImportPackWritable(pack);
+
+  const existingByNetherId = await getCompendiumDocumentsByNetherId(pack);
+  const spellData = [];
+  const deleteIds = [];
+  const folderCache = new Map();
+  await ensureNetherscrollsSpellFolderTree(pack, folderCache);
+  for (const spell of spells) {
+    const netherscrollsId = getNetherscrollsSourceId(spell);
+    if (isNetherscrollsDeleted(spell)) {
+      const existing = netherscrollsId
+        ? existingByNetherId.get(String(netherscrollsId))
+        : null;
+      if (existing?.id) deleteIds.push(existing.id);
+      continue;
+    }
+
+    const prepared = normalizeNetherscrollsSpellData(spell);
+    if (netherscrollsId && existingByNetherId.has(String(netherscrollsId))) {
+      prepared._id = existingByNetherId.get(String(netherscrollsId)).id;
+    }
+    const folder = await ensureNetherscrollsSpellFolder(pack, prepared, folderCache);
+    if (folder?.id) prepared.folder = folder.id;
+    spellData.push(prepared);
+  }
+
+  const ItemClass = Item?.implementation ?? Item;
+  if (deleteIds.length) {
+    await ItemClass.deleteDocuments(deleteIds, { pack: pack.collection });
+  }
+
+  const updates = spellData.filter((spell) => spell._id);
+  const creates = spellData.filter((spell) => !spell._id);
+  if (updates.length) {
+    await ItemClass.updateDocuments(updates, { pack: pack.collection });
+  }
+
+  if (!creates.length) {
+    return { created: 0, updated: updates.length, deleted: deleteIds.length };
+  }
+
+  const created = await ItemClass.createDocuments(creates, { pack: pack.collection });
+  return {
+    created: created.length,
+    updated: updates.length,
+    deleted: deleteIds.length,
+  };
+}
+
+async function ensureNetherscrollsImportPackWritable(pack) {
+  if (!pack?.locked) return;
+  if (typeof pack.configure === "function") {
+    await pack.configure({ locked: false });
+  }
+  if (pack.locked) {
+    throw new Error("Unlock the Netherscrolls Spells compendium before importing.");
+  }
+}
+
+async function getCompendiumDocumentsByNetherId(pack) {
+  const documents = await pack.getDocuments();
+  const byId = new Map();
+  for (const document of documents) {
+    const netherscrollsId = getItemNetherId(document);
+    if (netherscrollsId) byId.set(String(netherscrollsId), document);
+  }
+
+  return byId;
+}
+
+function getNetherscrollsResponseDataset(data, dataKey) {
+  if (Array.isArray(data?.[dataKey])) return data[dataKey];
+  if (data?.meta?.dataKey === dataKey && Array.isArray(data?.data)) return data.data;
+  if (Array.isArray(data?.data?.[dataKey])) return data.data[dataKey];
+  return [];
+}
+
+function getNetherscrollsSourceId(data) {
+  return toTrimmedStringOrNull(data?.netherscrollsId ?? data?._id ?? data?.id);
+}
+
+function isNetherscrollsDeleted(data) {
+  if (data?.deleted === true) return true;
+  return String(data?.deleted ?? "").toLowerCase() === "true";
+}
+
+function getNetherscrollsImportPack(typeKey) {
+  const packName = IMPORT_PACKS[typeKey] ?? typeKey;
+  return game?.packs?.get?.(`${MODULE_ID}.${packName}`) ?? null;
+}
+
+function normalizeNetherscrollsSpellData(spell) {
+  if (spell?.foundry || spell?.document) {
+    return normalizeNetherscrollsFoundrySpellData(spell);
+  }
+
+  const source = duplicateNetherscrollsData(spell);
+  const netherscrollsId = getNetherscrollsSourceId(spell);
+  const descriptionHtml = toTrimmedStringOrNull(
+    spell?.descriptionHtml ?? spell?.description ?? source.descriptionHtml ?? source.description
+  );
+  const sourceName = toTrimmedStringOrNull(source.source);
+  const school = getNetherscrollsSpellSchool(source);
+  const itemData = {
+    name: toTrimmedStringOrNull(source.name) ?? "Netherscrolls Spell",
+    type: "spell",
+    img: toTrimmedStringOrNull(source.img ?? source.image) ?? NETHERSCROLLS_DEFAULT_IMAGE,
+    system: {
+      description: {
+        value: descriptionHtml ?? "",
+      },
+      level: getNetherscrollsSpellLevel(source),
+      school: getNetherscrollsSpellSchoolSystemKey(school),
+    },
+  };
+
+  if (sourceName) {
+    itemData.system.source = {
+      book: sourceName,
+      custom: "",
+    };
+  }
+
+  if (netherscrollsId) {
+    itemData.flags = {
+      [MODULE_ID]: {
+        netherscrollsId,
+      },
+    };
+    const lastRev = toTrimmedStringOrNull(source.lastRev);
+    if (lastRev) itemData.flags[MODULE_ID].lastRev = lastRev;
+    if (Array.isArray(source.classes)) {
+      itemData.flags[MODULE_ID].classes = source.classes;
+    }
+    itemData.system.identifier =
+      toTrimmedStringOrNull(source.system?.identifier) ??
+      `netherscrolls-${netherscrollsId}`;
+  }
+
+  return itemData;
+}
+
+function normalizeNetherscrollsFoundrySpellData(spell) {
+  const source = duplicateNetherscrollsData(spell?.foundry ?? spell?.document);
+  const netherscrollsId = getNetherscrollsSourceId(spell);
+  source.name = toTrimmedStringOrNull(source.name) ?? "Netherscrolls Spell";
+  source.type = toTrimmedStringOrNull(source.type) ?? "spell";
+  source.img = toTrimmedStringOrNull(source.img ?? source.image) ?? NETHERSCROLLS_DEFAULT_IMAGE;
+  source.system = source.system ?? {};
+  source.system.level = getNetherscrollsSpellLevel(source);
+  source.system.school = getNetherscrollsSpellSchoolSystemKey(
+    getNetherscrollsSpellSchool(source)
+  );
+  if (netherscrollsId) {
+    source.flags = source.flags ?? {};
+    source.flags[MODULE_ID] = {
+      ...(source.flags[MODULE_ID] ?? {}),
+      netherscrollsId,
+    };
+    source.system.identifier =
+      toTrimmedStringOrNull(source.system.identifier) ??
+      `netherscrolls-${netherscrollsId}`;
+  }
+  return source;
+}
+
+function duplicateNetherscrollsData(value) {
+  if (foundry?.utils?.deepClone) return foundry.utils.deepClone(value ?? {});
+  return JSON.parse(JSON.stringify(value ?? {}));
+}
+
+async function ensureNetherscrollsSpellFolderTree(pack, folderCache) {
+  for (const levelDefinition of NETHERSCROLLS_SPELL_LEVEL_FOLDERS) {
+    const levelFolder = await findOrCreatePackFolder(pack, {
+      cache: folderCache,
+      name: levelDefinition.label,
+      type: "Item",
+      parent: null,
+    });
+
+    for (const schoolDefinition of NETHERSCROLLS_SPELL_SCHOOLS) {
+      await findOrCreatePackFolder(pack, {
+        cache: folderCache,
+        name: schoolDefinition.label,
+        type: "Item",
+        parent: levelFolder,
+      });
+    }
+  }
+}
+
+async function ensureNetherscrollsSpellFolder(pack, spellData, folderCache) {
+  const level = getNetherscrollsSpellLevel(spellData);
+  const levelDefinition = getNetherscrollsSpellLevelFolder(level);
+  const schoolDefinition = getNetherscrollsSpellSchool(spellData);
+  const levelFolder = await findOrCreatePackFolder(pack, {
+    cache: folderCache,
+    name: levelDefinition.label,
+    type: "Item",
+    parent: null,
+  });
+
+  return findOrCreatePackFolder(pack, {
+    cache: folderCache,
+    name: schoolDefinition.label,
+    type: "Item",
+    parent: levelFolder,
+  });
+}
+
+async function findOrCreatePackFolder(pack, { cache, name, type, parent }) {
+  const parentId = getDocumentId(parent);
+  const cacheKey = `${parentId ?? "root"}:${type}:${name}`;
+  if (cache?.has(cacheKey)) return cache.get(cacheKey);
+
+  await pack.getIndex({ fields: ["folder", "name", "type"] }).catch(() => null);
+  const existing = getPackFolders(pack).find((folder) => {
+    const folderParentId = getDocumentId(folder.folder);
+    return folder.name === name && folder.type === type && folderParentId === parentId;
+  });
+
+  if (existing) {
+    cache?.set(cacheKey, existing);
+    return existing;
+  }
+
+  const FolderClass = Folder?.implementation ?? Folder;
+  const created = await FolderClass.create(
+    {
+      name,
+      type,
+      sorting: "a",
+      folder: parentId,
+    },
+    { pack: pack.collection }
+  );
+  cache?.set(cacheKey, created);
+  return created;
+}
+
+function getPackFolders(pack) {
+  const folders = pack?.folders;
+  if (!folders) return [];
+  if (Array.isArray(folders)) return folders;
+  if (Array.isArray(folders.contents)) return folders.contents;
+  if (typeof folders.values === "function") return Array.from(folders.values());
+  if (typeof folders[Symbol.iterator] === "function") return Array.from(folders);
+  return [];
+}
+
+function getNetherscrollsSpellLevelFolder(level) {
+  const normalized = Math.max(
+    0,
+    Math.min(NETHERSCROLLS_MAX_SPELL_LEVEL, Number(level) || 0)
+  );
+  return (
+    NETHERSCROLLS_SPELL_LEVEL_FOLDERS.find((folder) => folder.level === normalized) ??
+    NETHERSCROLLS_SPELL_LEVEL_FOLDERS[0]
+  );
+}
+
+function getNetherscrollsSpellLevel(spellData) {
+  const value =
+    spellData?.system?.level ??
+    spellData?.level ??
+    spellData?.spellLevel ??
+    spellData?.data?.level;
+  const level = Number(value);
+  if (!Number.isFinite(level)) return 0;
+  return Math.max(0, Math.min(NETHERSCROLLS_MAX_SPELL_LEVEL, Math.trunc(level)));
+}
+
+function getNetherscrollsSpellSchool(spellData) {
+  const rawSchool = toTrimmedStringOrNull(
+    spellData?.system?.school ?? spellData?.school ?? spellData?.magicSchool
+  );
+  if (!rawSchool) return NETHERSCROLLS_UNKNOWN_SPELL_SCHOOL;
+
+  const normalized = rawSchool.toLowerCase();
+  return (
+    NETHERSCROLLS_SPELL_SCHOOLS.find(
+      (school) =>
+        school.key === normalized ||
+        school.label.toLowerCase() === normalized ||
+        school.aliases.includes(normalized)
+    ) ?? NETHERSCROLLS_UNKNOWN_SPELL_SCHOOL
+  );
+}
+
+function getNetherscrollsSpellSchoolSystemKey(school) {
+  if (!school || school.key === NETHERSCROLLS_UNKNOWN_SPELL_SCHOOL.key) return null;
+  return school.key;
+}
+
+function getDocumentId(document) {
+  if (!document) return null;
+  if (typeof document === "string") return document;
+  return document.id ?? document._id ?? null;
 }
 
 function initEnhanceDialogInputHandlers() {

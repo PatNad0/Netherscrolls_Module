@@ -10,7 +10,7 @@
   </header>
 
   <div class="ns-import-layout">
-    <fieldset class="ns-import-panel">
+    <fieldset class="ns-import-panel ns-import-types-panel">
       <legend>Import</legend>
       <div class="ns-import-options">
         {{#each importTypes}}
@@ -20,6 +20,25 @@
             <span>{{label}}</span>
           </label>
         {{/each}}
+      </div>
+    </fieldset>
+
+    <fieldset class="ns-import-panel ns-import-spell-routing">
+      <legend>Spells</legend>
+      <div class="ns-import-tree">
+        <div>Netherscrolls</div>
+        <div><span></span>Spells</div>
+        <div><span></span><span></span>Level1</div>
+        <div><span></span><span></span><span></span>School</div>
+      </div>
+      <div class="ns-import-school-list">
+        {{#each spellSchools}}
+          <span>{{label}}</span>
+        {{/each}}
+      </div>
+      <div class="ns-import-default-image">
+        <img src="{{defaultDocumentImage}}" alt="">
+        <span>Default image</span>
       </div>
     </fieldset>
 
