@@ -194,37 +194,58 @@ Hooks.once("init", () => {
   });
 });
 
-class NetherscrollsImportSettings extends FormApplication {
-  static get defaultOptions() {
-    return foundry.utils.mergeObject(super.defaultOptions, {
+class NetherscrollsImportSettings extends foundry.applications.api.HandlebarsApplicationMixin(
+  foundry.applications.api.ApplicationV2
+) {
+  static get DEFAULT_OPTIONS() {
+    return {
       id: "netherscrolls-import-settings",
-      title: "Import from Netherscroll [EXPERIMENTAL]",
-      template: `modules/${MODULE_ID}/templates/import-from-netherscroll.hbs`,
-      width: 520,
-      height: "auto",
+      tag: "form",
       classes: ["netherscrolls-import-window"],
-      submitOnChange: false,
-      closeOnSubmit: false,
-    });
+      position: {
+        width: 520,
+        height: "auto",
+      },
+      window: {
+        title: "Import from Netherscroll [EXPERIMENTAL]",
+        icon: "fa-solid fa-cloud-arrow-down",
+        contentClasses: ["ns-import-form"],
+      },
+      form: {
+        handler: async function (event, form, formData) {
+          return this._updateObject(event, getNetherscrollsFormDataObject(form, formData));
+        },
+        submitOnChange: false,
+        closeOnSubmit: false,
+      },
+    };
   }
 
-  getData(options = {}) {
-    const data = super.getData(options);
+  static get PARTS() {
+    return {
+      body: {
+        template: `modules/${MODULE_ID}/templates/import-from-netherscroll.hbs`,
+      },
+    };
+  }
+
+  async _prepareContext(options) {
+    const context = await super._prepareContext(options);
     const apiKey = getNetherscrollsApiKey();
     const today = new Date().toISOString().slice(0, 10);
 
     return {
-      ...data,
+      ...context,
       hasApiKey: Boolean(apiKey),
       importTypes: IMPORT_TYPES,
       defaultSinceDate: today,
     };
   }
 
-  activateListeners(html) {
-    super.activateListeners(html);
+  _onRender(context, options) {
+    super._onRender(context, options);
 
-    const root = html?.[0] ?? html;
+    const root = this.element;
     const sinceCheckbox = root?.querySelector?.('[name="sinceEnabled"]');
     const sinceDate = root?.querySelector?.('[name="sinceDate"]');
     const sincePanel = root?.querySelector?.(".ns-import-since-panel");
@@ -382,6 +403,13 @@ function isEnhancedDamageEnabled() {
 
 function getNetherscrollsApiKey() {
   return String(game?.settings?.get(MODULE_ID, SETTINGS.apiKey) ?? "").trim();
+}
+
+function getNetherscrollsFormDataObject(form, formData) {
+  if (formData?.object && typeof formData.object === "object") return formData.object;
+
+  const source = formData instanceof FormData ? formData : new FormData(form);
+  return Object.fromEntries(source.entries());
 }
 
 function isImportTypeSelected(formData, key) {
