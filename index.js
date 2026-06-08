@@ -597,14 +597,20 @@ function normalizeNetherscrollsSpellData(spell) {
   );
   const sourceName = toTrimmedStringOrNull(source.source);
   const school = getNetherscrollsSpellSchool(source);
+  const schoolKey = getNetherscrollsSpellSchoolSystemKey(school);
   const inferred = inferNetherscrollsSpellFields(source, descriptionHtml);
   const itemData = {
     name: toTrimmedStringOrNull(source.name) ?? "Netherscrolls Spell",
     type: "spell",
     img: toTrimmedStringOrNull(source.img ?? source.image) ?? NETHERSCROLLS_DEFAULT_IMAGE,
+    sort: 0,
+    ownership: {
+      default: 0,
+    },
     system: {
       activities: inferred.activity ? { [inferred.activity._id]: inferred.activity } : {},
       activation: inferred.activation,
+      ability: "",
       description: {
         value: descriptionHtml ?? "",
         chat: "",
@@ -614,19 +620,26 @@ function normalizeNetherscrollsSpellData(spell) {
       materials: inferred.materials,
       properties: inferred.properties,
       range: inferred.range,
-      school: getNetherscrollsSpellSchoolSystemKey(school),
       target: inferred.target,
+      uses: {
+        spent: 0,
+        max: "",
+        recovery: [],
+      },
     },
+    effects: [],
   };
+  if (schoolKey) itemData.system.school = schoolKey;
+  itemData.system.identifier =
+    toTrimmedStringOrNull(source.system?.identifier) ??
+    (netherscrollsId ? `netherscrolls-${netherscrollsId}` : slugifyNetherscrollsIdentifier(itemData.name));
   const sourceClass = getNetherscrollsPrimarySpellClass(source);
-  if (sourceClass) itemData.system.sourceClass = sourceClass;
+  if (sourceClass) itemData.system.sourceItem = `class:${sourceClass}`;
+  itemData.system.method =
+    toTrimmedStringOrNull(source?.system?.method ?? source?.method) ?? "spell";
+  itemData.system.prepared = toNumber(source?.system?.prepared ?? source?.prepared, 0);
 
-  if (sourceName) {
-    itemData.system.source = {
-      book: sourceName,
-      custom: "",
-    };
-  }
+  itemData.system.source = buildNetherscrollsSpellSource(sourceName, source);
 
   if (netherscrollsId) {
     itemData.flags = {
@@ -639,9 +652,6 @@ function normalizeNetherscrollsSpellData(spell) {
     if (Array.isArray(source.classes)) {
       itemData.flags[MODULE_ID].classes = source.classes;
     }
-    itemData.system.identifier =
-      toTrimmedStringOrNull(source.system?.identifier) ??
-      `netherscrolls-${netherscrollsId}`;
   }
 
   return itemData;
@@ -655,9 +665,18 @@ function normalizeNetherscrollsFoundrySpellData(spell) {
   source.img = toTrimmedStringOrNull(source.img ?? source.image) ?? NETHERSCROLLS_DEFAULT_IMAGE;
   source.system = source.system ?? {};
   source.system.level = getNetherscrollsSpellLevel(source);
-  source.system.school = getNetherscrollsSpellSchoolSystemKey(
-    getNetherscrollsSpellSchool(source)
-  );
+  source.system.identifier ??=
+    netherscrollsId ? `netherscrolls-${netherscrollsId}` : slugifyNetherscrollsIdentifier(source.name);
+  const schoolKey = getNetherscrollsSpellSchoolSystemKey(getNetherscrollsSpellSchool(source));
+  if (schoolKey) source.system.school = schoolKey;
+  source.system.ability ??= "";
+  source.system.method ??= "spell";
+  source.system.prepared ??= 0;
+  source.system.uses ??= {
+    spent: 0,
+    max: "",
+    recovery: [],
+  };
   const inferred = inferNetherscrollsSpellFields(
     spell,
     source.system?.description?.value ?? spell?.descriptionHtml ?? spell?.description
@@ -674,18 +693,48 @@ function normalizeNetherscrollsFoundrySpellData(spell) {
     source.system.activities = inferred.activity ? { [inferred.activity._id]: inferred.activity } : {};
   }
   const sourceClass = getNetherscrollsPrimarySpellClass(spell);
-  if (sourceClass) source.system.sourceClass ??= sourceClass;
+  if (sourceClass) source.system.sourceItem ??= `class:${sourceClass}`;
+  if (source.system.sourceClass) delete source.system.sourceClass;
+  const sourceName = toTrimmedStringOrNull(spell?.source ?? source?.system?.source?.book);
+  source.system.source = buildNetherscrollsSpellSource(
+    sourceName,
+    {
+      ...spell,
+      system: {
+        ...(spell?.system ?? {}),
+        source: source.system.source,
+      },
+    }
+  );
+  source.effects ??= [];
   if (netherscrollsId) {
     source.flags = source.flags ?? {};
     source.flags[MODULE_ID] = {
       ...(source.flags[MODULE_ID] ?? {}),
       netherscrollsId,
     };
-    source.system.identifier =
-      toTrimmedStringOrNull(source.system.identifier) ??
-      `netherscrolls-${netherscrollsId}`;
   }
   return source;
+}
+
+function slugifyNetherscrollsIdentifier(value) {
+  return (
+    toTrimmedStringOrNull(value)
+      ?.toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "netherscrolls-spell"
+  );
+}
+
+function buildNetherscrollsSpellSource(sourceName, source = {}) {
+  return {
+    book: toTrimmedStringOrNull(sourceName) ?? "",
+    page: String(source?.page ?? source?.sourcePage ?? source?.system?.source?.page ?? ""),
+    custom: String(source?.customSource ?? source?.system?.source?.custom ?? ""),
+    license: String(source?.license ?? source?.system?.source?.license ?? ""),
+    revision: toNumber(source?.revision ?? source?.system?.source?.revision, 1),
+    rules: String(source?.rules ?? source?.system?.source?.rules ?? "2024"),
+  };
 }
 
 function inferNetherscrollsSpellFields(source, descriptionHtml) {
@@ -786,6 +835,7 @@ function inferNetherscrollsSpellDuration(source, text) {
     return {
       value: String(explicit.value ?? ""),
       units: toTrimmedStringOrNull(explicit.units ?? explicit.unit) ?? "inst",
+      special: String(explicit.special ?? ""),
     };
   }
 
@@ -793,7 +843,7 @@ function inferNetherscrollsSpellDuration(source, text) {
     toTrimmedStringOrNull(source?.duration) ??
     getNetherscrollsMetadataLine(text, "Duration") ??
     inferNetherscrollsDurationPhrase(text);
-  return parseNetherscrollsDurationText(raw) ?? { value: "0", units: "inst" };
+  return parseNetherscrollsDurationText(raw) ?? { value: "0", units: "inst", special: "" };
 }
 
 function inferNetherscrollsDurationPhrase(text) {
@@ -811,15 +861,16 @@ function parseNetherscrollsDurationText(value) {
   const raw = toTrimmedStringOrNull(value);
   if (!raw) return null;
   const text = raw.toLowerCase();
-  if (/\binstantaneous\b/.test(text)) return { value: "0", units: "inst" };
-  if (/\buntil dispelled\b/.test(text)) return { value: "", units: "disp" };
-  if (/\bpermanent\b/.test(text)) return { value: "", units: "perm" };
+  if (/\binstantaneous\b/.test(text)) return { value: "0", units: "inst", special: "" };
+  if (/\buntil dispelled\b/.test(text)) return { value: "", units: "disp", special: "" };
+  if (/\bpermanent\b/.test(text)) return { value: "", units: "perm", special: "" };
 
   const match = /(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(turn|round|minute|hour|day|month|year)s?\b/i.exec(raw);
   if (!match) return null;
   return {
     value: String(toNetherscrollsNumber(match[1]) ?? match[1]),
     units: match[2].toLowerCase(),
+    special: "",
   };
 }
 
@@ -913,15 +964,15 @@ function inferNetherscrollsSpellRange(source, text) {
     toTrimmedStringOrNull(source?.range) ??
     getNetherscrollsMetadataLine(text, "Range") ??
     inferNetherscrollsRangePhrase(text);
-  return parseNetherscrollsRangeText(raw) ?? { value: "", units: "self" };
+  return parseNetherscrollsRangeText(raw) ?? { value: "", units: "self", special: "" };
 }
 
 function normalizeNetherscrollsRangeObject(range) {
   const units = toTrimmedStringOrNull(range.units ?? range.unit) ?? "ft";
   const value = range.value ?? range.distance ?? "";
   return value === "" || value == null
-    ? { units }
-    : { value: String(value), units };
+    ? { value: "", units, special: String(range.special ?? "") }
+    : { value: String(value), units, special: String(range.special ?? "") };
 }
 
 function inferNetherscrollsRangePhrase(text) {
@@ -937,22 +988,23 @@ function parseNetherscrollsRangeText(value) {
   const raw = toTrimmedStringOrNull(value);
   if (!raw) return null;
   const text = raw.toLowerCase();
-  if (/\bself\b/.test(text)) return { units: "self" };
-  if (/\btouch\b/.test(text)) return { units: "touch" };
-  if (/\bsight\b/.test(text)) return { units: "sight" };
-  if (/\bunlimited\b/.test(text)) return { units: "any" };
+  if (/\bself\b/.test(text)) return { value: "", units: "self", special: "" };
+  if (/\btouch\b/.test(text)) return { value: "", units: "touch", special: "" };
+  if (/\bsight\b/.test(text)) return { value: "", units: "sight", special: "" };
+  if (/\bunlimited\b/.test(text)) return { value: "", units: "any", special: "" };
 
   const match = /(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(?:-| )?(feet|foot|ft|mile|miles)\b/i.exec(raw);
   if (!match) return null;
   return {
     value: String(toNetherscrollsNumber(match[1]) ?? match[1]),
     units: /^mile/i.test(match[2]) ? "mi" : "ft",
+    special: "",
   };
 }
 
 function inferNetherscrollsSpellTarget(source, text) {
   const explicit = source?.system?.target ?? source?.target;
-  if (explicit && typeof explicit === "object") return explicit;
+  if (explicit && typeof explicit === "object") return normalizeNetherscrollsTargetObject(explicit);
 
   const target = {
     affects: {
@@ -964,6 +1016,7 @@ function inferNetherscrollsSpellTarget(source, text) {
     template: {
       count: "",
       contiguous: false,
+      stationary: false,
       type: "",
       size: "",
       width: "",
@@ -985,6 +1038,27 @@ function inferNetherscrollsSpellTarget(source, text) {
   const template = inferNetherscrollsTemplateTarget(sourceText);
   if (template) target.template = { ...target.template, ...template };
   return target;
+}
+
+function normalizeNetherscrollsTargetObject(target) {
+  return {
+    template: {
+      count: String(target?.template?.count ?? ""),
+      contiguous: Boolean(target?.template?.contiguous),
+      stationary: Boolean(target?.template?.stationary),
+      type: String(target?.template?.type ?? ""),
+      size: String(target?.template?.size ?? ""),
+      width: String(target?.template?.width ?? ""),
+      height: String(target?.template?.height ?? ""),
+      units: String(target?.template?.units ?? "ft"),
+    },
+    affects: {
+      count: String(target?.affects?.count ?? ""),
+      type: String(target?.affects?.type ?? ""),
+      choice: Boolean(target?.affects?.choice),
+      special: String(target?.affects?.special ?? ""),
+    },
+  };
 }
 
 function inferNetherscrollsTemplateTarget(text) {
@@ -1203,7 +1277,7 @@ function buildNetherscrollsSpellActivity(source, inferred) {
         calculation: "spellcasting",
       },
     };
-    activity.damage = buildNetherscrollsActivityDamage(inferred.damage, inferred.text);
+    activity.damage = buildNetherscrollsSaveActivityDamage(inferred.damage, inferred.text);
   } else if (type === "heal") {
     activity.healing = buildNetherscrollsActivityPart(inferred.healing);
   } else if (type === "damage") {
@@ -1288,6 +1362,13 @@ function buildNetherscrollsActivityDamage(damage, text = null) {
   return activityDamage;
 }
 
+function buildNetherscrollsSaveActivityDamage(damage, text) {
+  return {
+    parts: damage ? [buildNetherscrollsActivityPart(damage)] : [],
+    onSave: inferNetherscrollsOnSave(text),
+  };
+}
+
 function buildNetherscrollsActivityPart(part) {
   return {
     number: part?.number ?? null,
@@ -1319,8 +1400,10 @@ function inferNetherscrollsChatFlavor(text) {
 
 function buildNetherscrollsActivityId(source, type) {
   const base = `${type}${source?.netherscrollsId ?? source?._id ?? source?.id ?? source?.name ?? ""}`;
-  const hash = hashNetherscrollsString(base);
-  return `ns${type.slice(0, 4)}${hash}`.slice(0, 16);
+  const firstHash = Math.abs(hashNetherscrollsString(base)).toString(36);
+  const secondHash = Math.abs(hashNetherscrollsString([...base].reverse().join(""))).toString(36);
+  const raw = `ns${type}${firstHash}${secondHash}`.replace(/[^a-zA-Z0-9]/g, "");
+  return raw.padEnd(16, "0").slice(0, 16);
 }
 
 function hashNetherscrollsString(value) {
