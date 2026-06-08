@@ -1201,15 +1201,39 @@ function normalizeNetherscrollsFormula(value) {
     .trim();
 }
 
+function sanitizeNetherscrollsFormula(value) {
+  const normalized = normalizeNetherscrollsFormula(value);
+  if (!normalized) return null;
+
+  const firstPart = normalized.split(",")[0]?.trim() ?? "";
+  const match = /^(\d+d\d+(?:\s*[+\-]\s*(?:@mod|\d+))?|\d+|@mod)$/i.exec(firstPart);
+  if (match) return match[1];
+
+  return (
+    /(\d+d\d+(?:\s*[+\-]\s*(?:@mod|\d+))?|\d+|@mod)/i.exec(firstPart)?.[1] ?? null
+  );
+}
+
+function sanitizeNetherscrollsBonusFormula(value) {
+  const normalized = normalizeNetherscrollsFormula(value);
+  if (!normalized) return "";
+
+  const firstPart = normalized.split(",")[0]?.trim() ?? "";
+  const safeRollFormula =
+    /^[-+]?(?:\d+|@mod|\d+d\d+)(?:\s*[+\-*/]\s*(?:\d+|@mod|\d+d\d+))*$/i;
+  return safeRollFormula.test(firstPart) ? firstPart : "";
+}
+
 function parseNetherscrollsDicePart(formula, type) {
-  const normalized = normalizeNetherscrollsFormula(formula);
+  const normalized = sanitizeNetherscrollsFormula(formula);
   const dice = /^(\d+)d(\d+)(?:\s*([+-])\s*(.+))?$/i.exec(normalized ?? "");
   if (dice) {
-    const bonusValue = normalizeNetherscrollsFormula(dice[4]);
+    const bonusValue = sanitizeNetherscrollsBonusFormula(dice[4]);
+    const bonusSign = dice[3] === "-" && !bonusValue.startsWith("-") ? "-" : "";
     return {
       number: Number(dice[1]),
       denomination: Number(dice[2]),
-      bonus: bonusValue ? `${dice[3] === "-" ? "-" : ""}${bonusValue}` : "",
+      bonus: bonusValue ? `${bonusSign}${bonusValue}` : "",
       types: [type],
       custom: {
         enabled: false,
@@ -1221,7 +1245,7 @@ function parseNetherscrollsDicePart(formula, type) {
   return {
     number: null,
     denomination: 0,
-    bonus: normalized ?? "",
+    bonus: sanitizeNetherscrollsBonusFormula(normalized),
     types: [type],
     custom: {
       enabled: false,
@@ -1400,8 +1424,8 @@ function inferNetherscrollsChatFlavor(text) {
 
 function buildNetherscrollsActivityId(source, type) {
   const base = `${type}${source?.netherscrollsId ?? source?._id ?? source?.id ?? source?.name ?? ""}`;
-  const firstHash = Math.abs(hashNetherscrollsString(base)).toString(36);
-  const secondHash = Math.abs(hashNetherscrollsString([...base].reverse().join(""))).toString(36);
+  const firstHash = hashNetherscrollsString(base);
+  const secondHash = hashNetherscrollsString([...base].reverse().join(""));
   const raw = `ns${type}${firstHash}${secondHash}`.replace(/[^a-zA-Z0-9]/g, "");
   return raw.padEnd(16, "0").slice(0, 16);
 }
