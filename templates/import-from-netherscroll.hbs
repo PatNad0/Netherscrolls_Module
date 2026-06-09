@@ -1,38 +1,40 @@
-<header class="ns-import-header">
-  <div class="ns-import-api-status {{#if hasApiKey}}is-ready{{else}}is-missing{{/if}}">
-    <i class="{{#if hasApiKey}}fa-solid fa-key{{else}}fa-solid fa-triangle-exclamation{{/if}}"></i>
-    <span>{{#if hasApiKey}}API key ready{{else}}API key missing{{/if}}</span>
-  </div>
-</header>
-
-<div class="ns-import-layout">
-  <fieldset class="ns-import-panel ns-import-types-panel">
-    <legend>Import</legend>
-    <div class="ns-import-options">
-      {{#each importTypes}}
-        <label class="ns-import-option">
-          <input type="checkbox" name="importTypes.{{key}}" value="1" checked>
-          <span class="ns-import-option-icon"><i class="{{icon}}"></i></span>
-          <span>{{label}}</span>
-        </label>
-      {{/each}}
+<form class="ns-import-form" autocomplete="off">
+  <header class="ns-import-header">
+    <div class="ns-import-api-status {{#if hasApiKey}}is-ready{{else}}is-missing{{/if}}">
+      <i class="{{#if hasApiKey}}fa-solid fa-key{{else}}fa-solid fa-triangle-exclamation{{/if}}"></i>
+      <span>{{#if hasApiKey}}API key ready{{else}}API key missing{{/if}}</span>
     </div>
-  </fieldset>
+  </header>
 
-  <fieldset class="ns-import-panel ns-import-since-panel">
-    <legend>Range</legend>
-    <label class="ns-import-since-toggle">
-      <input type="checkbox" name="sinceEnabled" value="1">
-      <span>Since...</span>
-    </label>
-    <input type="date" name="sinceDate" value="{{defaultSinceDate}}" disabled>
-    <div class="ns-import-forever">Forever</div>
-  </fieldset>
-</div>
+  <div class="ns-import-layout">
+    <fieldset class="ns-import-panel ns-import-types-panel">
+      <legend>Import</legend>
+      <div class="ns-import-options">
+        {{#each importTypes}}
+          <label class="ns-import-option">
+            <input type="checkbox" name="importTypes.{{key}}" value="1" checked>
+            <span class="ns-import-option-icon"><i class="{{icon}}"></i></span>
+            <span>{{label}}</span>
+          </label>
+        {{/each}}
+      </div>
+    </fieldset>
 
-<footer class="sheet-footer flexrow">
-  <button type="submit">
-    <i class="fa-solid fa-cloud-arrow-down"></i>
-    Import Selected
-  </button>
-</footer>
+    <fieldset class="ns-import-panel ns-import-since-panel">
+      <legend>Range</legend>
+      <label class="ns-import-since-toggle">
+        <input type="checkbox" name="sinceEnabled" value="1">
+        <span>Since...</span>
+      </label>
+      <input type="date" name="sinceDate" value="{{defaultSinceDate}}" disabled>
+      <div class="ns-import-forever">Forever</div>
+    </fieldset>
+  </div>
+
+  <footer class="sheet-footer flexrow">
+    <button type="submit">
+      <i class="fa-solid fa-cloud-arrow-down"></i>
+      Import Selected
+    </button>
+  </footer>
+</form>
