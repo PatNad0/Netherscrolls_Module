@@ -13,6 +13,11 @@ const IMPORT_TYPES = [
     icon: "fa-solid fa-suitcase",
   },
   {
+    key: "feats",
+    label: "Feats",
+    icon: "fa-solid fa-medal",
+  },
+  {
     key: "spells",
     label: "Spells",
     icon: "fa-solid fa-wand-sparkles",
@@ -25,14 +30,18 @@ const IMPORT_TYPES = [
 ];
 const IMPORT_PACKS = {
   classes: "classes",
+  classFeatures: "class-features",
   items: "items",
+  feats: "feats",
   spells: "spells",
   monster: "monster",
 };
 const NETHERSCROLLS_API_BASE = "https://api.netherscrolls.ca/api/foundry";
 const SYNC_ENDPOINT = `${NETHERSCROLLS_API_BASE}/sync`;
 const NETHERSCROLLS_IMPORT_ENDPOINTS = {
+  classes: `${NETHERSCROLLS_API_BASE}/import/classes`,
   items: `${NETHERSCROLLS_API_BASE}/import/items`,
+  feats: `${NETHERSCROLLS_API_BASE}/import/feats`,
   spells: `${NETHERSCROLLS_API_BASE}/import/spells`,
 };
 const NETHERSCROLLS_DEFAULT_IMAGE = "https://i.postimg.cc/zfYC8nN2/image.png";
@@ -44,6 +53,10 @@ const NETHERSCROLLS_ITEM_FOLDERS = [
   { type: "tool", label: "Tools", sort: 4000 },
   { type: "container", label: "Containers", sort: 5000 },
   { type: "loot", label: "Loot", sort: 6000 },
+];
+const NETHERSCROLLS_FEAT_FOLDERS = [
+  { key: "feat", label: "Feats", sort: 1000 },
+  { key: "demifeat", label: "Demifeats", sort: 2000 },
 ];
 const NETHERSCROLLS_SPELL_LEVEL_FOLDERS = Array.from(
   { length: NETHERSCROLLS_MAX_SPELL_LEVEL + 1 },
@@ -202,19 +215,6 @@ const NETHERSCROLLS_WEAPON_TYPE_BY_NAME = {
   warpick: "martialM",
   whip: "martialM",
 };
-const ACTOR_SHEET_ROOT_SELECTOR = ".app, .application, .window-app";
-const ACTOR_SHEET_SCROLLABLE_SELECTOR = [
-  ".window-content",
-  ".sheet-body",
-  ".sheet-content",
-  ".tab.active",
-  ".scrollable",
-  "[data-tab].active",
-  "[data-scrollable]",
-  "form",
-].join(",");
-const ACTOR_SHEET_SCROLL_RESTORE_MS = 1200;
-const ACTOR_SHEET_SCROLL_RESTORE_DELAYS = [0, 16, 50, 120, 250, 500, 1250];
 const NETHERSCROLLS_NUMBER_WORDS = {
   one: 1,
   two: 2,
@@ -246,6 +246,79 @@ const SKILL_KEY_TO_NAME = {
   slt: "sleightOfHand",
   ste: "stealth",
   sur: "survival",
+};
+const NETHERSCROLLS_SKILL_LABELS = {
+  acrobatics: "acr",
+  animalhandling: "ani",
+  "animal handling": "ani",
+  arcana: "arc",
+  athletics: "ath",
+  deception: "dec",
+  history: "his",
+  insight: "ins",
+  intimidation: "itm",
+  investigation: "inv",
+  medicine: "med",
+  nature: "nat",
+  perception: "prc",
+  performance: "prf",
+  persuasion: "per",
+  religion: "rel",
+  sleightofhand: "slt",
+  "sleight of hand": "slt",
+  stealth: "ste",
+  survival: "sur",
+};
+const NETHERSCROLLS_ARMOR_TRAIT_ALIASES = {
+  lgt: "armor:lgt",
+  light: "armor:lgt",
+  "light armor": "armor:lgt",
+  med: "armor:med",
+  medium: "armor:med",
+  "medium armor": "armor:med",
+  hvy: "armor:hvy",
+  heavy: "armor:hvy",
+  "heavy armor": "armor:hvy",
+  shl: "armor:shl",
+  shield: "armor:shl",
+  shields: "armor:shl",
+};
+const NETHERSCROLLS_WEAPON_TRAIT_ALIASES = {
+  sim: "weapon:sim",
+  simple: "weapon:sim",
+  "simple weapon": "weapon:sim",
+  "simple weapons": "weapon:sim",
+  mar: "weapon:mar",
+  martial: "weapon:mar",
+  "martial weapon": "weapon:mar",
+  "martial weapons": "weapon:mar",
+};
+const NETHERSCROLLS_TOOL_TRAIT_ALIASES = {
+  "alchemist's supplies": "tool:alchemist",
+  "brewer's supplies": "tool:brewer",
+  "calligrapher's supplies": "tool:calligrapher",
+  "carpenter's tools": "tool:carpenter",
+  "cartographer's tools": "tool:cartographer",
+  "cobbler's tools": "tool:cobbler",
+  "cook's utensils": "tool:cook",
+  "disguise kit": "tool:disg",
+  "forgery kit": "tool:forg",
+  "gaming set": "tool:game:*",
+  "herbalism kit": "tool:herb",
+  "jeweler's tools": "tool:jeweler",
+  "land vehicles": "tool:vehicle:land",
+  "mason's tools": "tool:mason",
+  "musical instrument": "tool:music:*",
+  "navigator's tools": "tool:navg",
+  "painter's supplies": "tool:painter",
+  "poisoner's kit": "tool:pois",
+  "potter's tools": "tool:potter",
+  "smith's tools": "tool:smith",
+  "thieves' tools": "tool:thief",
+  "tinker's tools": "tool:tinker",
+  "water vehicles": "tool:vehicle:water",
+  "weaver's tools": "tool:weaver",
+  "woodcarver's tools": "tool:woodcarver",
 };
 const SETTINGS = {
   rerollInit: "rerollInitEachRound",
@@ -431,7 +504,7 @@ class NetherscrollsImportSettings extends (globalThis.FormApplication ?? globalT
     for (const request of requests) {
       try {
         const response = await sendNetherscrollsImportRequest(request);
-        const result = await applyNetherscrollsImportResponse(response);
+        const result = await applyNetherscrollsImportResponse(response, request.typeKey);
         importedAny = true;
         ui?.notifications?.info?.(formatNetherscrollsImportResult(request.typeKey, result));
       } catch (err) {
@@ -456,29 +529,24 @@ class NetherscrollsImportSettings extends (globalThis.FormApplication ?? globalT
 Hooks.once("ready", () => {
   toggleRerollInitHook(game.settings.get(MODULE_ID, SETTINGS.rerollInit) === true);
   toggleNpcDeathSaveHook(game.settings.get(MODULE_ID, SETTINGS.npcDeathSave) === true);
-  initActorSheetStabilityHandlers();
   initEnhanceDialogInputHandlers();
   initChatNumberActionHandlers();
 });
 
 Hooks.on("renderApplicationV1", (app, html) => {
   injectSyncButtonV1(app, html);
-  restoreActorRelatedSheetScroll(app, html);
 });
 
 Hooks.on("renderApplicationV2", (app, element) => {
   injectSyncButtonV2(app, element);
-  restoreActorRelatedSheetScroll(app, element);
 });
 
 Hooks.on("renderActorSheet", (app, html) => {
   injectSyncButtonV1(app, html);
-  restoreActorRelatedSheetScroll(app, html);
 });
 
 Hooks.on("renderActorSheetV2", (app, html) => {
   injectSyncButtonV2(app, html);
-  restoreActorRelatedSheetScroll(app, html);
 });
 
 Hooks.on("getChatLogEntryContext", (_html, options) => {
@@ -497,8 +565,6 @@ let npcDeathSaveHandler = null;
 let enhanceDialogInputHandlersBound = false;
 let chatNumberActionHandlersBound = false;
 let chatNumberActionToolbar = null;
-let actorSheetStabilityHandlersBound = false;
-const actorSheetScrollSnapshots = new Map();
 
 function rerenderActorSheets() {
   const apps = Object.values(ui?.windows ?? {});
@@ -519,322 +585,6 @@ function isDebugEnabled() {
 
 function isEnhancedDamageEnabled() {
   return Boolean(game?.settings?.get(MODULE_ID, SETTINGS.devEnhancedDamage));
-}
-
-function initActorSheetStabilityHandlers() {
-  if (actorSheetStabilityHandlersBound) return;
-  if (typeof document?.addEventListener !== "function") return;
-
-  for (const eventName of ["pointerdown", "mousedown", "click", "change", "input", "submit"]) {
-    document.addEventListener(eventName, rememberActorRelatedSheetScrollFromEvent, true);
-  }
-  actorSheetStabilityHandlersBound = true;
-}
-
-function rememberActorRelatedSheetScrollFromEvent(event) {
-  const target = event?.target;
-  if (!isElementNode(target)) return;
-
-  const root = target.closest?.(ACTOR_SHEET_ROOT_SELECTOR);
-  if (!root) return;
-
-  const app = getApplicationFromRoot(root);
-  if (!isActorRelatedSheetApp(app) && !isActorRelatedSheetRoot(root)) return;
-
-  rememberActorRelatedSheetScroll(app, root, target);
-  scheduleActorRelatedSheetScrollRestore(app, root);
-}
-
-function restoreActorRelatedSheetScroll(app, htmlOrElement) {
-  if (!isActorRelatedSheetApp(app)) return;
-
-  const root = getApplicationRootFromRender(app, htmlOrElement);
-  if (!root) return;
-
-  scheduleActorRelatedSheetScrollRestore(app, root);
-}
-
-function rememberActorRelatedSheetScroll(app, root, target = null) {
-  if (!isElementNode(root)) return;
-
-  const key = getActorRelatedSheetKey(app, root);
-  if (!key) return;
-
-  const containers = getActorSheetScrollContainers(root, target)
-    .map((element, index) => ({
-      locator: getActorSheetScrollContainerLocator(element, root, index),
-      top: Number(element.scrollTop ?? 0),
-      left: Number(element.scrollLeft ?? 0),
-    }))
-    .filter((entry) => entry.top > 0 || entry.left > 0);
-
-  const windowTop = Number(globalThis.scrollY ?? 0);
-  const windowLeft = Number(globalThis.scrollX ?? 0);
-  if (!containers.length && windowTop <= 0 && windowLeft <= 0) return;
-
-  actorSheetScrollSnapshots.set(key, {
-    created: Date.now(),
-    containers,
-    focus: getActorSheetFocusLocator(root, target),
-    windowTop,
-    windowLeft,
-  });
-}
-
-function scheduleActorRelatedSheetScrollRestore(app, root) {
-  const key = getActorRelatedSheetKey(app, root);
-  const snapshot = key ? actorSheetScrollSnapshots.get(key) : null;
-  if (!key || !snapshot || Date.now() - snapshot.created > ACTOR_SHEET_SCROLL_RESTORE_MS) return;
-
-  for (const delay of ACTOR_SHEET_SCROLL_RESTORE_DELAYS) {
-    if (delay === 0 && typeof globalThis.requestAnimationFrame === "function") {
-      globalThis.requestAnimationFrame(() => applyActorRelatedSheetScrollSnapshot(app, root, key));
-    } else {
-      setTimeout(() => applyActorRelatedSheetScrollSnapshot(app, root, key), delay);
-    }
-  }
-}
-
-function applyActorRelatedSheetScrollSnapshot(app, root, key) {
-  const snapshot = actorSheetScrollSnapshots.get(key);
-  if (!snapshot) return;
-
-  if (Date.now() - snapshot.created > ACTOR_SHEET_SCROLL_RESTORE_MS) {
-    actorSheetScrollSnapshots.delete(key);
-    return;
-  }
-
-  const liveRoot = getLiveApplicationRoot(app, root);
-  if (!liveRoot) return;
-
-  for (const entry of snapshot.containers) {
-    const element = findActorSheetScrollContainer(liveRoot, entry.locator);
-    if (!element) continue;
-    if (entry.top > 0) element.scrollTop = entry.top;
-    if (entry.left > 0) element.scrollLeft = entry.left;
-  }
-
-  if ((snapshot.windowTop > 0 || snapshot.windowLeft > 0) && typeof globalThis.scrollTo === "function") {
-    globalThis.scrollTo(snapshot.windowLeft, snapshot.windowTop);
-  }
-
-  restoreActorSheetFocus(liveRoot, snapshot.focus);
-}
-
-function getApplicationRootFromRender(app, htmlOrElement) {
-  const element = getElementFromHookArgument(htmlOrElement);
-  const root = element?.closest?.(ACTOR_SHEET_ROOT_SELECTOR) ?? null;
-  if (root) return root;
-
-  const appElement = getElementFromHookArgument(app?.element);
-  const appRoot = appElement?.closest?.(ACTOR_SHEET_ROOT_SELECTOR) ?? null;
-  if (appRoot) return appRoot;
-
-  const appId = getApplicationId(app);
-  if (!appId || typeof document?.querySelector !== "function") return null;
-
-  return (
-    document.querySelector(`[data-appid="${cssAttributeValue(appId)}"]`) ??
-    document.querySelector(`[data-application-id="${cssAttributeValue(appId)}"]`) ??
-    document.getElementById?.(String(appId)) ??
-    null
-  );
-}
-
-function getLiveApplicationRoot(app, fallbackRoot) {
-  if (fallbackRoot?.isConnected) return fallbackRoot;
-  return getApplicationRootFromRender(app, null);
-}
-
-function getElementFromHookArgument(value) {
-  if (isElementNode(value)) return value;
-  if (isElementNode(value?.[0])) return value[0];
-  if (typeof value?.get === "function") {
-    const element = value.get(0);
-    if (isElementNode(element)) return element;
-  }
-  return null;
-}
-
-function getApplicationFromRoot(root) {
-  const appId = getApplicationId(null, root);
-  if (!appId) return null;
-
-  const windows = globalThis.ui?.windows ?? {};
-  const fromWindows = windows[appId] ?? windows[Number(appId)];
-  if (fromWindows) return fromWindows;
-
-  const instances = globalThis.foundry?.applications?.instances;
-  return instances?.get?.(appId) ?? instances?.get?.(Number(appId)) ?? null;
-}
-
-function getApplicationId(app, root = null) {
-  return (
-    root?.dataset?.appid ??
-    root?.dataset?.appId ??
-    root?.dataset?.applicationId ??
-    root?.dataset?.applicationid ??
-    app?.appId ??
-    app?.id ??
-    null
-  );
-}
-
-function getActorRelatedSheetKey(app, root) {
-  const appId = getApplicationId(app, root);
-  if (appId != null && appId !== "") return `app:${appId}`;
-
-  const actor = getActorFromApp(app);
-  const actorId = actor?.uuid ?? actor?.id ?? actor?._id ?? null;
-  if (actorId) return `actor:${actorId}`;
-
-  if (root?.id) return `root:${root.id}`;
-  return null;
-}
-
-function isActorRelatedSheetRoot(root) {
-  if (!isElementNode(root)) return false;
-  const classes = String(root.className ?? "");
-  if (/\bactor\b/i.test(classes)) return true;
-  return Boolean(root.querySelector?.(".actor, [data-actor-id], [data-actor-uuid]"));
-}
-
-function getActorSheetScrollContainers(root, target = null) {
-  const elements = [root, ...Array.from(root.querySelectorAll?.(ACTOR_SHEET_SCROLLABLE_SELECTOR) ?? [])];
-
-  let current = isElementNode(target) ? target : null;
-  while (current && current !== root) {
-    if (isPotentialScrollContainer(current)) elements.push(current);
-    current = current.parentElement;
-  }
-
-  const seen = new Set();
-  return elements.filter((element) => {
-    if (!isElementNode(element) || seen.has(element)) return false;
-    seen.add(element);
-    return isPotentialScrollContainer(element);
-  });
-}
-
-function isPotentialScrollContainer(element) {
-  if (!isElementNode(element)) return false;
-  return (
-    Number(element.scrollTop ?? 0) > 0 ||
-    Number(element.scrollLeft ?? 0) > 0 ||
-    Number(element.scrollHeight ?? 0) - Number(element.clientHeight ?? 0) > 1 ||
-    Number(element.scrollWidth ?? 0) - Number(element.clientWidth ?? 0) > 1
-  );
-}
-
-function getActorSheetScrollContainerLocator(element, root, fallbackIndex) {
-  if (element === root) return { type: "root" };
-
-  for (const className of ["window-content", "sheet-body", "sheet-content", "scrollable"]) {
-    if (element.classList?.contains(className)) {
-      return {
-        type: "class",
-        value: className,
-        index: getElementMatchIndex(root.querySelectorAll?.(`.${className}`), element),
-      };
-    }
-  }
-
-  const tab = element.dataset?.tab;
-  if (tab) {
-    return {
-      type: "tab",
-      value: tab,
-      index: getElementMatchIndex(root.querySelectorAll?.("[data-tab]"), element, (candidate) => {
-        return candidate?.dataset?.tab === tab;
-      }),
-    };
-  }
-
-  if (element.id) return { type: "id", value: element.id };
-  return { type: "index", value: fallbackIndex };
-}
-
-function findActorSheetScrollContainer(root, locator) {
-  if (!locator) return null;
-  if (locator.type === "root") return root;
-
-  if (locator.type === "class") {
-    const matches = Array.from(root.querySelectorAll?.(`.${locator.value}`) ?? []);
-    return matches[locator.index] ?? matches[0] ?? null;
-  }
-
-  if (locator.type === "tab") {
-    const matches = Array.from(root.querySelectorAll?.("[data-tab]") ?? []).filter((element) => {
-      return element?.dataset?.tab === locator.value;
-    });
-    return matches[locator.index] ?? matches[0] ?? null;
-  }
-
-  if (locator.type === "id") {
-    return root.querySelector?.(`#${cssIdentifier(locator.value)}`) ?? null;
-  }
-
-  if (locator.type === "index") {
-    return getActorSheetScrollContainers(root)[locator.value] ?? null;
-  }
-
-  return null;
-}
-
-function getActorSheetFocusLocator(root, target = null) {
-  const active = document?.activeElement;
-  const element = root.contains?.(active) ? active : target;
-  if (!isFocusableSheetField(element)) return null;
-
-  const name = element.getAttribute?.("name");
-  if (name) return { type: "name", value: name };
-  if (element.id) return { type: "id", value: element.id };
-  return null;
-}
-
-function restoreActorSheetFocus(root, locator) {
-  if (!locator) return;
-
-  let element = null;
-  if (locator.type === "name") {
-    element = root.querySelector?.(`[name="${cssAttributeValue(locator.value)}"]`) ?? null;
-  } else if (locator.type === "id") {
-    element = root.querySelector?.(`#${cssIdentifier(locator.value)}`) ?? null;
-  }
-
-  if (!isFocusableSheetField(element) || document?.activeElement === element) return;
-
-  try {
-    element.focus({ preventScroll: true });
-  } catch {
-    element.focus();
-  }
-}
-
-function isFocusableSheetField(element) {
-  if (!isElementNode(element)) return false;
-  return Boolean(element.matches?.("input, select, textarea, [contenteditable='true']"));
-}
-
-function getElementMatchIndex(elements, target, filter = null) {
-  const matches = Array.from(elements ?? []).filter((element) => {
-    return !filter || filter(element);
-  });
-  const index = matches.indexOf(target);
-  return index >= 0 ? index : 0;
-}
-
-function isElementNode(value) {
-  return Boolean(value && value.nodeType === 1);
-}
-
-function cssIdentifier(value) {
-  const text = String(value ?? "");
-  return globalThis.CSS?.escape?.(text) ?? text.replace(/[^a-zA-Z0-9_-]/g, "\\$&");
-}
-
-function cssAttributeValue(value) {
-  return String(value ?? "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
 function getNetherscrollsApiKey() {
@@ -933,6 +683,17 @@ function buildNetherscrollsImportDestinationPlan(selectedTypes) {
     destinations.items.types = NETHERSCROLLS_ITEM_FOLDERS.map((folder) => folder.label);
   }
 
+  if (destinations.feats) {
+    destinations.feats.folderRule = "Feats / {feat|demifeat}";
+    destinations.feats.types = NETHERSCROLLS_FEAT_FOLDERS.map((folder) => folder.label);
+  }
+
+  if (destinations.classes) {
+    destinations.classes.folderRule = "Classes / {class|subclass}";
+    destinations.classes.featurePack = `${MODULE_ID}.${IMPORT_PACKS.classFeatures}`;
+    destinations.classes.featureFolderRule = "Class Features / {class} / {feature|subclass}";
+  }
+
   return destinations;
 }
 
@@ -941,6 +702,10 @@ function formatNetherscrollsImportResult(typeKey, result) {
   const imported = result?.[typeKey]?.created ?? 0;
   const updated = result?.[typeKey]?.updated ?? 0;
   const removed = result?.[typeKey]?.deleted ?? 0;
+  if (typeKey === "classes" && result?.classes?.features) {
+    const features = result.classes.features;
+    return `Netherscrolls ${label} imported: ${imported} created, ${updated} updated, ${removed} removed. Class features: ${features.created ?? 0} created, ${features.updated ?? 0} updated, ${features.deleted ?? 0} removed.`;
+  }
   return `Netherscrolls ${label} imported: ${imported} created, ${updated} updated, ${removed} removed.`;
 }
 
@@ -963,19 +728,193 @@ async function sendNetherscrollsImportRequest(importRequest) {
   return data;
 }
 
-async function applyNetherscrollsImportResponse(data) {
+async function applyNetherscrollsImportResponse(data, requestTypeKey = null) {
   const result = {};
-  const items = getNetherscrollsResponseDataset(data, "items");
+  const classes = getNetherscrollsResponseDataset(data, "classes", requestTypeKey);
+  if (Array.isArray(classes)) {
+    result.classes = await importNetherscrollsClasses(classes);
+  }
+
+  const items = getNetherscrollsResponseDataset(data, "items", requestTypeKey);
   if (Array.isArray(items)) {
     result.items = await importNetherscrollsItems(items);
   }
 
-  const spells = getNetherscrollsResponseDataset(data, "spells");
+  const feats = getNetherscrollsResponseDataset(data, "feats", requestTypeKey);
+  if (Array.isArray(feats)) {
+    result.feats = await importNetherscrollsFeats(feats);
+  }
+
+  const spells = getNetherscrollsResponseDataset(data, "spells", requestTypeKey);
   if (Array.isArray(spells)) {
     result.spells = await importNetherscrollsSpells(spells);
   }
 
   return result;
+}
+
+async function importNetherscrollsClasses(classes) {
+  const classPack = getNetherscrollsImportPack("classes");
+  if (!classPack) throw new Error("Netherscrolls Classes compendium pack was not found.");
+
+  const featurePack = getNetherscrollsImportPack("classFeatures");
+  if (!featurePack) throw new Error("Netherscrolls Class Features compendium pack was not found.");
+
+  await ensureNetherscrollsImportPackWritable(classPack);
+  await ensureNetherscrollsImportPackWritable(featurePack);
+
+  const featureResult = await importNetherscrollsClassFeatureItems(classes, featurePack);
+  const existingByNetherId = await getCompendiumDocumentsByNetherId(classPack);
+  const classData = [];
+  const deleteIds = [];
+  const folderCache = new Map();
+  await ensureNetherscrollsClassFolderTree(classPack, folderCache);
+
+  for (const classSource of classes) {
+    const classNetherscrollsId = getNetherscrollsSourceId(classSource);
+    if (isNetherscrollsDeleted(classSource)) {
+      const existing = classNetherscrollsId
+        ? existingByNetherId.get(String(classNetherscrollsId))
+        : null;
+      if (existing?.id) deleteIds.push(existing.id);
+
+      for (const subclassSource of getNetherscrollsSubclasses(classSource)) {
+        const subclassNetherscrollsId = getNetherscrollsSourceId(subclassSource);
+        const existingSubclass = subclassNetherscrollsId
+          ? existingByNetherId.get(String(subclassNetherscrollsId))
+          : null;
+        if (existingSubclass?.id) deleteIds.push(existingSubclass.id);
+      }
+      continue;
+    }
+
+    const preparedClass = normalizeNetherscrollsClassData(classSource, {
+      featureUuidByKey: featureResult.uuidByKey,
+    });
+    if (classNetherscrollsId && existingByNetherId.has(String(classNetherscrollsId))) {
+      preparedClass._id = existingByNetherId.get(String(classNetherscrollsId)).id;
+    }
+    const classFolder = await ensureNetherscrollsClassFolder(classPack, preparedClass, folderCache);
+    if (classFolder?.id) preparedClass.folder = classFolder.id;
+    classData.push(preparedClass);
+
+    for (const subclassSource of getNetherscrollsSubclasses(classSource)) {
+      const subclassNetherscrollsId = getNetherscrollsSourceId(subclassSource);
+      if (isNetherscrollsDeleted(subclassSource)) {
+        const existing = subclassNetherscrollsId
+          ? existingByNetherId.get(String(subclassNetherscrollsId))
+          : null;
+        if (existing?.id) deleteIds.push(existing.id);
+        continue;
+      }
+
+      const preparedSubclass = normalizeNetherscrollsSubclassData(subclassSource, classSource, {
+        featureUuidByKey: featureResult.uuidByKey,
+      });
+      if (subclassNetherscrollsId && existingByNetherId.has(String(subclassNetherscrollsId))) {
+        preparedSubclass._id = existingByNetherId.get(String(subclassNetherscrollsId)).id;
+      }
+      const subclassFolder = await ensureNetherscrollsSubclassFolder(
+        classPack,
+        preparedSubclass,
+        classSource,
+        folderCache
+      );
+      if (subclassFolder?.id) preparedSubclass.folder = subclassFolder.id;
+      classData.push(preparedSubclass);
+    }
+  }
+
+  const ItemClass = Item?.implementation ?? Item;
+  const uniqueDeleteIds = Array.from(new Set(deleteIds));
+  if (uniqueDeleteIds.length) {
+    await ItemClass.deleteDocuments(uniqueDeleteIds, { pack: classPack.collection });
+  }
+
+  const updates = classData.filter((item) => item._id);
+  const creates = classData.filter((item) => !item._id);
+  if (updates.length) {
+    await ItemClass.updateDocuments(updates, { pack: classPack.collection });
+  }
+
+  if (!creates.length) {
+    return {
+      created: 0,
+      updated: updates.length,
+      deleted: uniqueDeleteIds.length,
+      features: featureResult.counts,
+    };
+  }
+
+  const created = await ItemClass.createDocuments(creates, { pack: classPack.collection });
+  return {
+    created: created.length,
+    updated: updates.length,
+    deleted: uniqueDeleteIds.length,
+    features: featureResult.counts,
+  };
+}
+
+async function importNetherscrollsClassFeatureItems(classes, pack) {
+  const existingByNetherId = await getCompendiumDocumentsByNetherId(pack);
+  const featureData = [];
+  const deleteIds = [];
+  const uuidByKey = new Map();
+  const folderCache = new Map();
+  await ensureNetherscrollsClassFeatureFolderTree(pack, folderCache);
+
+  for (const descriptor of getNetherscrollsClassFeatureDescriptors(classes)) {
+    if (descriptor.deleted) {
+      const existing = descriptor.netherscrollsId
+        ? existingByNetherId.get(String(descriptor.netherscrollsId))
+        : null;
+      if (existing?.id) deleteIds.push(existing.id);
+      continue;
+    }
+
+    const prepared = normalizeNetherscrollsClassFeatureData(descriptor);
+    if (descriptor.netherscrollsId && existingByNetherId.has(String(descriptor.netherscrollsId))) {
+      prepared._id = existingByNetherId.get(String(descriptor.netherscrollsId)).id;
+      uuidByKey.set(descriptor.key, buildNetherscrollsCompendiumItemUuid(pack, prepared._id));
+    }
+    const folder = await ensureNetherscrollsClassFeatureFolder(pack, descriptor, folderCache);
+    if (folder?.id) prepared.folder = folder.id;
+    featureData.push(prepared);
+  }
+
+  const ItemClass = Item?.implementation ?? Item;
+  const uniqueDeleteIds = Array.from(new Set(deleteIds));
+  if (uniqueDeleteIds.length) {
+    await ItemClass.deleteDocuments(uniqueDeleteIds, { pack: pack.collection });
+  }
+
+  const updates = featureData.filter((item) => item._id);
+  const creates = featureData.filter((item) => !item._id);
+  if (updates.length) {
+    await ItemClass.updateDocuments(updates, { pack: pack.collection });
+  }
+
+  let created = [];
+  if (creates.length) {
+    created = await ItemClass.createDocuments(creates, { pack: pack.collection });
+    for (const createdDocument of created) {
+      const featureKey =
+        createdDocument?.getFlag?.(MODULE_ID, "featureKey") ??
+        createdDocument?.flags?.[MODULE_ID]?.featureKey;
+      if (featureKey && createdDocument?.id) {
+        uuidByKey.set(featureKey, buildNetherscrollsCompendiumItemUuid(pack, createdDocument.id));
+      }
+    }
+  }
+
+  return {
+    uuidByKey,
+    counts: {
+      created: created.length,
+      updated: updates.length,
+      deleted: uniqueDeleteIds.length,
+    },
+  };
 }
 
 async function importNetherscrollsItems(items) {
@@ -1015,6 +954,59 @@ async function importNetherscrollsItems(items) {
 
   const updates = itemData.filter((item) => item._id);
   const creates = itemData.filter((item) => !item._id);
+  if (updates.length) {
+    await ItemClass.updateDocuments(updates, { pack: pack.collection });
+  }
+
+  if (!creates.length) {
+    return { created: 0, updated: updates.length, deleted: deleteIds.length };
+  }
+
+  const created = await ItemClass.createDocuments(creates, { pack: pack.collection });
+  return {
+    created: created.length,
+    updated: updates.length,
+    deleted: deleteIds.length,
+  };
+}
+
+async function importNetherscrollsFeats(feats) {
+  const pack = getNetherscrollsImportPack("feats");
+  if (!pack) throw new Error("Netherscrolls Feats compendium pack was not found.");
+  await ensureNetherscrollsImportPackWritable(pack);
+
+  const existingByNetherId = await getCompendiumDocumentsByNetherId(pack);
+  const featData = [];
+  const deleteIds = [];
+  const folderCache = new Map();
+  await ensureNetherscrollsFeatFolderTree(pack, folderCache);
+
+  for (const feat of feats) {
+    const netherscrollsId = getNetherscrollsSourceId(feat);
+    if (isNetherscrollsDeleted(feat)) {
+      const existing = netherscrollsId
+        ? existingByNetherId.get(String(netherscrollsId))
+        : null;
+      if (existing?.id) deleteIds.push(existing.id);
+      continue;
+    }
+
+    const prepared = normalizeNetherscrollsFeatData(feat);
+    if (netherscrollsId && existingByNetherId.has(String(netherscrollsId))) {
+      prepared._id = existingByNetherId.get(String(netherscrollsId)).id;
+    }
+    const folder = await ensureNetherscrollsFeatFolder(pack, feat, folderCache);
+    if (folder?.id) prepared.folder = folder.id;
+    featData.push(prepared);
+  }
+
+  const ItemClass = Item?.implementation ?? Item;
+  if (deleteIds.length) {
+    await ItemClass.deleteDocuments(deleteIds, { pack: pack.collection });
+  }
+
+  const updates = featData.filter((feat) => feat._id);
+  const creates = featData.filter((feat) => !feat._id);
   if (updates.length) {
     await ItemClass.updateDocuments(updates, { pack: pack.collection });
   }
@@ -1104,15 +1096,44 @@ async function getCompendiumDocumentsByNetherId(pack) {
   return byId;
 }
 
-function getNetherscrollsResponseDataset(data, dataKey) {
+function getNetherscrollsResponseDataset(data, dataKey, requestTypeKey = null) {
+  if (Array.isArray(data)) return requestTypeKey === dataKey ? data : null;
   if (Array.isArray(data?.[dataKey])) return data[dataKey];
   if (data?.meta?.dataKey === dataKey && Array.isArray(data?.data)) return data.data;
   if (Array.isArray(data?.data?.[dataKey])) return data.data[dataKey];
+  if (dataKey === "classes" && isNetherscrollsClassLike(data)) return [data];
   return null;
 }
 
+function isNetherscrollsClassLike(data) {
+  return Boolean(
+    data &&
+      typeof data === "object" &&
+      !Array.isArray(data) &&
+      (Array.isArray(data.classFeatures) ||
+        Array.isArray(data.subclasses) ||
+        data.progression ||
+        data.presentation?.progressionTable)
+  );
+}
+
 function getNetherscrollsSourceId(data) {
-  return toTrimmedStringOrNull(data?.netherscrollsId ?? data?._id ?? data?.id);
+  return normalizeNetherscrollsReferenceValue(data?.netherscrollsId ?? data?._id ?? data?.id);
+}
+
+function normalizeNetherscrollsReferenceValue(value) {
+  if (value && typeof value === "object") {
+    return (
+      toTrimmedStringOrNull(value.$oid) ??
+      toTrimmedStringOrNull(value.$date) ??
+      toTrimmedStringOrNull(value.oid) ??
+      toTrimmedStringOrNull(value.date) ??
+      toTrimmedStringOrNull(value.id) ??
+      null
+    );
+  }
+
+  return toTrimmedStringOrNull(value);
 }
 
 function isNetherscrollsDeleted(data) {
@@ -1123,6 +1144,1096 @@ function isNetherscrollsDeleted(data) {
 function getNetherscrollsImportPack(typeKey) {
   const packName = IMPORT_PACKS[typeKey] ?? typeKey;
   return game?.packs?.get?.(`${MODULE_ID}.${packName}`) ?? null;
+}
+
+function normalizeNetherscrollsClassData(classSource, { featureUuidByKey }) {
+  if (classSource?.foundry || classSource?.document) {
+    return normalizeNetherscrollsFoundryClassData(classSource, { featureUuidByKey });
+  }
+
+  const source = duplicateNetherscrollsData(classSource);
+  const netherscrollsId = getNetherscrollsSourceId(source);
+  const name = toTrimmedStringOrNull(source.name) ?? "Netherscrolls Class";
+  const identifier = normalizeNetherscrollsClassIdentifier(source);
+  const itemData = {
+    name,
+    type: "class",
+    img: toTrimmedStringOrNull(source.img ?? source.image) ?? NETHERSCROLLS_DEFAULT_IMAGE,
+    sort: 0,
+    ownership: {
+      default: 0,
+    },
+    system: buildNetherscrollsClassSystem(source, {
+      netherscrollsId,
+      identifier,
+      featureUuidByKey,
+    }),
+    effects: [],
+  };
+
+  applyNetherscrollsImportFlags(itemData, source, netherscrollsId);
+  itemData.flags = itemData.flags ?? {};
+  itemData.flags[MODULE_ID] = {
+    ...(itemData.flags[MODULE_ID] ?? {}),
+    identifier,
+    classFeatureUuids: getNetherscrollsClassFeatureUuids(source, featureUuidByKey, "class"),
+    subclassType: toTrimmedStringOrNull(source.subclassType) ?? "",
+  };
+  if (source.legacy != null) itemData.flags[MODULE_ID].legacy = Boolean(source.legacy);
+  if (source.version != null) itemData.flags[MODULE_ID].sourceVersion = source.version;
+  const progressionTable = getNetherscrollsProgressionTable(source);
+  if (progressionTable) itemData.flags[MODULE_ID].progressionTable = progressionTable;
+
+  return itemData;
+}
+
+function normalizeNetherscrollsFoundryClassData(classSource, { featureUuidByKey }) {
+  const source = duplicateNetherscrollsData(classSource?.foundry ?? classSource?.document);
+  const netherscrollsId = getNetherscrollsSourceId(classSource);
+  source.name = toTrimmedStringOrNull(source.name) ?? "Netherscrolls Class";
+  source.type = "class";
+  source.img = toTrimmedStringOrNull(source.img ?? source.image) ?? NETHERSCROLLS_DEFAULT_IMAGE;
+  source.sort ??= 0;
+  source.ownership ??= { default: 0 };
+  source.effects ??= [];
+
+  const identifier = normalizeNetherscrollsClassIdentifier({
+    ...classSource,
+    name: source.name,
+    system: source.system,
+  });
+  const defaults = buildNetherscrollsClassSystem(
+    {
+      ...classSource,
+      system: source.system,
+      name: source.name,
+    },
+    {
+      netherscrollsId,
+      identifier,
+      featureUuidByKey,
+    }
+  );
+  source.system = mergeNetherscrollsDefaults(defaults, source.system ?? {});
+  source.system.identifier = toTrimmedStringOrNull(source.system.identifier) ?? identifier;
+  applyNetherscrollsImportFlags(source, classSource, netherscrollsId);
+  source.flags = source.flags ?? {};
+  source.flags[MODULE_ID] = {
+    ...(source.flags[MODULE_ID] ?? {}),
+    identifier,
+    classFeatureUuids: getNetherscrollsClassFeatureUuids(classSource, featureUuidByKey, "class"),
+  };
+
+  return source;
+}
+
+function normalizeNetherscrollsSubclassData(subclassSource, classSource, { featureUuidByKey }) {
+  if (subclassSource?.foundry || subclassSource?.document) {
+    return normalizeNetherscrollsFoundrySubclassData(subclassSource, classSource, { featureUuidByKey });
+  }
+
+  const source = duplicateNetherscrollsData(subclassSource);
+  const netherscrollsId = getNetherscrollsSourceId(source);
+  const classIdentifier = normalizeNetherscrollsClassIdentifier(classSource);
+  const identifier = normalizeNetherscrollsSubclassIdentifier(source, classSource);
+  const itemData = {
+    name: toTrimmedStringOrNull(source.name) ?? "Netherscrolls Subclass",
+    type: "subclass",
+    img:
+      toTrimmedStringOrNull(source.img ?? source.image ?? classSource?.img ?? classSource?.image) ??
+      NETHERSCROLLS_DEFAULT_IMAGE,
+    sort: 0,
+    ownership: {
+      default: 0,
+    },
+    system: buildNetherscrollsSubclassSystem(source, classSource, {
+      netherscrollsId,
+      identifier,
+      classIdentifier,
+      featureUuidByKey,
+    }),
+    effects: [],
+  };
+
+  applyNetherscrollsImportFlags(itemData, source, netherscrollsId);
+  itemData.flags = itemData.flags ?? {};
+  itemData.flags[MODULE_ID] = {
+    ...(itemData.flags[MODULE_ID] ?? {}),
+    identifier,
+    parentClass: toTrimmedStringOrNull(classSource?.name) ?? "",
+    parentClassIdentifier: classIdentifier,
+    parentClassNetherscrollsId: getNetherscrollsSourceId(classSource) ?? "",
+    subclassFeatureUuids: getNetherscrollsClassFeatureUuids(classSource, featureUuidByKey, "subclass", source),
+  };
+
+  return itemData;
+}
+
+function normalizeNetherscrollsFoundrySubclassData(subclassSource, classSource, { featureUuidByKey }) {
+  const source = duplicateNetherscrollsData(subclassSource?.foundry ?? subclassSource?.document);
+  const netherscrollsId = getNetherscrollsSourceId(subclassSource);
+  source.name = toTrimmedStringOrNull(source.name) ?? "Netherscrolls Subclass";
+  source.type = "subclass";
+  source.img =
+    toTrimmedStringOrNull(source.img ?? source.image ?? classSource?.img ?? classSource?.image) ??
+    NETHERSCROLLS_DEFAULT_IMAGE;
+  source.sort ??= 0;
+  source.ownership ??= { default: 0 };
+  source.effects ??= [];
+
+  const classIdentifier = normalizeNetherscrollsClassIdentifier(classSource);
+  const identifier = normalizeNetherscrollsSubclassIdentifier(
+    {
+      ...subclassSource,
+      name: source.name,
+      system: source.system,
+    },
+    classSource
+  );
+  const defaults = buildNetherscrollsSubclassSystem(
+    {
+      ...subclassSource,
+      system: source.system,
+      name: source.name,
+    },
+    classSource,
+    {
+      netherscrollsId,
+      identifier,
+      classIdentifier,
+      featureUuidByKey,
+    }
+  );
+  source.system = mergeNetherscrollsDefaults(defaults, source.system ?? {});
+  source.system.identifier = toTrimmedStringOrNull(source.system.identifier) ?? identifier;
+  source.system.classIdentifier = toTrimmedStringOrNull(source.system.classIdentifier) ?? classIdentifier;
+  applyNetherscrollsImportFlags(source, subclassSource, netherscrollsId);
+  source.flags = source.flags ?? {};
+  source.flags[MODULE_ID] = {
+    ...(source.flags[MODULE_ID] ?? {}),
+    identifier,
+    parentClass: toTrimmedStringOrNull(classSource?.name) ?? "",
+    parentClassIdentifier: classIdentifier,
+    parentClassNetherscrollsId: getNetherscrollsSourceId(classSource) ?? "",
+    subclassFeatureUuids: getNetherscrollsClassFeatureUuids(classSource, featureUuidByKey, "subclass", subclassSource),
+  };
+
+  return source;
+}
+
+function buildNetherscrollsClassSystem(source, { netherscrollsId, identifier, featureUuidByKey }) {
+  const sourceName = toTrimmedStringOrNull(source.source ?? source.system?.source?.book);
+  return {
+    advancement: buildNetherscrollsClassAdvancement(source, { featureUuidByKey }),
+    description: {
+      value: buildNetherscrollsClassDescription(source),
+      chat: "",
+    },
+    hd: {
+      denomination: normalizeNetherscrollsClassHitDie(source),
+      spent: 0,
+      additional: "",
+    },
+    identifier:
+      toTrimmedStringOrNull(source?.system?.identifier) ??
+      identifier ??
+      (netherscrollsId ? `netherscrolls-${netherscrollsId}` : slugifyNetherscrollsIdentifier(source?.name)),
+    levels: Math.max(1, Math.trunc(toNumber(source?.system?.levels ?? source?.levels, 1))),
+    primaryAbility: normalizeNetherscrollsPrimaryAbility(source),
+    properties: normalizeNetherscrollsClassProperties(source),
+    source: buildNetherscrollsItemSource(sourceName, {
+      ...source,
+      rules: source?.rules ?? (source?.legacy ? "2014" : undefined),
+    }),
+    spellcasting: normalizeNetherscrollsClassSpellcasting(source),
+    startingEquipment: Array.isArray(source?.system?.startingEquipment) ? source.system.startingEquipment : [],
+    wealth: toTrimmedStringOrNull(source?.system?.wealth ?? source?.wealth) ?? "",
+  };
+}
+
+function buildNetherscrollsSubclassSystem(source, classSource, { netherscrollsId, identifier, classIdentifier, featureUuidByKey }) {
+  const sourceName = toTrimmedStringOrNull(source.source ?? classSource?.source ?? source.system?.source?.book);
+  return {
+    advancement: buildNetherscrollsSubclassAdvancement(source, classSource, { featureUuidByKey }),
+    classIdentifier,
+    description: {
+      value: buildNetherscrollsSubclassDescription(source),
+      chat: "",
+    },
+    identifier:
+      toTrimmedStringOrNull(source?.system?.identifier) ??
+      identifier ??
+      (netherscrollsId ? `netherscrolls-${netherscrollsId}` : slugifyNetherscrollsIdentifier(source?.name)),
+    source: buildNetherscrollsItemSource(sourceName, {
+      ...source,
+      rules: source?.rules ?? classSource?.rules ?? (classSource?.legacy ? "2014" : undefined),
+    }),
+    spellcasting: normalizeNetherscrollsClassSpellcasting(source, classSource),
+  };
+}
+
+function normalizeNetherscrollsClassFeatureData(descriptor) {
+  const feature = descriptor.feature;
+  const netherscrollsId = descriptor.netherscrollsId;
+  const featureName = getNetherscrollsFeatureTitle(feature);
+  const sourceName = toTrimmedStringOrNull(feature?.source ?? descriptor.classSource?.source);
+  const itemData = {
+    name: featureName,
+    type: "feat",
+    img:
+      toTrimmedStringOrNull(feature?.img ?? feature?.image ?? descriptor.subclassSource?.img ?? descriptor.classSource?.img) ??
+      NETHERSCROLLS_DEFAULT_IMAGE,
+    sort: 0,
+    ownership: {
+      default: 0,
+    },
+    system: {
+      activities: feature?.system?.activities ?? {},
+      advancement: feature?.system?.advancement ?? {},
+      description: {
+        value: buildNetherscrollsFeatureDescription(feature),
+        chat: "",
+      },
+      identifier: normalizeNetherscrollsClassFeatureIdentifier(descriptor),
+      source: buildNetherscrollsItemSource(sourceName, {
+        ...feature,
+        rules: feature?.rules ?? descriptor.classSource?.rules ?? (descriptor.classSource?.legacy ? "2014" : undefined),
+      }),
+      cover: 0,
+      crewed: false,
+      enchant: {
+        max: "",
+        period: "",
+      },
+      prerequisites: {
+        items: [],
+        repeatable: false,
+      },
+      properties: [],
+      requirements: buildNetherscrollsFeatureRequirement(descriptor),
+      type: {
+        value: "class",
+        subtype: "",
+      },
+      uses: normalizeNetherscrollsItemUses(feature),
+    },
+    effects: [],
+  };
+
+  applyNetherscrollsImportFlags(itemData, feature, netherscrollsId);
+  itemData.flags = itemData.flags ?? {};
+  itemData.flags[MODULE_ID] = {
+    ...(itemData.flags[MODULE_ID] ?? {}),
+    featureKey: descriptor.key,
+    featureScope: descriptor.scope,
+    parentClass: toTrimmedStringOrNull(descriptor.classSource?.name) ?? "",
+    parentClassIdentifier: normalizeNetherscrollsClassIdentifier(descriptor.classSource),
+    parentClassNetherscrollsId: getNetherscrollsSourceId(descriptor.classSource) ?? "",
+    level: descriptor.level,
+    optional: Boolean(feature?.optional),
+    selectable: Math.max(0, Math.trunc(toNumber(feature?.selectable, 0))),
+    choiceType: toTrimmedStringOrNull(feature?.choiceType) ?? "",
+    choices: normalizeNetherscrollsFeatureChoices(feature),
+  };
+  if (descriptor.subclassSource) {
+    itemData.flags[MODULE_ID].parentSubclass = toTrimmedStringOrNull(descriptor.subclassSource?.name) ?? "";
+    itemData.flags[MODULE_ID].parentSubclassIdentifier = normalizeNetherscrollsSubclassIdentifier(
+      descriptor.subclassSource,
+      descriptor.classSource
+    );
+    itemData.flags[MODULE_ID].parentSubclassNetherscrollsId = getNetherscrollsSourceId(descriptor.subclassSource) ?? "";
+  }
+
+  return itemData;
+}
+
+function getNetherscrollsClassFeatureDescriptors(classes) {
+  const descriptors = [];
+  for (const classSource of classes) {
+    for (const feature of getNetherscrollsClassFeatures(classSource)) {
+      descriptors.push(buildNetherscrollsFeatureDescriptor(classSource, null, feature));
+    }
+
+    for (const subclassSource of getNetherscrollsSubclasses(classSource)) {
+      for (const feature of getNetherscrollsSubclassFeatures(subclassSource)) {
+        descriptors.push(buildNetherscrollsFeatureDescriptor(classSource, subclassSource, feature));
+      }
+    }
+  }
+
+  return descriptors;
+}
+
+function buildNetherscrollsFeatureDescriptor(classSource, subclassSource, feature) {
+  const scope = subclassSource ? "subclass" : "class";
+  const level = Math.max(1, Math.trunc(toNumber(feature?.level, 1)));
+  const key = buildNetherscrollsClassFeatureKey(classSource, subclassSource, feature);
+  const netherscrollsId =
+    getNetherscrollsSourceId(feature) ??
+    buildNetherscrollsSyntheticSourceId("feature", key);
+  return {
+    key,
+    scope,
+    netherscrollsId,
+    classSource,
+    subclassSource,
+    feature,
+    level,
+    deleted:
+      isNetherscrollsDeleted(feature) ||
+      isNetherscrollsDeleted(classSource) ||
+      Boolean(subclassSource && isNetherscrollsDeleted(subclassSource)),
+  };
+}
+
+function buildNetherscrollsClassFeatureKey(classSource, subclassSource, feature) {
+  const classKey =
+    getNetherscrollsSourceId(classSource) ??
+    normalizeNetherscrollsClassIdentifier(classSource);
+  const subclassKey = subclassSource
+    ? getNetherscrollsSourceId(subclassSource) ?? normalizeNetherscrollsSubclassIdentifier(subclassSource, classSource)
+    : "class";
+  const featureKey =
+    getNetherscrollsSourceId(feature) ??
+    `${Math.max(1, Math.trunc(toNumber(feature?.level, 1)))}-${slugifyNetherscrollsIdentifier(getNetherscrollsFeatureTitle(feature))}`;
+  return `${classKey}:${subclassKey}:${featureKey}`;
+}
+
+function buildNetherscrollsSyntheticSourceId(prefix, key) {
+  return `${prefix}:${buildNetherscrollsStableId(key)}`;
+}
+
+function buildNetherscrollsClassAdvancement(source, { featureUuidByKey }) {
+  const advancement = {};
+  addNetherscrollsAdvancement(advancement, buildNetherscrollsHitPointsAdvancement(source));
+
+  for (const traitAdvancement of buildNetherscrollsClassTraitAdvancements(source)) {
+    addNetherscrollsAdvancement(advancement, traitAdvancement);
+  }
+
+  const subclassAdvancement = buildNetherscrollsSubclassChoiceAdvancement(source);
+  if (subclassAdvancement) addNetherscrollsAdvancement(advancement, subclassAdvancement);
+
+  for (const level of getNetherscrollsClassAsiLevels(source)) {
+    addNetherscrollsAdvancement(advancement, buildNetherscrollsAsiAdvancement(source, level));
+  }
+
+  for (const descriptor of getNetherscrollsClassFeatureDescriptors([source])) {
+    if (descriptor.scope !== "class") continue;
+    if (!shouldGrantNetherscrollsFeature(descriptor.feature)) continue;
+    const uuid = featureUuidByKey.get(descriptor.key);
+    if (!uuid) continue;
+    addNetherscrollsAdvancement(
+      advancement,
+      buildNetherscrollsItemGrantAdvancement(descriptor.feature, uuid, descriptor.level, descriptor.key)
+    );
+  }
+
+  return advancement;
+}
+
+function buildNetherscrollsSubclassAdvancement(source, classSource, { featureUuidByKey }) {
+  const advancement = {};
+  for (const descriptor of getNetherscrollsClassFeatureDescriptors([{ ...classSource, subclasses: [source] }])) {
+    if (descriptor.scope !== "subclass") continue;
+    if (!shouldGrantNetherscrollsFeature(descriptor.feature)) continue;
+    const uuid = featureUuidByKey.get(descriptor.key);
+    if (!uuid) continue;
+    addNetherscrollsAdvancement(
+      advancement,
+      buildNetherscrollsItemGrantAdvancement(descriptor.feature, uuid, descriptor.level, descriptor.key)
+    );
+  }
+  return advancement;
+}
+
+function addNetherscrollsAdvancement(advancement, entry) {
+  if (!entry?._id) return;
+  advancement[entry._id] = entry;
+}
+
+function buildNetherscrollsHitPointsAdvancement(source) {
+  const id = buildNetherscrollsAdvancementId(source, "hit-points");
+  return {
+    _id: id,
+    type: "HitPoints",
+    configuration: {},
+    value: {},
+    title: "Hit Points",
+    hint: toTrimmedStringOrNull(source?.hitPoints?.description) ?? "",
+  };
+}
+
+function buildNetherscrollsClassTraitAdvancements(source) {
+  const proficiencies = source?.proficiencies ?? {};
+  const advancements = [];
+  const saveGrants = normalizeNetherscrollsSaveTraitKeys(proficiencies.savingThrows);
+  if (saveGrants.length) {
+    advancements.push(
+      buildNetherscrollsTraitAdvancement(source, {
+        key: "saving-throws",
+        level: 1,
+        title: "Saving Throw Proficiencies",
+        grants: saveGrants,
+      })
+    );
+  }
+
+  const proficiencyGrants = [
+    ...normalizeNetherscrollsArmorTraitKeys(proficiencies.armor),
+    ...normalizeNetherscrollsWeaponTraitKeys(proficiencies.weapons),
+    ...normalizeNetherscrollsToolTraitKeys(proficiencies.tools),
+  ];
+  if (proficiencyGrants.length) {
+    advancements.push(
+      buildNetherscrollsTraitAdvancement(source, {
+        key: "equipment-proficiencies",
+        level: 1,
+        title: "Equipment Proficiencies",
+        grants: proficiencyGrants,
+      })
+    );
+  }
+
+  for (const [index, choice] of getNetherscrollsSkillChoiceGroups(proficiencies.skillChoices).entries()) {
+    if (!choice.pool.length || choice.count <= 0) continue;
+    advancements.push(
+      buildNetherscrollsTraitAdvancement(source, {
+        key: `skill-choices-${index}`,
+        level: 1,
+        title: toTrimmedStringOrNull(choice.title) ?? "Skill Proficiencies",
+        choices: [
+          {
+            count: choice.count,
+            pool: choice.pool,
+          },
+        ],
+        hint: toTrimmedStringOrNull(choice.description) ?? "",
+      })
+    );
+  }
+
+  return advancements;
+}
+
+function buildNetherscrollsTraitAdvancement(source, { key, level, title, grants = [], choices = [], hint = "" }) {
+  const id = buildNetherscrollsAdvancementId(source, key);
+  return {
+    _id: id,
+    type: "Trait",
+    configuration: {
+      allowReplacements: false,
+      choices,
+      grants,
+      mode: "default",
+    },
+    value: {
+      chosen: grants,
+    },
+    level,
+    title,
+    hint,
+  };
+}
+
+function buildNetherscrollsSubclassChoiceAdvancement(source) {
+  const subclassFeature = getNetherscrollsClassFeatures(source).find(
+    (feature) => toTrimmedStringOrNull(feature?.choiceType)?.toLowerCase() === "subclass"
+  );
+  if (!subclassFeature && !getNetherscrollsSubclasses(source).length) return null;
+
+  const level = Math.max(1, Math.trunc(toNumber(subclassFeature?.level, 3)));
+  const title =
+    toTrimmedStringOrNull(source?.subclassType) ??
+    toTrimmedStringOrNull(subclassFeature?.title) ??
+    "Subclass";
+  const id = buildNetherscrollsAdvancementId(source, "subclass-choice");
+  return {
+    _id: id,
+    type: "Subclass",
+    configuration: {},
+    value: {},
+    level,
+    title,
+    hint: toTrimmedStringOrNull(source?.subclassIntroHtml ?? source?.subclassIntro) ?? "",
+  };
+}
+
+function buildNetherscrollsAsiAdvancement(source, level) {
+  const id = buildNetherscrollsAdvancementId(source, `asi-${level}`);
+  return {
+    _id: id,
+    type: "AbilityScoreImprovement",
+    configuration: {
+      cap: 2,
+      fixed: {},
+      locked: [],
+      points: 2,
+    },
+    value: {
+      type: "asi",
+      assignments: {},
+    },
+    level,
+    title: "Ability Score Improvement",
+    hint: "",
+  };
+}
+
+function buildNetherscrollsItemGrantAdvancement(feature, uuid, level, key) {
+  const optional = Boolean(feature?.optional);
+  const id = buildNetherscrollsAdvancementId(feature, `grant-${key}`);
+  return {
+    _id: id,
+    type: "ItemGrant",
+    configuration: {
+      items: [
+        {
+          uuid,
+          optional,
+        },
+      ],
+      optional,
+      spell: null,
+    },
+    value: {
+      added: {},
+    },
+    level,
+    title: getNetherscrollsFeatureTitle(feature),
+    hint: toTrimmedStringOrNull(feature?.descriptionHtml ?? feature?.description) ?? "",
+    flags: {
+      [MODULE_ID]: {
+        featureKey: key,
+      },
+    },
+  };
+}
+
+function buildNetherscrollsAdvancementId(source, key) {
+  return buildNetherscrollsStableId(`adv:${getNetherscrollsSourceId(source) ?? source?.name ?? ""}:${key}`);
+}
+
+function shouldGrantNetherscrollsFeature(feature) {
+  if (isNetherscrollsAbilityScoreImprovementFeature(feature)) return false;
+  const choiceType = toTrimmedStringOrNull(feature?.choiceType)?.toLowerCase();
+  if (choiceType === "subclass") return false;
+  return true;
+}
+
+function isNetherscrollsAbilityScoreImprovementFeature(feature) {
+  return /ability score improvement/i.test(toTrimmedStringOrNull(feature?.title ?? feature?.name) ?? "");
+}
+
+function getNetherscrollsClassAsiLevels(source) {
+  const levels = getNetherscrollsClassFeatures(source)
+    .filter(isNetherscrollsAbilityScoreImprovementFeature)
+    .map((feature) => Math.max(1, Math.trunc(toNumber(feature?.level, 0))))
+    .filter(Boolean);
+  if (levels.length) return Array.from(new Set(levels)).sort((a, b) => a - b);
+  return [4, 8, 12, 16, 19];
+}
+
+function normalizeNetherscrollsClassHitDie(source) {
+  const raw =
+    toTrimmedStringOrNull(source?.system?.hd?.denomination) ??
+    toTrimmedStringOrNull(source?.diceType) ??
+    toTrimmedStringOrNull(source?.hitPoints?.hitDice) ??
+    "d6";
+  const match = /d(4|6|8|10|12|20|100)\b/i.exec(raw);
+  return match ? `d${match[1]}` : "d6";
+}
+
+function normalizeNetherscrollsClassIdentifier(source) {
+  return (
+    toTrimmedStringOrNull(source?.system?.identifier) ??
+    slugifyNetherscrollsIdentifier(source?.name ?? getNetherscrollsSourceId(source) ?? "class")
+  );
+}
+
+function normalizeNetherscrollsSubclassIdentifier(source, classSource) {
+  return (
+    toTrimmedStringOrNull(source?.system?.identifier) ??
+    slugifyNetherscrollsIdentifier(
+      `${normalizeNetherscrollsClassIdentifier(classSource)}-${source?.name ?? getNetherscrollsSourceId(source) ?? "subclass"}`
+    )
+  );
+}
+
+function normalizeNetherscrollsClassFeatureIdentifier(descriptor) {
+  return slugifyNetherscrollsIdentifier(
+    `${normalizeNetherscrollsClassIdentifier(descriptor.classSource)}-${descriptor.scope}-${getNetherscrollsFeatureTitle(descriptor.feature)}-${descriptor.level}`
+  );
+}
+
+function normalizeNetherscrollsPrimaryAbility(source) {
+  const explicit = source?.system?.primaryAbility ?? source?.primaryAbility;
+  if (explicit && typeof explicit === "object") return explicit;
+  const values = normalizeNetherscrollsAbilityList(explicit);
+  return {
+    value: values,
+    all: values.length === 0,
+  };
+}
+
+function normalizeNetherscrollsClassProperties(source) {
+  const properties = source?.system?.properties ?? source?.properties;
+  if (Array.isArray(properties)) return properties;
+  if (properties instanceof Set) return Array.from(properties);
+  if (properties && typeof properties === "object") {
+    return Object.keys(properties).filter((key) => properties[key]);
+  }
+  return [];
+}
+
+function normalizeNetherscrollsClassSpellcasting(source, fallbackSource = {}) {
+  const explicit = source?.system?.spellcasting;
+  if (explicit && typeof explicit === "object") return explicit;
+  const progression = normalizeNetherscrollsSpellcastingProgression(
+    explicit ?? source?.casterType ?? source?.spellcasting?.progression ?? fallbackSource?.casterType
+  );
+  return {
+    progression,
+    ability: normalizeNetherscrollsSaveAbility(source?.spellcastingAbility ?? source?.ability) ?? "",
+  };
+}
+
+function normalizeNetherscrollsSpellcastingProgression(value) {
+  const raw = toTrimmedStringOrNull(value)?.toLowerCase() ?? "none";
+  const normalized = raw.replace(/[\s_-]+/g, "");
+  if (!raw || raw === "false" || raw === "none" || raw === "no" || raw === "0") return "none";
+  if (["full", "fullcaster", "caster"].includes(normalized)) return "full";
+  if (["half", "halfcaster", "1/2"].includes(normalized)) return "half";
+  if (["third", "thirdcaster", "1/3"].includes(normalized)) return "third";
+  if (["pact", "pactmagic"].includes(normalized)) return "pact";
+  if (["artificer"].includes(normalized)) return "artificer";
+  return ["none", "full", "half", "third", "pact", "artificer"].includes(raw) ? raw : "none";
+}
+
+function normalizeNetherscrollsAbilityList(value) {
+  const values = Array.isArray(value) ? value : [value];
+  return values.map((entry) => normalizeNetherscrollsSaveAbility(entry)).filter(Boolean);
+}
+
+function normalizeNetherscrollsSaveTraitKeys(value) {
+  return normalizeNetherscrollsAbilityList(value).map((ability) => `saves:${ability}`);
+}
+
+function normalizeNetherscrollsArmorTraitKeys(value) {
+  return normalizeNetherscrollsTraitKeys(value, NETHERSCROLLS_ARMOR_TRAIT_ALIASES);
+}
+
+function normalizeNetherscrollsWeaponTraitKeys(value) {
+  return normalizeNetherscrollsTraitKeys(value, NETHERSCROLLS_WEAPON_TRAIT_ALIASES);
+}
+
+function normalizeNetherscrollsToolTraitKeys(value) {
+  return normalizeNetherscrollsTraitKeys(value, NETHERSCROLLS_TOOL_TRAIT_ALIASES);
+}
+
+function normalizeNetherscrollsTraitKeys(value, aliases) {
+  const values = Array.isArray(value) ? value : [value];
+  const keys = [];
+  for (const entry of values) {
+    const key = normalizeNetherscrollsTraitKey(entry, aliases);
+    if (key && !keys.includes(key)) keys.push(key);
+  }
+  return keys;
+}
+
+function normalizeNetherscrollsTraitKey(value, aliases) {
+  const raw = toTrimmedStringOrNull(value);
+  if (!raw) return null;
+  if (/^[a-z]+:[a-z0-9*:-]+$/i.test(raw)) return raw;
+  const normalized = raw.toLowerCase().replace(/\s+/g, " ").trim();
+  const compact = normalized.replace(/[^a-z0-9]/g, "");
+  return aliases[normalized] ?? aliases[compact] ?? null;
+}
+
+function getNetherscrollsSkillChoiceGroups(value) {
+  const groups = Array.isArray(value) ? value : value ? [value] : [];
+  return groups.map((group) => {
+    const choices = getNetherscrollsFeatureChoices(group);
+    return {
+      title: group?.title,
+      description: group?.description,
+      count: Math.max(1, Math.trunc(toNumber(group?.selectable ?? group?.count, 1))),
+      pool: choices
+        .map((choice) => normalizeNetherscrollsSkillTraitKey(choice?.title ?? choice?.name ?? choice))
+        .filter(Boolean),
+    };
+  });
+}
+
+function normalizeNetherscrollsSkillTraitKey(value) {
+  const raw = toTrimmedStringOrNull(value);
+  if (!raw) return null;
+  if (/^skills:[a-z]{3}$/i.test(raw)) return raw.toLowerCase();
+  if (SKILL_KEY_TO_NAME[raw.toLowerCase()]) return `skills:${raw.toLowerCase()}`;
+  const normalized = raw.toLowerCase().replace(/\s+/g, " ").trim();
+  const compact = normalized.replace(/[^a-z0-9]/g, "");
+  const key = NETHERSCROLLS_SKILL_LABELS[normalized] ?? NETHERSCROLLS_SKILL_LABELS[compact];
+  return key ? `skills:${key}` : null;
+}
+
+function getNetherscrollsClassFeatureUuids(classSource, featureUuidByKey, scope, subclassSource = null) {
+  return getNetherscrollsClassFeatureDescriptors([classSource])
+    .filter((descriptor) => descriptor.scope === scope)
+    .filter((descriptor) => !subclassSource || isSameNetherscrollsSubclass(descriptor.subclassSource, subclassSource, classSource))
+    .map((descriptor) => featureUuidByKey.get(descriptor.key))
+    .filter(Boolean);
+}
+
+function isSameNetherscrollsSubclass(left, right, classSource) {
+  if (left === right) return true;
+  const leftId = getNetherscrollsSourceId(left);
+  const rightId = getNetherscrollsSourceId(right);
+  if (leftId || rightId) return leftId === rightId;
+  return normalizeNetherscrollsSubclassIdentifier(left, classSource) === normalizeNetherscrollsSubclassIdentifier(right, classSource);
+}
+
+function getNetherscrollsClassFeatures(source) {
+  return Array.isArray(source?.classFeatures)
+    ? source.classFeatures
+    : Array.isArray(source?.features)
+    ? source.features
+    : [];
+}
+
+function getNetherscrollsSubclasses(source) {
+  return Array.isArray(source?.subclasses) ? source.subclasses : [];
+}
+
+function getNetherscrollsSubclassFeatures(source) {
+  return Array.isArray(source?.subclassFeatures)
+    ? source.subclassFeatures
+    : Array.isArray(source?.features)
+    ? source.features
+    : [];
+}
+
+function getNetherscrollsFeatureTitle(feature) {
+  return toTrimmedStringOrNull(feature?.title ?? feature?.name) ?? "Class Feature";
+}
+
+function getNetherscrollsFeatureChoices(feature) {
+  return Array.isArray(feature?.choices) ? feature.choices : [];
+}
+
+function normalizeNetherscrollsFeatureChoices(feature) {
+  return getNetherscrollsFeatureChoices(feature).map((choice) => ({
+    id: getNetherscrollsSourceId(choice) ?? "",
+    title: toTrimmedStringOrNull(choice?.title ?? choice?.name) ?? "",
+    description: toTrimmedStringOrNull(choice?.descriptionHtml ?? choice?.description) ?? "",
+  }));
+}
+
+function buildNetherscrollsFeatureRequirement(descriptor) {
+  const level = descriptor.level;
+  if (descriptor.subclassSource) {
+    return `${toTrimmedStringOrNull(descriptor.subclassSource?.name) ?? "Subclass"} ${level}`;
+  }
+  return `${toTrimmedStringOrNull(descriptor.classSource?.name) ?? "Class"} ${level}`;
+}
+
+function buildNetherscrollsClassDescription(source) {
+  return joinNetherscrollsHtmlSections([
+    getNetherscrollsHtmlValue(source?.descriptionHtml),
+    getNetherscrollsHtmlValue(source?.summaryHtml),
+    getNetherscrollsHtmlValue(source?.presentation?.summary),
+    getNetherscrollsHtmlValue(source?.hitPoints?.description),
+    getNetherscrollsHtmlValue(source?.proficiencies?.description),
+    getNetherscrollsHtmlValue(source?.startingEquipment?.description),
+    renderNetherscrollsProgressionTable(source),
+    buildNetherscrollsSubclassIntroHtml(source),
+  ]);
+}
+
+function buildNetherscrollsSubclassDescription(source) {
+  return joinNetherscrollsHtmlSections([
+    getNetherscrollsHtmlValue(source?.descriptionHtml),
+    getNetherscrollsHtmlValue(source?.contentHtml),
+    getNetherscrollsHtmlValue(source?.summaryHtml),
+    getNetherscrollsHtmlValue(source?.presentation?.summary),
+    renderNetherscrollsBlocks(source?.blocks),
+  ]);
+}
+
+function buildNetherscrollsFeatureDescription(feature) {
+  const choiceHtml = renderNetherscrollsFeatureChoices(feature);
+  return joinNetherscrollsHtmlSections([
+    getNetherscrollsHtmlValue(feature?.descriptionHtml),
+    getNetherscrollsHtmlValue(feature?.contentHtml),
+    getNetherscrollsHtmlValue(feature?.description),
+    renderNetherscrollsBlocks(feature?.blocks),
+    choiceHtml,
+  ]);
+}
+
+function buildNetherscrollsSubclassIntroHtml(source) {
+  const html = getNetherscrollsHtmlValue(source?.subclassIntroHtml ?? source?.subclassIntro);
+  if (!html) return "";
+  const title = escapeHtml(toTrimmedStringOrNull(source?.subclassType) ?? "Subclasses");
+  return `<h2>${title}</h2>${html}`;
+}
+
+function getNetherscrollsHtmlValue(value) {
+  return toTrimmedStringOrNull(value) ?? "";
+}
+
+function joinNetherscrollsHtmlSections(sections) {
+  return sections.map((section) => toTrimmedStringOrNull(section)).filter(Boolean).join("\n");
+}
+
+function renderNetherscrollsProgressionTable(source) {
+  const table = getNetherscrollsProgressionTable(source);
+  const columns = Array.isArray(table?.columns) ? table.columns : [];
+  const rows = Array.isArray(table?.rows) ? table.rows : [];
+  if (!columns.length || !rows.length) return "";
+
+  const header = columns
+    .map((column) => `<th>${escapeHtml(getNetherscrollsProgressionColumnLabel(column))}</th>`)
+    .join("");
+  const body = rows
+    .map((row) => {
+      const cells = columns
+        .map((column) => `<td>${escapeHtml(formatNetherscrollsProgressionCell(row?.[column.key ?? column.id ?? column]))}</td>`)
+        .join("");
+      return `<tr>${cells}</tr>`;
+    })
+    .join("");
+  return `<h2>Class Progression</h2><table><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
+function getNetherscrollsProgressionTable(source) {
+  const table = source?.presentation?.progressionTable ?? source?.progression;
+  if (!table || typeof table !== "object") return null;
+  const columns = Array.isArray(table.columns) ? table.columns : [];
+  const rows = Array.isArray(table.rows) ? table.rows : [];
+  if (!columns.length || !rows.length) return null;
+  return {
+    columns,
+    rows,
+    spellcasting: table.spellcasting ?? source?.progression?.spellcasting ?? {},
+  };
+}
+
+function getNetherscrollsProgressionColumnLabel(column) {
+  if (typeof column === "string") return column;
+  return toTrimmedStringOrNull(column?.label ?? column?.title ?? column?.name ?? column?.key ?? column?.id) ?? "";
+}
+
+function formatNetherscrollsProgressionCell(value) {
+  if (Array.isArray(value)) return value.map(formatNetherscrollsProgressionCell).filter(Boolean).join(", ");
+  if (value && typeof value === "object") {
+    if (value.name || value.title) return toTrimmedStringOrNull(value.name ?? value.title) ?? "";
+    return Object.values(value).map(formatNetherscrollsProgressionCell).filter(Boolean).join(", ");
+  }
+  return String(value ?? "");
+}
+
+function renderNetherscrollsFeatureChoices(feature) {
+  const choices = normalizeNetherscrollsFeatureChoices(feature).filter((choice) => choice.title);
+  if (!choices.length) return "";
+  const items = choices.map((choice) => `<li>${escapeHtml(choice.title)}</li>`).join("");
+  return `<h3>Choices</h3><ul>${items}</ul>`;
+}
+
+function renderNetherscrollsBlocks(blocks) {
+  if (!Array.isArray(blocks)) return "";
+  return blocks.map(renderNetherscrollsBlock).filter(Boolean).join("\n");
+}
+
+function renderNetherscrollsBlock(block) {
+  const type = toTrimmedStringOrNull(block?.type)?.toLowerCase();
+  if (type === "p" || Array.isArray(block?.paragraphs)) {
+    return (block?.paragraphs ?? [])
+      .map((paragraph) => `<p>${escapeHtml(String(paragraph ?? ""))}</p>`)
+      .join("");
+  }
+  if (type === "heading" || type === "h2") {
+    return `<h2>${escapeHtml(String(block?.text ?? block?.title ?? ""))}</h2>`;
+  }
+  if (type === "html") return getNetherscrollsHtmlValue(block?.html);
+  return "";
+}
+
+function buildNetherscrollsCompendiumItemUuid(pack, id) {
+  return `Compendium.${pack.collection}.Item.${id}`;
+}
+
+function normalizeNetherscrollsFeatData(feat) {
+  if (feat?.foundry || feat?.document) {
+    return normalizeNetherscrollsFoundryFeatData(feat);
+  }
+
+  const source = duplicateNetherscrollsData(feat);
+  const netherscrollsId = getNetherscrollsSourceId(feat);
+  const descriptionHtml = toTrimmedStringOrNull(
+    feat?.descriptionHtml ?? feat?.description ?? source.descriptionHtml ?? source.description
+  );
+  const sourceName = toTrimmedStringOrNull(source.source);
+  const featData = {
+    name: toTrimmedStringOrNull(source.name) ?? "Netherscrolls Feat",
+    type: "feat",
+    img: toTrimmedStringOrNull(source.img ?? source.image) ?? NETHERSCROLLS_DEFAULT_IMAGE,
+    sort: 0,
+    ownership: {
+      default: 0,
+    },
+    system: buildNetherscrollsFeatSystem(source, {
+      descriptionHtml,
+      netherscrollsId,
+      sourceName,
+    }),
+    effects: [],
+  };
+
+  applyNetherscrollsImportFlags(featData, source, netherscrollsId);
+  return featData;
+}
+
+function normalizeNetherscrollsFoundryFeatData(feat) {
+  const source = duplicateNetherscrollsData(feat?.foundry ?? feat?.document);
+  const netherscrollsId = getNetherscrollsSourceId(feat);
+  source.name = toTrimmedStringOrNull(source.name) ?? "Netherscrolls Feat";
+  source.type = "feat";
+  source.img = toTrimmedStringOrNull(source.img ?? source.image) ?? NETHERSCROLLS_DEFAULT_IMAGE;
+  source.sort ??= 0;
+  source.ownership ??= { default: 0 };
+  source.effects ??= [];
+
+  const descriptionHtml = toTrimmedStringOrNull(
+    source.system?.description?.value ?? feat?.descriptionHtml ?? feat?.description
+  );
+  const sourceName = toTrimmedStringOrNull(feat?.source ?? source?.system?.source?.book);
+  const defaults = buildNetherscrollsFeatSystem(
+    {
+      ...feat,
+      system: source.system,
+    },
+    {
+      descriptionHtml,
+      netherscrollsId,
+      sourceName,
+    }
+  );
+  source.system = mergeNetherscrollsDefaults(defaults, source.system ?? {});
+  source.system.identifier ??=
+    netherscrollsId ? `netherscrolls-${netherscrollsId}` : slugifyNetherscrollsIdentifier(source.name);
+  source.system.source = buildNetherscrollsItemSource(sourceName, {
+    ...feat,
+    system: {
+      ...(feat?.system ?? {}),
+      source: source.system.source,
+    },
+  });
+
+  applyNetherscrollsImportFlags(source, feat, netherscrollsId);
+  return source;
+}
+
+function buildNetherscrollsFeatSystem(source, { descriptionHtml, netherscrollsId, sourceName }) {
+  return {
+    activities: source?.system?.activities ?? {},
+    advancement: normalizeNetherscrollsFeatAdvancement(source),
+    description: {
+      value: descriptionHtml ?? "",
+      chat: "",
+    },
+    identifier:
+      toTrimmedStringOrNull(source?.system?.identifier) ??
+      (netherscrollsId ? `netherscrolls-${netherscrollsId}` : slugifyNetherscrollsIdentifier(source?.name)),
+    source: buildNetherscrollsItemSource(sourceName, source),
+    cover: toNumber(source?.system?.cover ?? source?.cover, 0),
+    crewed: Boolean(source?.system?.crewed ?? source?.crewed ?? false),
+    enchant: {
+      max: toTrimmedStringOrNull(source?.system?.enchant?.max ?? source?.enchant?.max) ?? "",
+      period: toTrimmedStringOrNull(source?.system?.enchant?.period ?? source?.enchant?.period) ?? "",
+    },
+    prerequisites: normalizeNetherscrollsFeatPrerequisites(source),
+    properties: normalizeNetherscrollsFeatProperties(source),
+    requirements: toTrimmedStringOrNull(source?.system?.requirements ?? source?.requirement) ?? null,
+    type: normalizeNetherscrollsFeatType(source),
+    uses: normalizeNetherscrollsItemUses(source),
+  };
+}
+
+function normalizeNetherscrollsFeatAdvancement(source) {
+  if (source?.system?.advancement && typeof source.system.advancement === "object") {
+    return source.system.advancement;
+  }
+
+  const abilities = normalizeNetherscrollsFeatAbilities(source?.ability ?? source?.abilities);
+  if (!abilities.length) return {};
+
+  const fixed = {};
+  for (const ability of abilities) fixed[ability] = 1;
+  const id = buildNetherscrollsStableId(`asi${source?.netherscrollsId ?? source?._id ?? source?.id ?? source?.name ?? ""}`);
+  return {
+    [id]: {
+      _id: id,
+      type: "AbilityScoreImprovement",
+      configuration: {
+        cap: 2,
+        fixed,
+        locked: [],
+        points: 0,
+      },
+      value: {
+        type: "asi",
+        assignments: {},
+      },
+      level: 0,
+      title: "Ability Score Improvement",
+      hint: "",
+    },
+  };
+}
+
+function normalizeNetherscrollsFeatAbilities(value) {
+  const values = Array.isArray(value) ? value : [value];
+  const abilities = [];
+  for (const ability of values) {
+    const normalized = normalizeNetherscrollsSaveAbility(ability);
+    if (normalized && !abilities.includes(normalized)) abilities.push(normalized);
+  }
+  return abilities;
+}
+
+function normalizeNetherscrollsFeatPrerequisites(source) {
+  const explicit = source?.system?.prerequisites ?? source?.prerequisites;
+  if (explicit && typeof explicit === "object") return explicit;
+
+  return {
+    items: [],
+    repeatable: Boolean(source?.repeatable ?? false),
+  };
+}
+
+function normalizeNetherscrollsFeatProperties(source) {
+  const explicit = source?.system?.properties ?? source?.properties;
+  if (Array.isArray(explicit)) return explicit;
+  if (explicit instanceof Set) return Array.from(explicit);
+  if (explicit && typeof explicit === "object") {
+    return Object.keys(explicit).filter((key) => explicit[key]);
+  }
+  return [];
+}
+
+function normalizeNetherscrollsFeatType(source) {
+  const explicit = source?.system?.type;
+  if (explicit && typeof explicit === "object") {
+    return {
+      value: toTrimmedStringOrNull(explicit.value) ?? "feat",
+      subtype: toTrimmedStringOrNull(explicit.subtype) ?? "",
+    };
+  }
+
+  return {
+    value: toTrimmedStringOrNull(source?.featType) ?? "feat",
+    subtype: toTrimmedStringOrNull(source?.subtype) ?? "",
+  };
 }
 
 function normalizeNetherscrollsItemData(item) {
@@ -1692,9 +2803,11 @@ function applyNetherscrollsImportFlags(documentData, source, netherscrollsId) {
     netherscrollsId,
   };
 
-  const lastRev = toTrimmedStringOrNull(source?.lastRev);
+  const lastRev = normalizeNetherscrollsReferenceValue(source?.lastRev);
   if (lastRev) documentData.flags[MODULE_ID].lastRev = lastRev;
   if (Array.isArray(source?.tags)) documentData.flags[MODULE_ID].tags = source.tags;
+  if (Array.isArray(source?.ability)) documentData.flags[MODULE_ID].ability = source.ability;
+  if (source?.demifeat != null) documentData.flags[MODULE_ID].demifeat = Boolean(source.demifeat);
   if (source?.isHomebrew != null) documentData.flags[MODULE_ID].isHomebrew = Boolean(source.isHomebrew);
 }
 
@@ -1770,7 +2883,7 @@ function normalizeNetherscrollsSpellData(spell) {
         netherscrollsId,
       },
     };
-    const lastRev = toTrimmedStringOrNull(source.lastRev);
+    const lastRev = normalizeNetherscrollsReferenceValue(source.lastRev);
     if (lastRev) itemData.flags[MODULE_ID].lastRev = lastRev;
     if (Array.isArray(source.classes)) {
       itemData.flags[MODULE_ID].classes = source.classes;
@@ -2562,6 +3675,12 @@ function hashNetherscrollsString(value) {
   return Math.abs(hash).toString(36);
 }
 
+function buildNetherscrollsStableId(value) {
+  const firstHash = hashNetherscrollsString(value);
+  const secondHash = hashNetherscrollsString([...String(value ?? "")].reverse().join(""));
+  return `ns${firstHash}${secondHash}`.replace(/[^a-zA-Z0-9]/g, "").padEnd(16, "0").slice(0, 16);
+}
+
 function getNetherscrollsMetadataLine(text, label) {
   const regex = new RegExp(`\\b${label}\\s*:\\s*([^\\n.]+)`, "i");
   return toTrimmedStringOrNull(regex.exec(String(text ?? ""))?.[1]);
@@ -2584,6 +3703,83 @@ function toNetherscrollsNumber(value) {
 function duplicateNetherscrollsData(value) {
   if (foundry?.utils?.deepClone) return foundry.utils.deepClone(value ?? {});
   return JSON.parse(JSON.stringify(value ?? {}));
+}
+
+async function ensureNetherscrollsClassFolderTree(pack, folderCache) {
+  await findOrCreatePackFolder(pack, {
+    cache: folderCache,
+    name: "Classes",
+    type: "Item",
+    parent: null,
+    sort: 1000,
+  });
+  await findOrCreatePackFolder(pack, {
+    cache: folderCache,
+    name: "Subclasses",
+    type: "Item",
+    parent: null,
+    sort: 2000,
+  });
+}
+
+async function ensureNetherscrollsClassFolder(pack, classData, folderCache) {
+  return findOrCreatePackFolder(pack, {
+    cache: folderCache,
+    name: "Classes",
+    type: "Item",
+    parent: null,
+    sort: 1000,
+  });
+}
+
+async function ensureNetherscrollsSubclassFolder(pack, subclassData, classSource, folderCache) {
+  const root = await findOrCreatePackFolder(pack, {
+    cache: folderCache,
+    name: "Subclasses",
+    type: "Item",
+    parent: null,
+    sort: 2000,
+  });
+
+  return findOrCreatePackFolder(pack, {
+    cache: folderCache,
+    name: toTrimmedStringOrNull(classSource?.name) ?? "Unknown Class",
+    type: "Item",
+    parent: root,
+    sort: 1000,
+  });
+}
+
+async function ensureNetherscrollsClassFeatureFolderTree(pack, folderCache) {
+  return folderCache;
+}
+
+async function ensureNetherscrollsClassFeatureFolder(pack, descriptor, folderCache) {
+  const classFolder = await findOrCreatePackFolder(pack, {
+    cache: folderCache,
+    name: toTrimmedStringOrNull(descriptor.classSource?.name) ?? "Unknown Class",
+    type: "Item",
+    parent: null,
+    sort: 1000,
+  });
+
+  if (descriptor.scope === "class") {
+    return findOrCreatePackFolder(pack, {
+      cache: folderCache,
+      name: "Class Features",
+      type: "Item",
+      parent: classFolder,
+      sort: 1000,
+    });
+  }
+
+  return findOrCreatePackFolder(pack, {
+    cache: folderCache,
+    name: toTrimmedStringOrNull(descriptor.subclassSource?.name) ?? "Subclass Features",
+    type: "Item",
+    parent: classFolder,
+    sort: 2000,
+  });
 }
 
 async function ensureNetherscrollsItemFolderTree(pack, folderCache) {
@@ -2614,6 +3810,41 @@ function getNetherscrollsItemFolder(itemData) {
   return (
     NETHERSCROLLS_ITEM_FOLDERS.find((folder) => folder.type === type) ??
     NETHERSCROLLS_ITEM_FOLDERS.find((folder) => folder.type === "loot")
+  );
+}
+
+async function ensureNetherscrollsFeatFolderTree(pack, folderCache) {
+  for (const folderDefinition of NETHERSCROLLS_FEAT_FOLDERS) {
+    await findOrCreatePackFolder(pack, {
+      cache: folderCache,
+      name: folderDefinition.label,
+      type: "Item",
+      parent: null,
+      sort: folderDefinition.sort,
+    });
+  }
+}
+
+async function ensureNetherscrollsFeatFolder(pack, featData, folderCache) {
+  const folderDefinition = getNetherscrollsFeatFolder(featData);
+  return findOrCreatePackFolder(pack, {
+    cache: folderCache,
+    name: folderDefinition.label,
+    type: "Item",
+    parent: null,
+    sort: folderDefinition.sort,
+  });
+}
+
+function getNetherscrollsFeatFolder(featData) {
+  const isDemifeat =
+    featData?.demifeat === true ||
+    featData?.flags?.[MODULE_ID]?.demifeat === true ||
+    featData?.system?.flags?.[MODULE_ID]?.demifeat === true;
+  const key = isDemifeat ? "demifeat" : "feat";
+  return (
+    NETHERSCROLLS_FEAT_FOLDERS.find((folder) => folder.key === key) ??
+    NETHERSCROLLS_FEAT_FOLDERS[0]
   );
 }
 
@@ -4408,15 +5639,9 @@ function serializeRollDataEntry(rollData, format) {
 
 function isActorSheetApp(app) {
   if (!app) return false;
-  if (app?.actor?.documentName === "Actor") return true;
-  if (app?.document?.documentName === "Actor") return true;
-  if (app?.object?.documentName === "Actor") return true;
+  if (getActorFromApp(app)) return true;
   const name = app?.constructor?.name ?? "";
   return name.includes("ActorSheet");
-}
-
-function isActorRelatedSheetApp(app) {
-  return Boolean(getActorFromApp(app));
 }
 
 function getActorFromApp(app) {
