@@ -1100,6 +1100,7 @@ function getNetherscrollsResponseDataset(data, dataKey, requestTypeKey = null) {
   if (Array.isArray(data)) return requestTypeKey === dataKey ? data : null;
   if (Array.isArray(data?.[dataKey])) return data[dataKey];
   if (data?.meta?.dataKey === dataKey && Array.isArray(data?.data)) return data.data;
+  if (requestTypeKey === dataKey && Array.isArray(data?.data)) return data.data;
   if (Array.isArray(data?.data?.[dataKey])) return data.data[dataKey];
   if (dataKey === "classes" && isNetherscrollsClassLike(data)) return [data];
   return null;
