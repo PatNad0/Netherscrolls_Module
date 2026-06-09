@@ -49,7 +49,18 @@ const NETHERSCROLLS_IMPORT_ENDPOINTS = {
   feats: `${NETHERSCROLLS_API_BASE}/import/feats`,
   spells: `${NETHERSCROLLS_API_BASE}/import/spells`,
 };
-const NETHERSCROLLS_DEFAULT_IMAGE = "https://i.postimg.cc/zfYC8nN2/image.png";
+const NETHERSCROLLS_DEFAULT_IMAGE = "icons/svg/item-bag.svg";
+const NETHERSCROLLS_VALID_IMAGE_EXTENSIONS = new Set([
+  "apng",
+  "avif",
+  "bmp",
+  "gif",
+  "jpeg",
+  "jpg",
+  "png",
+  "svg",
+  "webp",
+]);
 const NETHERSCROLLS_MAX_SPELL_LEVEL = 15;
 const NETHERSCROLLS_ITEM_FOLDERS = [
   { type: "weapon", label: "Weapons", sort: 1000 },
@@ -1142,6 +1153,23 @@ function normalizeNetherscrollsReferenceValue(value) {
   return toTrimmedStringOrNull(value);
 }
 
+function normalizeNetherscrollsImagePath(...values) {
+  for (const value of values) {
+    const raw = toTrimmedStringOrNull(value);
+    if (isValidNetherscrollsImagePath(raw)) return raw;
+  }
+
+  return NETHERSCROLLS_DEFAULT_IMAGE;
+}
+
+function isValidNetherscrollsImagePath(value) {
+  const raw = toTrimmedStringOrNull(value);
+  if (!raw) return false;
+  const path = raw.split(/[?#]/)[0]?.toLowerCase() ?? "";
+  const extension = /\.([a-z0-9]+)$/i.exec(path)?.[1];
+  return Boolean(extension && NETHERSCROLLS_VALID_IMAGE_EXTENSIONS.has(extension));
+}
+
 function isNetherscrollsDeleted(data) {
   if (data?.deleted === true) return true;
   return String(data?.deleted ?? "").toLowerCase() === "true";
@@ -1164,7 +1192,7 @@ function normalizeNetherscrollsClassData(classSource, { featureUuidByKey }) {
   const itemData = {
     name,
     type: "class",
-    img: toTrimmedStringOrNull(source.img ?? source.image) ?? NETHERSCROLLS_DEFAULT_IMAGE,
+    img: normalizeNetherscrollsImagePath(source.img, source.image),
     sort: 0,
     ownership: {
       default: 0,
@@ -1198,7 +1226,7 @@ function normalizeNetherscrollsFoundryClassData(classSource, { featureUuidByKey 
   const netherscrollsId = getNetherscrollsSourceId(classSource);
   source.name = toTrimmedStringOrNull(source.name) ?? "Netherscrolls Class";
   source.type = "class";
-  source.img = toTrimmedStringOrNull(source.img ?? source.image) ?? NETHERSCROLLS_DEFAULT_IMAGE;
+  source.img = normalizeNetherscrollsImagePath(source.img, source.image);
   source.sort ??= 0;
   source.ownership ??= { default: 0 };
   source.effects ??= [];
@@ -1245,9 +1273,7 @@ function normalizeNetherscrollsSubclassData(subclassSource, classSource, { featu
   const itemData = {
     name: toTrimmedStringOrNull(source.name) ?? "Netherscrolls Subclass",
     type: "subclass",
-    img:
-      toTrimmedStringOrNull(source.img ?? source.image ?? classSource?.img ?? classSource?.image) ??
-      NETHERSCROLLS_DEFAULT_IMAGE,
+    img: normalizeNetherscrollsImagePath(source.img, source.image, classSource?.img, classSource?.image),
     sort: 0,
     ownership: {
       default: 0,
@@ -1280,9 +1306,7 @@ function normalizeNetherscrollsFoundrySubclassData(subclassSource, classSource, 
   const netherscrollsId = getNetherscrollsSourceId(subclassSource);
   source.name = toTrimmedStringOrNull(source.name) ?? "Netherscrolls Subclass";
   source.type = "subclass";
-  source.img =
-    toTrimmedStringOrNull(source.img ?? source.image ?? classSource?.img ?? classSource?.image) ??
-    NETHERSCROLLS_DEFAULT_IMAGE;
+  source.img = normalizeNetherscrollsImagePath(source.img, source.image, classSource?.img, classSource?.image);
   source.sort ??= 0;
   source.ownership ??= { default: 0 };
   source.effects ??= [];
@@ -1386,9 +1410,14 @@ function normalizeNetherscrollsClassFeatureData(descriptor) {
   const itemData = {
     name: featureName,
     type: "feat",
-    img:
-      toTrimmedStringOrNull(feature?.img ?? feature?.image ?? descriptor.subclassSource?.img ?? descriptor.classSource?.img) ??
-      NETHERSCROLLS_DEFAULT_IMAGE,
+    img: normalizeNetherscrollsImagePath(
+      feature?.img,
+      feature?.image,
+      descriptor.subclassSource?.img,
+      descriptor.subclassSource?.image,
+      descriptor.classSource?.img,
+      descriptor.classSource?.image
+    ),
     sort: 0,
     ownership: {
       default: 0,
@@ -2082,7 +2111,7 @@ function normalizeNetherscrollsFeatData(feat) {
   const featData = {
     name: toTrimmedStringOrNull(source.name) ?? "Netherscrolls Feat",
     type: "feat",
-    img: toTrimmedStringOrNull(source.img ?? source.image) ?? NETHERSCROLLS_DEFAULT_IMAGE,
+    img: normalizeNetherscrollsImagePath(source.img, source.image),
     sort: 0,
     ownership: {
       default: 0,
@@ -2104,7 +2133,7 @@ function normalizeNetherscrollsFoundryFeatData(feat) {
   const netherscrollsId = getNetherscrollsSourceId(feat);
   source.name = toTrimmedStringOrNull(source.name) ?? "Netherscrolls Feat";
   source.type = "feat";
-  source.img = toTrimmedStringOrNull(source.img ?? source.image) ?? NETHERSCROLLS_DEFAULT_IMAGE;
+  source.img = normalizeNetherscrollsImagePath(source.img, source.image);
   source.sort ??= 0;
   source.ownership ??= { default: 0 };
   source.effects ??= [];
@@ -2257,7 +2286,7 @@ function normalizeNetherscrollsItemData(item) {
   const itemData = {
     name: toTrimmedStringOrNull(source.name) ?? "Netherscrolls Item",
     type: itemType,
-    img: toTrimmedStringOrNull(source.img ?? source.image) ?? NETHERSCROLLS_DEFAULT_IMAGE,
+    img: normalizeNetherscrollsImagePath(source.img, source.image),
     sort: 0,
     ownership: {
       default: 0,
@@ -2284,7 +2313,7 @@ function normalizeNetherscrollsFoundryItemData(item) {
     type: source.type,
     system: source.system,
   });
-  source.img = toTrimmedStringOrNull(source.img ?? source.image) ?? NETHERSCROLLS_DEFAULT_IMAGE;
+  source.img = normalizeNetherscrollsImagePath(source.img, source.image);
   source.sort ??= 0;
   source.ownership ??= { default: 0 };
   source.effects ??= [];
@@ -2844,7 +2873,7 @@ function normalizeNetherscrollsSpellData(spell) {
   const itemData = {
     name: toTrimmedStringOrNull(source.name) ?? "Netherscrolls Spell",
     type: "spell",
-    img: toTrimmedStringOrNull(source.img ?? source.image) ?? NETHERSCROLLS_DEFAULT_IMAGE,
+    img: normalizeNetherscrollsImagePath(source.img, source.image),
     sort: 0,
     ownership: {
       default: 0,
@@ -2904,7 +2933,7 @@ function normalizeNetherscrollsFoundrySpellData(spell) {
   const netherscrollsId = getNetherscrollsSourceId(spell);
   source.name = toTrimmedStringOrNull(source.name) ?? "Netherscrolls Spell";
   source.type = toTrimmedStringOrNull(source.type) ?? "spell";
-  source.img = toTrimmedStringOrNull(source.img ?? source.image) ?? NETHERSCROLLS_DEFAULT_IMAGE;
+  source.img = normalizeNetherscrollsImagePath(source.img, source.image);
   source.system = source.system ?? {};
   source.system.level = getNetherscrollsSpellLevel(source);
   source.system.identifier ??=
