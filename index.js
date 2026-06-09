@@ -326,43 +326,25 @@ Hooks.once("init", () => {
   });
 });
 
-class NetherscrollsImportSettings extends foundry.applications.api.HandlebarsApplicationMixin(
-  foundry.applications.api.ApplicationV2
-) {
-  static get DEFAULT_OPTIONS() {
-    return {
+class NetherscrollsImportSettings extends (globalThis.FormApplication ?? globalThis.foundry?.appv1?.api?.FormApplication) {
+  static get defaultOptions() {
+    const options = {
       id: "netherscrolls-import-settings",
-      tag: "form",
+      title: "Import from Netherscroll [EXPERIMENTAL]",
+      template: `modules/${MODULE_ID}/templates/import-from-netherscroll.hbs`,
       classes: ["netherscrolls-import-window"],
-      position: {
-        width: 520,
-        height: "auto",
-      },
-      window: {
-        title: "Import from Netherscroll [EXPERIMENTAL]",
-        icon: "fa-solid fa-cloud-arrow-down",
-        contentClasses: ["ns-import-form"],
-      },
-      form: {
-        handler: async function (event, form, formData) {
-          return this._updateObject(event, getNetherscrollsFormDataObject(form, formData));
-        },
-        submitOnChange: false,
-        closeOnSubmit: false,
-      },
+      width: 520,
+      height: "auto",
+      submitOnChange: false,
+      closeOnSubmit: false,
     };
+    return foundry?.utils?.mergeObject
+      ? foundry.utils.mergeObject(super.defaultOptions, options)
+      : { ...(super.defaultOptions ?? {}), ...options };
   }
 
-  static get PARTS() {
-    return {
-      body: {
-        template: `modules/${MODULE_ID}/templates/import-from-netherscroll.hbs`,
-      },
-    };
-  }
-
-  async _prepareContext(options) {
-    const context = await super._prepareContext(options);
+  getData(options) {
+    const context = super.getData(options) ?? {};
     const apiKey = getNetherscrollsApiKey();
     const today = new Date().toISOString().slice(0, 10);
 
@@ -374,10 +356,11 @@ class NetherscrollsImportSettings extends foundry.applications.api.HandlebarsApp
     };
   }
 
-  _onRender(context, options) {
-    super._onRender(context, options);
+  activateListeners(html) {
+    super.activateListeners(html);
 
-    const root = this.element;
+    const root = html?.[0] ?? html;
+    root?.classList?.add("ns-import-form");
     const sinceCheckbox = root?.querySelector?.('[name="sinceEnabled"]');
     const sinceDate = root?.querySelector?.('[name="sinceDate"]');
     const sincePanel = root?.querySelector?.(".ns-import-since-panel");

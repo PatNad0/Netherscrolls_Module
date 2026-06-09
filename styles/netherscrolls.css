@@ -103,7 +103,8 @@
   padding: 0;
 }
 
-.netherscrolls-import-window .window-content.ns-import-form {
+.netherscrolls-import-window .window-content.ns-import-form,
+.netherscrolls-import-window form.ns-import-form {
   padding: 0.9rem 1rem 1rem;
 }
 
