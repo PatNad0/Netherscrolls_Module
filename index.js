@@ -216,6 +216,7 @@ const NETHERSCROLLS_WEAPON_TYPE_BY_NAME = {
   maul: "martialM",
   morningstar: "martialM",
   musket: "martialR",
+  net: "martialR",
   pike: "martialM",
   pistol: "martialR",
   quarterstaff: "simpleM",
@@ -227,9 +228,417 @@ const NETHERSCROLLS_WEAPON_TYPE_BY_NAME = {
   sling: "simpleR",
   spear: "simpleM",
   trident: "martialM",
+  "war pick": "martialM",
   warhammer: "martialM",
   warpick: "martialM",
   whip: "martialM",
+};
+const NETHERSCROLLS_WEAPON_BASE_DATA_BY_NAME = {
+  battleaxe: {
+    type: "martialM",
+    baseItem: "battleaxe",
+    damage: "1d8",
+    versatileDamage: "1d10",
+    damageType: "slashing",
+    properties: ["ver"],
+    range: { reach: 5 },
+  },
+  blowgun: {
+    type: "martialR",
+    baseItem: "blowgun",
+    damage: "1",
+    damageType: "piercing",
+    properties: ["amm", "lod"],
+    range: { value: 25, long: 100 },
+  },
+  club: {
+    type: "simpleM",
+    baseItem: "club",
+    damage: "1d4",
+    damageType: "bludgeoning",
+    properties: ["lgt"],
+    range: { reach: 5 },
+  },
+  dagger: {
+    type: "simpleM",
+    baseItem: "dagger",
+    damage: "1d4",
+    damageType: "piercing",
+    properties: ["fin", "lgt", "thr"],
+    range: { value: 20, long: 60, reach: 5 },
+  },
+  dart: {
+    type: "simpleR",
+    baseItem: "dart",
+    damage: "1d4",
+    damageType: "piercing",
+    properties: ["fin", "thr"],
+    range: { value: 20, long: 60 },
+  },
+  flail: {
+    type: "martialM",
+    baseItem: "flail",
+    damage: "1d8",
+    damageType: "bludgeoning",
+    range: { reach: 5 },
+  },
+  glaive: {
+    type: "martialM",
+    baseItem: "glaive",
+    damage: "1d10",
+    damageType: "slashing",
+    properties: ["hvy", "rch", "two"],
+    range: { reach: 10 },
+  },
+  greataxe: {
+    type: "martialM",
+    baseItem: "greataxe",
+    damage: "1d12",
+    damageType: "slashing",
+    properties: ["hvy", "two"],
+    range: { reach: 5 },
+  },
+  greatclub: {
+    type: "simpleM",
+    baseItem: "greatclub",
+    damage: "1d8",
+    damageType: "bludgeoning",
+    properties: ["two"],
+    range: { reach: 5 },
+  },
+  greatsword: {
+    type: "martialM",
+    baseItem: "greatsword",
+    damage: "2d6",
+    damageType: "slashing",
+    properties: ["hvy", "two"],
+    range: { reach: 5 },
+  },
+  halberd: {
+    type: "martialM",
+    baseItem: "halberd",
+    damage: "1d10",
+    damageType: "slashing",
+    properties: ["hvy", "rch", "two"],
+    range: { reach: 10 },
+  },
+  handaxe: {
+    type: "simpleM",
+    baseItem: "handaxe",
+    damage: "1d6",
+    damageType: "slashing",
+    properties: ["lgt", "thr"],
+    range: { value: 20, long: 60, reach: 5 },
+  },
+  "hand crossbow": {
+    type: "martialR",
+    baseItem: "handcrossbow",
+    damage: "1d6",
+    damageType: "piercing",
+    properties: ["amm", "lgt", "lod"],
+    range: { value: 30, long: 120 },
+  },
+  "heavy crossbow": {
+    type: "martialR",
+    baseItem: "heavycrossbow",
+    damage: "1d10",
+    damageType: "piercing",
+    properties: ["amm", "hvy", "lod", "two"],
+    range: { value: 100, long: 400 },
+  },
+  javelin: {
+    type: "simpleM",
+    baseItem: "javelin",
+    damage: "1d6",
+    damageType: "piercing",
+    properties: ["thr"],
+    range: { value: 30, long: 120, reach: 5 },
+  },
+  lance: {
+    type: "martialM",
+    baseItem: "lance",
+    damage: "1d12",
+    damageType: "piercing",
+    properties: ["rch", "spc"],
+    range: { reach: 10 },
+  },
+  "light crossbow": {
+    type: "simpleR",
+    baseItem: "lightcrossbow",
+    damage: "1d8",
+    damageType: "piercing",
+    properties: ["amm", "lod", "two"],
+    range: { value: 80, long: 320 },
+  },
+  "light hammer": {
+    type: "simpleM",
+    baseItem: "lighthammer",
+    damage: "1d4",
+    damageType: "bludgeoning",
+    properties: ["lgt", "thr"],
+    range: { value: 20, long: 60, reach: 5 },
+  },
+  longbow: {
+    type: "martialR",
+    baseItem: "longbow",
+    damage: "1d8",
+    damageType: "piercing",
+    properties: ["amm", "hvy", "two"],
+    range: { value: 150, long: 600 },
+  },
+  longsword: {
+    type: "martialM",
+    baseItem: "longsword",
+    damage: "1d8",
+    versatileDamage: "1d10",
+    damageType: "slashing",
+    properties: ["ver"],
+    range: { reach: 5 },
+  },
+  mace: {
+    type: "simpleM",
+    baseItem: "mace",
+    damage: "1d6",
+    damageType: "bludgeoning",
+    range: { reach: 5 },
+  },
+  maul: {
+    type: "martialM",
+    baseItem: "maul",
+    damage: "2d6",
+    damageType: "bludgeoning",
+    properties: ["hvy", "two"],
+    range: { reach: 5 },
+  },
+  morningstar: {
+    type: "martialM",
+    baseItem: "morningstar",
+    damage: "1d8",
+    damageType: "piercing",
+    range: { reach: 5 },
+  },
+  musket: {
+    type: "martialR",
+    baseItem: "musket",
+    damage: "1d12",
+    damageType: "piercing",
+    properties: ["amm", "lod", "two"],
+    range: { value: 40, long: 120 },
+  },
+  net: {
+    type: "martialR",
+    baseItem: "net",
+    properties: ["spc", "thr"],
+    range: { value: 5, long: 15 },
+  },
+  pike: {
+    type: "martialM",
+    baseItem: "pike",
+    damage: "1d10",
+    damageType: "piercing",
+    properties: ["hvy", "rch", "two"],
+    range: { reach: 10 },
+  },
+  pistol: {
+    type: "martialR",
+    baseItem: "pistol",
+    damage: "1d10",
+    damageType: "piercing",
+    properties: ["amm", "lod"],
+    range: { value: 30, long: 90 },
+  },
+  quarterstaff: {
+    type: "simpleM",
+    baseItem: "quarterstaff",
+    damage: "1d6",
+    versatileDamage: "1d8",
+    damageType: "bludgeoning",
+    properties: ["ver"],
+    range: { reach: 5 },
+  },
+  rapier: {
+    type: "martialM",
+    baseItem: "rapier",
+    damage: "1d8",
+    damageType: "piercing",
+    properties: ["fin"],
+    range: { reach: 5 },
+  },
+  scimitar: {
+    type: "martialM",
+    baseItem: "scimitar",
+    damage: "1d6",
+    damageType: "slashing",
+    properties: ["fin", "lgt"],
+    range: { reach: 5 },
+  },
+  shortbow: {
+    type: "simpleR",
+    baseItem: "shortbow",
+    damage: "1d6",
+    damageType: "piercing",
+    properties: ["amm", "two"],
+    range: { value: 80, long: 320 },
+  },
+  shortsword: {
+    type: "martialM",
+    baseItem: "shortsword",
+    damage: "1d6",
+    damageType: "piercing",
+    properties: ["fin", "lgt"],
+    range: { reach: 5 },
+  },
+  sickle: {
+    type: "simpleM",
+    baseItem: "sickle",
+    damage: "1d4",
+    damageType: "slashing",
+    properties: ["lgt"],
+    range: { reach: 5 },
+  },
+  sling: {
+    type: "simpleR",
+    baseItem: "sling",
+    damage: "1d4",
+    damageType: "bludgeoning",
+    properties: ["amm"],
+    range: { value: 30, long: 120 },
+  },
+  spear: {
+    type: "simpleM",
+    baseItem: "spear",
+    damage: "1d6",
+    versatileDamage: "1d8",
+    damageType: "piercing",
+    properties: ["thr", "ver"],
+    range: { value: 20, long: 60, reach: 5 },
+  },
+  trident: {
+    type: "martialM",
+    baseItem: "trident",
+    damage: "1d6",
+    versatileDamage: "1d8",
+    damageType: "piercing",
+    properties: ["thr", "ver"],
+    range: { value: 20, long: 60, reach: 5 },
+  },
+  "war pick": {
+    type: "martialM",
+    baseItem: "warpick",
+    damage: "1d8",
+    damageType: "piercing",
+    range: { reach: 5 },
+  },
+  warpick: {
+    type: "martialM",
+    baseItem: "warpick",
+    damage: "1d8",
+    damageType: "piercing",
+    range: { reach: 5 },
+  },
+  warhammer: {
+    type: "martialM",
+    baseItem: "warhammer",
+    damage: "1d8",
+    versatileDamage: "1d10",
+    damageType: "bludgeoning",
+    properties: ["ver"],
+    range: { reach: 5 },
+  },
+  whip: {
+    type: "martialM",
+    baseItem: "whip",
+    damage: "1d4",
+    damageType: "slashing",
+    properties: ["fin", "rch"],
+    range: { reach: 10 },
+  },
+};
+const NETHERSCROLLS_ARMOR_BASE_DATA_BY_NAME = {
+  breastplate: {
+    type: "medium",
+    baseItem: "breastplate",
+    ac: 14,
+    dex: 2,
+  },
+  "chain mail": {
+    type: "heavy",
+    baseItem: "chainmail",
+    ac: 16,
+    dex: 0,
+    strength: 13,
+    properties: ["stealthDisadvantage"],
+  },
+  "chain shirt": {
+    type: "medium",
+    baseItem: "chainshirt",
+    ac: 13,
+    dex: 2,
+  },
+  "half plate": {
+    type: "medium",
+    baseItem: "halfplate",
+    ac: 15,
+    dex: 2,
+    properties: ["stealthDisadvantage"],
+  },
+  hide: {
+    type: "medium",
+    baseItem: "hide",
+    ac: 12,
+    dex: 2,
+  },
+  leather: {
+    type: "light",
+    baseItem: "leather",
+    ac: 11,
+  },
+  padded: {
+    type: "light",
+    baseItem: "padded",
+    ac: 11,
+    properties: ["stealthDisadvantage"],
+  },
+  plate: {
+    type: "heavy",
+    baseItem: "plate",
+    ac: 18,
+    dex: 0,
+    strength: 15,
+    properties: ["stealthDisadvantage"],
+  },
+  "ring mail": {
+    type: "heavy",
+    baseItem: "ringmail",
+    ac: 14,
+    dex: 0,
+    properties: ["stealthDisadvantage"],
+  },
+  "scale mail": {
+    type: "medium",
+    baseItem: "scalemail",
+    ac: 14,
+    dex: 2,
+    properties: ["stealthDisadvantage"],
+  },
+  shield: {
+    type: "shield",
+    baseItem: "shield",
+    ac: 2,
+  },
+  splint: {
+    type: "heavy",
+    baseItem: "splint",
+    ac: 17,
+    dex: 0,
+    strength: 15,
+    properties: ["stealthDisadvantage"],
+  },
+  "studded leather": {
+    type: "light",
+    baseItem: "studded",
+    ac: 12,
+  },
 };
 const NETHERSCROLLS_NUMBER_WORDS = {
   one: 1,
@@ -2385,35 +2794,44 @@ function buildNetherscrollsItemSystem(source, { itemType, descriptionHtml, nethe
 
 function applyNetherscrollsItemTypeSystem(system, source, itemType) {
   if (itemType === "weapon") {
+    const baseData = getNetherscrollsWeaponBaseData(source);
+    const damageType = getNetherscrollsItemDamageType(source) ?? baseData?.damageType ?? null;
+    const baseDamage = getNetherscrollsFirstItemValue(
+      source?.system?.damage?.base,
+      source?.damage?.base,
+      source?.damage,
+      baseData?.damage
+    );
+    const versatileDamage = getNetherscrollsFirstItemValue(
+      source?.system?.damage?.versatile,
+      source?.damage?.versatile,
+      source?.versatileDamage,
+      baseData?.versatileDamage
+    );
     system.activities = source?.system?.activities ?? {};
     system.ammunition = normalizeNetherscrollsWeaponAmmunition(source);
     system.armor = {
       value: Math.max(0, toNumber(source?.system?.armor?.value ?? source?.armor?.value, 0)),
     };
     system.damage = {
-      base: normalizeNetherscrollsItemDamagePart(
-        source?.system?.damage?.base ?? source?.damage?.base ?? source?.damage,
-        getNetherscrollsItemDamageType(source)
-      ),
-      versatile: normalizeNetherscrollsItemDamagePart(
-        source?.system?.damage?.versatile ?? source?.damage?.versatile ?? source?.versatileDamage,
-        getNetherscrollsItemDamageType(source)
-      ),
+      base: normalizeNetherscrollsItemDamagePart(baseDamage, damageType),
+      versatile: normalizeNetherscrollsItemDamagePart(versatileDamage, versatileDamage == null ? null : damageType),
     };
     system.magicalBonus = normalizeNetherscrollsMagicalBonus(source);
     system.mastery = toTrimmedStringOrNull(source?.system?.mastery ?? source?.mastery) ?? "";
     system.proficient = normalizeNetherscrollsNullableNumber(source?.system?.proficient ?? source?.proficient);
-    system.range = normalizeNetherscrollsWeaponRange(source);
+    system.range = normalizeNetherscrollsWeaponRange(source, baseData);
     system.type = normalizeNetherscrollsItemSubtype(source, "weapon");
     return;
   }
 
   if (itemType === "equipment") {
+    const baseData = getNetherscrollsArmorBaseData(source);
     system.activities = source?.system?.activities ?? {};
-    system.armor = normalizeNetherscrollsEquipmentArmor(source);
+    system.armor = normalizeNetherscrollsEquipmentArmor(source, baseData);
     system.proficient = normalizeNetherscrollsNullableNumber(source?.system?.proficient ?? source?.proficient);
     system.strength = normalizeNetherscrollsNullableNumber(
-      source?.system?.strength ?? source?.armor?.strength ?? source?.strength
+      getNetherscrollsFirstItemValue(source?.system?.strength, source?.armor?.strength, source?.strength, baseData?.strength)
     );
     system.type = normalizeNetherscrollsItemSubtype(source, "equipment");
     return;
@@ -2462,6 +2880,8 @@ function normalizeNetherscrollsItemDocumentType(source) {
   if (raw === "backpack" || raw === "bag") return "container";
   if (raw === "ammunition" || raw === "ammo" || raw === "potion" || raw === "scroll") return "consumable";
   if (raw === "art" || raw === "gem" || raw === "treasure" || raw === "trade") return "loot";
+  if (getNetherscrollsWeaponBaseData(source)) return "weapon";
+  if (getNetherscrollsArmorBaseData(source)) return "equipment";
   if (source?.armor && Object.keys(source.armor).length) return "equipment";
   return "loot";
 }
@@ -2476,7 +2896,7 @@ function normalizeNetherscrollsItemSubtype(source, itemType) {
     );
     return buildNetherscrollsItemTypeObject(itemType, value, {
       subtype: explicit.subtype,
-      baseItem: explicit.baseItem,
+      baseItem: getNetherscrollsFirstItemValue(explicit.baseItem, getNetherscrollsItemBaseItem(source, itemType)),
     });
   }
 
@@ -2493,7 +2913,9 @@ function normalizeNetherscrollsItemSubtype(source, itemType) {
     itemType,
     source
   );
-  return buildNetherscrollsItemTypeObject(itemType, value);
+  return buildNetherscrollsItemTypeObject(itemType, value, {
+    baseItem: getNetherscrollsItemBaseItem(source, itemType),
+  });
 }
 
 function buildNetherscrollsItemTypeObject(itemType, value, source = {}) {
@@ -2519,6 +2941,8 @@ function normalizeNetherscrollsItemSubtypeValue(value, itemType, source = {}) {
     if (["natural", "improv", "improvised", "siege"].includes(label)) {
       return label === "improvised" ? "improv" : label;
     }
+    const baseData = getNetherscrollsWeaponBaseData(source);
+    if (baseData?.type) return baseData.type;
     const nameType = NETHERSCROLLS_WEAPON_TYPE_BY_NAME[normalizeNetherscrollsItemNameKey(source?.name)];
     return nameType ?? "simpleM";
   }
@@ -2530,6 +2954,8 @@ function normalizeNetherscrollsItemSubtypeValue(value, itemType, source = {}) {
     if (label === "light armor") return "light";
     if (label === "medium armor") return "medium";
     if (label === "heavy armor") return "heavy";
+    const baseData = getNetherscrollsArmorBaseData(source);
+    if (baseData?.type) return baseData.type;
     if (/\bshield\b/i.test(String(source?.name ?? ""))) return "shield";
     return source?.armor && Object.keys(source.armor).length ? "light" : "trinket";
   }
@@ -2559,6 +2985,42 @@ function normalizeNetherscrollsItemNameKey(name) {
     .replace(/\s*\([^)]*\)\s*/g, " ")
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
+}
+
+function getNetherscrollsWeaponBaseData(source) {
+  return getNetherscrollsBaseDataByName(source, NETHERSCROLLS_WEAPON_BASE_DATA_BY_NAME);
+}
+
+function getNetherscrollsArmorBaseData(source) {
+  return getNetherscrollsBaseDataByName(source, NETHERSCROLLS_ARMOR_BASE_DATA_BY_NAME);
+}
+
+function getNetherscrollsBaseDataByName(source, lookup) {
+  const key = normalizeNetherscrollsItemNameKey(source?.name);
+  if (!key) return null;
+  return lookup[key] ?? lookup[key.replace(/\s+(?:armor|weapon)$/i, "")] ?? null;
+}
+
+function getNetherscrollsItemBaseItem(source, itemType) {
+  const baseData = getNetherscrollsItemBaseData(source, itemType);
+  return toTrimmedStringOrNull(baseData?.baseItem);
+}
+
+function getNetherscrollsItemBaseData(source, itemType) {
+  if (itemType === "weapon") return getNetherscrollsWeaponBaseData(source);
+  if (itemType === "equipment") return getNetherscrollsArmorBaseData(source);
+  return null;
+}
+
+function getNetherscrollsFirstItemValue(...values) {
+  for (const value of values) {
+    if (value == null) continue;
+    if (typeof value === "string" && !value.trim()) continue;
+    if (Array.isArray(value) && !value.length) continue;
+    if (typeof value === "object" && !Array.isArray(value) && !Object.keys(value).length) continue;
+    return value;
+  }
+  return undefined;
 }
 
 function normalizeNetherscrollsItemQuantity(source) {
@@ -2661,6 +3123,11 @@ function normalizeNetherscrollsItemProperties(source, itemType) {
     const property = normalizeNetherscrollsItemProperty(value);
     if (property) properties.add(property);
   }
+  const baseData = getNetherscrollsItemBaseData(source, itemType);
+  for (const property of baseData?.properties ?? []) {
+    const normalized = normalizeNetherscrollsItemProperty(property);
+    if (normalized) properties.add(normalized);
+  }
 
   const rarity = normalizeNetherscrollsItemRarity(source?.system?.rarity ?? source?.rarity);
   const attunement = normalizeNetherscrollsItemAttunement(source?.system?.attunement ?? source?.attunement);
@@ -2754,8 +3221,13 @@ function removeBlankNetherscrollsDamageTypes(part) {
 }
 
 function getNetherscrollsItemDamageType(source) {
-  return normalizeNetherscrollsDamageType(
-    Array.isArray(source?.damageTypes) ? source.damageTypes[0] : source?.damageType
+  return (
+    normalizeNetherscrollsDamageType(
+      Array.isArray(source?.damageTypes) ? source.damageTypes[0] : source?.damageType
+    ) ??
+    normalizeNetherscrollsDamageType(source?.system?.damage?.type) ??
+    getNetherscrollsWeaponBaseData(source)?.damageType ??
+    null
   );
 }
 
@@ -2765,32 +3237,57 @@ function normalizeNetherscrollsMagicalBonus(source) {
   );
 }
 
-function normalizeNetherscrollsWeaponRange(source) {
-  const range = source?.system?.range ?? source?.range;
+function normalizeNetherscrollsWeaponRange(source, baseData = getNetherscrollsWeaponBaseData(source)) {
+  const range = getNetherscrollsFirstItemValue(source?.system?.range, source?.range);
+  const baseRange = baseData?.range ?? {};
   if (range && typeof range === "object") {
     return {
-      value: normalizeNetherscrollsNullableNumber(range.value ?? range.distance),
-      long: normalizeNetherscrollsNullableNumber(range.long),
-      reach: normalizeNetherscrollsNullableNumber(range.reach),
-      units: toTrimmedStringOrNull(range.units ?? range.unit) ?? "ft",
+      value: normalizeNetherscrollsNullableNumber(
+        getNetherscrollsFirstItemValue(range.value, range.distance, baseRange.value)
+      ),
+      long: normalizeNetherscrollsNullableNumber(getNetherscrollsFirstItemValue(range.long, baseRange.long)),
+      reach: normalizeNetherscrollsNullableNumber(getNetherscrollsFirstItemValue(range.reach, baseRange.reach)),
+      units: toTrimmedStringOrNull(range.units ?? range.unit ?? baseRange.units) ?? "ft",
+    };
+  }
+
+  const weaponRange = parseNetherscrollsWeaponRangeText(range);
+  if (weaponRange) {
+    return {
+      value: normalizeNetherscrollsNullableNumber(weaponRange.value),
+      long: normalizeNetherscrollsNullableNumber(weaponRange.long),
+      reach: normalizeNetherscrollsNullableNumber(baseRange.reach),
+      units: weaponRange.units,
     };
   }
 
   const parsed = parseNetherscrollsRangeText(range);
   return {
-    value: normalizeNetherscrollsNullableNumber(parsed?.value),
-    long: null,
-    reach: null,
-    units: parsed?.units ?? "ft",
+    value: normalizeNetherscrollsNullableNumber(getNetherscrollsFirstItemValue(parsed?.value, baseRange.value)),
+    long: normalizeNetherscrollsNullableNumber(baseRange.long),
+    reach: normalizeNetherscrollsNullableNumber(baseRange.reach),
+    units: parsed?.units ?? baseRange.units ?? "ft",
   };
 }
 
-function normalizeNetherscrollsEquipmentArmor(source) {
+function parseNetherscrollsWeaponRangeText(value) {
+  const raw = toTrimmedStringOrNull(value);
+  if (!raw) return null;
+  const match = /(\d+)\s*(?:\/|-)\s*(\d+)\s*(?:ft|feet|foot)?\b/i.exec(raw);
+  if (!match) return null;
+  return {
+    value: Number(match[1]),
+    long: Number(match[2]),
+    units: "ft",
+  };
+}
+
+function normalizeNetherscrollsEquipmentArmor(source, baseData = getNetherscrollsArmorBaseData(source)) {
   const armor = source?.system?.armor ?? source?.armor ?? {};
   return {
-    value: Math.max(0, toNumber(armor.value ?? armor.ac ?? armor.armorClass, 0)),
+    value: Math.max(0, toNumber(getNetherscrollsFirstItemValue(armor.value, armor.ac, armor.armorClass, baseData?.ac), 0)),
     magicalBonus: sanitizeNetherscrollsBonusFormula(armor.magicalBonus ?? source?.magicalBonus),
-    dex: normalizeNetherscrollsNullableNumber(armor.dex ?? armor.dexterity),
+    dex: normalizeNetherscrollsNullableNumber(getNetherscrollsFirstItemValue(armor.dex, armor.dexterity, baseData?.dex)),
   };
 }
 
