@@ -12,7 +12,7 @@
       <div class="ns-import-options">
         {{#each importTypes}}
           <label class="ns-import-option">
-            <input type="checkbox" name="importTypes.{{key}}" value="1" checked>
+            <input type="checkbox" name="importTypes.{{key}}" value="1" {{#if checked}}checked{{/if}}>
             <span class="ns-import-option-icon"><i class="{{icon}}"></i></span>
             <span>{{label}}</span>
           </label>

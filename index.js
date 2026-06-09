@@ -6,26 +6,31 @@ const IMPORT_TYPES = [
     key: "classes",
     label: "Classes",
     icon: "fa-solid fa-graduation-cap",
+    checked: true,
   },
   {
     key: "items",
     label: "Items",
     icon: "fa-solid fa-suitcase",
+    checked: true,
   },
   {
     key: "feats",
     label: "Feats",
     icon: "fa-solid fa-medal",
+    checked: true,
   },
   {
     key: "spells",
     label: "Spells",
     icon: "fa-solid fa-wand-sparkles",
+    checked: true,
   },
   {
     key: "monster",
     label: "Monster",
     icon: "fa-solid fa-dragon",
+    checked: false,
   },
 ];
 const IMPORT_PACKS = {
