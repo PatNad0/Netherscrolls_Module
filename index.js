@@ -974,6 +974,15 @@ Hooks.on("renderActorSheetV2", (app, html) => {
   injectSyncButtonV2(app, html);
 });
 
+Hooks.on("createItem", (item) => {
+  queueNetherscrollsClassFeatureRepairForItem(item, { delay: 100 });
+});
+
+Hooks.on("updateItem", (item, changes) => {
+  if (!isNetherscrollsClassRepairUpdate(changes)) return;
+  queueNetherscrollsClassFeatureRepairForItem(item, { delay: 100 });
+});
+
 Hooks.on("getChatLogEntryContext", (_html, options) => {
   registerEnhancedDamageContextOption(options);
 });
@@ -990,6 +999,7 @@ let npcDeathSaveHandler = null;
 let enhanceDialogInputHandlersBound = false;
 let chatNumberActionHandlersBound = false;
 let chatNumberActionToolbar = null;
+const netherscrollsClassFeatureRepairTimers = new Map();
 
 function rerenderActorSheets() {
   const apps = Object.values(ui?.windows ?? {});
@@ -6249,8 +6259,17 @@ function injectSyncButtonV2(app, element) {
   }
 }
 
-function postActorSyncMessage(actor) {
+async function postActorSyncMessage(actor) {
   if (!actor) return;
+  try {
+    const repairResult = await repairNetherscrollsActorClassFeatures(actor, { notify: false });
+    if (repairResult.created > 0) {
+      ui?.notifications?.info?.(`Netherscrolls added ${repairResult.created} missing class feature${repairResult.created === 1 ? "" : "s"}.`);
+    }
+  } catch (err) {
+    console.warn(`${MODULE_ID} | Unable to repair class features before sync.`, err);
+  }
+
   const payload = buildActorSyncPayload(actor);
   if (isDebugEnabled()) {
     const content = renderSyncPayload(payload);
@@ -6260,6 +6279,337 @@ function postActorSyncMessage(actor) {
     });
   }
   syncActorToApi(actor, payload);
+}
+
+function queueNetherscrollsClassFeatureRepairForItem(item, { delay = 150 } = {}) {
+  if (!isNetherscrollsClassLikeActorItem(item)) return;
+  const actor = getNetherscrollsOwnedItemActor(item);
+  if (!actor) return;
+  queueNetherscrollsActorClassFeatureRepair(actor, { delay });
+}
+
+function queueNetherscrollsActorClassFeatureRepair(actor, { delay = 150 } = {}) {
+  const key = toTrimmedStringOrNull(actor?.uuid ?? actor?.id);
+  if (!key) return;
+  const existing = netherscrollsClassFeatureRepairTimers.get(key);
+  if (existing) clearTimeout(existing);
+
+  const timer = setTimeout(async () => {
+    netherscrollsClassFeatureRepairTimers.delete(key);
+    try {
+      const result = await repairNetherscrollsActorClassFeatures(actor, { notify: false });
+      if (isDebugEnabled() && result.created > 0) {
+        console.info(`${MODULE_ID} | Repaired class features for ${actor?.name ?? "actor"}.`, result);
+      }
+    } catch (err) {
+      console.warn(`${MODULE_ID} | Unable to repair class features for ${actor?.name ?? "actor"}.`, err);
+    }
+  }, delay);
+  netherscrollsClassFeatureRepairTimers.set(key, timer);
+}
+
+function isNetherscrollsClassRepairUpdate(changes) {
+  const paths = getNetherscrollsChangePaths(changes);
+  if (!paths.length) return true;
+  return paths.some((path) =>
+    path === "system.levels" ||
+    path === "system.identifier" ||
+    path === "system.classIdentifier" ||
+    path.startsWith("system.advancement") ||
+    path.startsWith(`flags.${MODULE_ID}`)
+  );
+}
+
+function getNetherscrollsChangePaths(value, prefix = "") {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  const paths = [];
+  for (const [key, entry] of Object.entries(value)) {
+    const path = prefix ? `${prefix}.${key}` : key;
+    paths.push(path);
+    if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+      paths.push(...getNetherscrollsChangePaths(entry, path));
+    }
+  }
+  return paths;
+}
+
+function isNetherscrollsClassLikeActorItem(item) {
+  return Boolean((item?.type === "class" || item?.type === "subclass") && getNetherscrollsOwnedItemActor(item));
+}
+
+function getNetherscrollsOwnedItemActor(item) {
+  if (item?.actor?.documentName === "Actor") return item.actor;
+  if (item?.parent?.documentName === "Actor") return item.parent;
+  if (item?.parent?.actor?.documentName === "Actor") return item.parent.actor;
+  return null;
+}
+
+async function repairNetherscrollsActorClassFeatures(actor, { notify = false } = {}) {
+  const result = {
+    created: 0,
+    skipped: 0,
+    missingSources: 0,
+  };
+  if (!actor?.createEmbeddedDocuments) return result;
+  if (typeof actor.canUserModify === "function" && !actor.canUserModify(game?.user, "update")) {
+    return result;
+  }
+
+  const refs = await getNetherscrollsActorClassFeatureRefs(actor);
+  if (!refs.length) return result;
+
+  const createData = [];
+  const considered = new Set();
+  for (const ref of refs) {
+    const uuid = toTrimmedStringOrNull(ref.uuid);
+    if (!uuid || considered.has(uuid)) continue;
+    considered.add(uuid);
+
+    const feature = await resolveNetherscrollsDocumentUuid(uuid);
+    if (!feature) {
+      result.missingSources += 1;
+      continue;
+    }
+
+    const featureLevel = getNetherscrollsClassFeatureLevel(feature, ref.level);
+    if (featureLevel > ref.classLevel || isNetherscrollsOptionalClassFeature(feature)) {
+      result.skipped += 1;
+      continue;
+    }
+
+    if (actorHasNetherscrollsClassFeature(actor, feature, uuid)) {
+      result.skipped += 1;
+      continue;
+    }
+
+    createData.push(buildNetherscrollsActorClassFeatureData(feature, ref, uuid, featureLevel));
+  }
+
+  if (!createData.length) return result;
+  const created = await actor.createEmbeddedDocuments("Item", createData, { renderSheet: false });
+  result.created = Array.isArray(created) ? created.length : createData.length;
+  if (notify && result.created > 0) {
+    ui?.notifications?.info?.(`Netherscrolls added ${result.created} missing class feature${result.created === 1 ? "" : "s"}.`);
+  }
+  return result;
+}
+
+async function getNetherscrollsActorClassFeatureRefs(actor) {
+  const items = getNetherscrollsActorItems(actor);
+  const classItems = items.filter((item) => item?.type === "class");
+  const subclassItems = items.filter((item) => item?.type === "subclass");
+  const refs = [];
+
+  for (const classItem of classItems) {
+    const classLevel = getNetherscrollsActorClassLevel(classItem);
+    if (classLevel <= 0) continue;
+    refs.push(
+      ...(await getNetherscrollsClassItemFeatureRefs(classItem, "classFeatureUuids", {
+        classItem,
+        classLevel,
+        scope: "class",
+      }))
+    );
+
+    for (const subclassItem of subclassItems) {
+      if (!isNetherscrollsActorSubclassForClass(subclassItem, classItem)) continue;
+      refs.push(
+        ...(await getNetherscrollsClassItemFeatureRefs(subclassItem, "subclassFeatureUuids", {
+          classItem,
+          subclassItem,
+          classLevel,
+          scope: "subclass",
+        }))
+      );
+    }
+  }
+
+  return refs;
+}
+
+function getNetherscrollsActorItems(actor) {
+  if (!actor?.items) return [];
+  return Array.from(actor.items);
+}
+
+function getNetherscrollsActorClassLevel(item) {
+  return Math.max(0, Math.trunc(toNumber(item?.system?.levels ?? item?.system?.level, 0)));
+}
+
+async function getNetherscrollsClassItemFeatureRefs(item, flagName, context) {
+  const refsByUuid = new Map();
+  addNetherscrollsFeatureRefs(refsByUuid, normalizeNetherscrollsUuidArray(getNetherscrollsDocumentFlag(item, flagName)), context);
+  addNetherscrollsFeatureRefs(refsByUuid, getNetherscrollsItemGrantRefs(item), context);
+
+  if (!refsByUuid.size) {
+    const importedItem = await resolveNetherscrollsImportedClassLikeDocument(item);
+    addNetherscrollsFeatureRefs(refsByUuid, normalizeNetherscrollsUuidArray(getNetherscrollsDocumentFlag(importedItem, flagName)), context);
+    addNetherscrollsFeatureRefs(refsByUuid, getNetherscrollsItemGrantRefs(importedItem), context);
+  }
+
+  return Array.from(refsByUuid.values());
+}
+
+function addNetherscrollsFeatureRefs(refsByUuid, entries, context) {
+  for (const entry of entries ?? []) {
+    const uuid = toTrimmedStringOrNull(typeof entry === "string" ? entry : entry?.uuid);
+    if (!uuid || refsByUuid.has(uuid)) continue;
+    refsByUuid.set(uuid, {
+      ...context,
+      uuid,
+      level: normalizeNetherscrollsNullableNumber(entry?.level),
+    });
+  }
+}
+
+function normalizeNetherscrollsUuidArray(value) {
+  if (Array.isArray(value)) return value.map(toTrimmedStringOrNull).filter(Boolean);
+  const raw = toTrimmedStringOrNull(value);
+  if (!raw) return [];
+  return raw.split(/[,\s]+/).map(toTrimmedStringOrNull).filter(Boolean);
+}
+
+function getNetherscrollsItemGrantRefs(item) {
+  const advancement = item?.system?.advancement ?? {};
+  const entries = Object.values(advancement);
+  const refs = [];
+  for (const entry of entries) {
+    if (entry?.type !== "ItemGrant") continue;
+    const level = normalizeNetherscrollsNullableNumber(entry.level);
+    for (const granted of entry?.configuration?.items ?? []) {
+      const uuid = toTrimmedStringOrNull(granted?.uuid);
+      if (uuid) refs.push({ uuid, level });
+    }
+  }
+  return refs;
+}
+
+async function resolveNetherscrollsImportedClassLikeDocument(item) {
+  const pack = getNetherscrollsImportPack("classes");
+  if (!pack?.getDocuments) return null;
+  const itemType = toTrimmedStringOrNull(item?.type);
+  const netherscrollsId = getNetherscrollsDocumentFlag(item, "netherscrollsId");
+  const identifier = getNetherscrollsClassLikeIdentifier(item);
+  const name = normalizeNetherscrollsName(item?.name).toLowerCase();
+
+  const documents = await pack.getDocuments();
+  return (
+    documents.find((document) => document?.type === itemType && netherscrollsId && getNetherscrollsDocumentFlag(document, "netherscrollsId") === netherscrollsId) ??
+    documents.find((document) => document?.type === itemType && identifier && getNetherscrollsClassLikeIdentifier(document) === identifier) ??
+    documents.find((document) => document?.type === itemType && name && normalizeNetherscrollsName(document?.name).toLowerCase() === name) ??
+    null
+  );
+}
+
+function getNetherscrollsClassLikeIdentifier(item) {
+  return toTrimmedStringOrNull(
+    getNetherscrollsDocumentFlag(item, "identifier") ??
+      item?.system?.identifier ??
+      item?.system?.classIdentifier
+  );
+}
+
+function isNetherscrollsActorSubclassForClass(subclassItem, classItem) {
+  const classIdentifier = getNetherscrollsClassLikeIdentifier(classItem);
+  const subclassClassIdentifier = toTrimmedStringOrNull(
+    subclassItem?.system?.classIdentifier ?? getNetherscrollsDocumentFlag(subclassItem, "parentClassIdentifier")
+  );
+  if (classIdentifier && subclassClassIdentifier) return classIdentifier === subclassClassIdentifier;
+
+  const parentClass = normalizeNetherscrollsName(
+    getNetherscrollsDocumentFlag(subclassItem, "parentClass") ?? subclassItem?.system?.className
+  ).toLowerCase();
+  const className = normalizeNetherscrollsName(classItem?.name).toLowerCase();
+  return Boolean(parentClass && className && parentClass === className);
+}
+
+async function resolveNetherscrollsDocumentUuid(uuid) {
+  const id = toTrimmedStringOrNull(uuid);
+  if (!id) return null;
+  try {
+    if (typeof fromUuid === "function") return await fromUuid(id);
+  } catch (err) {
+    console.warn(`${MODULE_ID} | Unable to resolve UUID ${id}.`, err);
+  }
+
+  try {
+    if (typeof fromUuidSync === "function") {
+      const document = fromUuidSync(id);
+      if (document) return document;
+    }
+  } catch {
+    // Fall back to manual compendium lookup below.
+  }
+
+  const match = /^Compendium\.(.+)\.Item\.([^.]+)$/i.exec(id);
+  if (!match) return null;
+  const pack = game?.packs?.get?.(match[1]);
+  return (await pack?.getDocument?.(match[2])) ?? null;
+}
+
+function getNetherscrollsClassFeatureLevel(feature, fallbackLevel = null) {
+  const level = normalizeNetherscrollsNullableNumber(getNetherscrollsDocumentFlag(feature, "level") ?? fallbackLevel);
+  return Math.max(1, Math.trunc(level ?? 1));
+}
+
+function isNetherscrollsOptionalClassFeature(feature) {
+  return Boolean(getNetherscrollsDocumentFlag(feature, "optional"));
+}
+
+function actorHasNetherscrollsClassFeature(actor, feature, uuid) {
+  const featureId = getNetherscrollsDocumentFlag(feature, "netherscrollsId");
+  const featureKey = getNetherscrollsDocumentFlag(feature, "featureKey");
+  const parentClassIdentifier = getNetherscrollsDocumentFlag(feature, "parentClassIdentifier");
+  const featureName = normalizeNetherscrollsName(feature?.name).toLowerCase();
+
+  for (const item of getNetherscrollsActorItems(actor)) {
+    if (item?.type !== "feat") continue;
+    if (uuid && getNetherscrollsDocumentFlag(item, "grantedFromUuid") === uuid) return true;
+    if (featureId && getNetherscrollsDocumentFlag(item, "netherscrollsId") === featureId) return true;
+    if (featureKey && getNetherscrollsDocumentFlag(item, "featureKey") === featureKey) return true;
+    const itemName = normalizeNetherscrollsName(item?.name).toLowerCase();
+    const isClassFeature = item?.system?.type?.value === "class" || Boolean(getNetherscrollsDocumentFlag(item, "featureScope"));
+    if (featureName && itemName === featureName && isClassFeature) {
+      const itemParentClassIdentifier = getNetherscrollsDocumentFlag(item, "parentClassIdentifier");
+      if (!parentClassIdentifier || !itemParentClassIdentifier || parentClassIdentifier === itemParentClassIdentifier) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function buildNetherscrollsActorClassFeatureData(feature, ref, uuid, featureLevel) {
+  const data = duplicateNetherscrollsDocumentData(feature);
+  delete data._id;
+  delete data.folder;
+  delete data.ownership;
+  data.sort = 0;
+  data.flags = data.flags ?? {};
+  data.flags[MODULE_ID] = {
+    ...(data.flags[MODULE_ID] ?? {}),
+    grantedFromUuid: uuid,
+    grantedByClassItemId: ref.classItem?.id ?? "",
+    grantedByClass: ref.classItem?.name ?? "",
+    grantedBySubclassItemId: ref.subclassItem?.id ?? "",
+    grantedBySubclass: ref.subclassItem?.name ?? "",
+    grantedAtClassLevel: featureLevel,
+  };
+  return data;
+}
+
+function duplicateNetherscrollsDocumentData(document) {
+  if (typeof document?.toObject === "function") return document.toObject();
+  return duplicateNetherscrollsData(document);
+}
+
+function getNetherscrollsDocumentFlag(document, key) {
+  try {
+    return document?.getFlag?.(MODULE_ID, key) ?? document?.flags?.[MODULE_ID]?.[key] ?? null;
+  } catch {
+    return document?.flags?.[MODULE_ID]?.[key] ?? null;
+  }
 }
 
 function renderSyncPayload(payload) {
