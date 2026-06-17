@@ -105,6 +105,8 @@ const NETHERSCROLLS_ABILITY_LABELS = {
   int: ["int", "intelligence"],
   wis: ["wis", "wisdom"],
   cha: ["cha", "charisma"],
+  hon: ["hon", "honor", "honour"],
+  san: ["san", "sanity"],
 };
 const NETHERSCROLLS_DAMAGE_TYPES = [
   "acid",
@@ -1430,7 +1432,7 @@ async function importNetherscrollsFeats(feats) {
     if (netherscrollsId && existingByNetherId.has(String(netherscrollsId))) {
       prepared._id = existingByNetherId.get(String(netherscrollsId)).id;
     }
-    const folder = await ensureNetherscrollsFeatFolder(pack, feat, folderCache);
+    const folder = await ensureNetherscrollsFeatFolder(pack, prepared, folderCache);
     if (folder?.id) prepared.folder = folder.id;
     featData.push(prepared);
   }
@@ -1554,7 +1556,20 @@ function isNetherscrollsClassLike(data) {
 }
 
 function getNetherscrollsSourceId(data) {
-  return normalizeNetherscrollsReferenceValue(data?.netherscrollsId ?? data?._id ?? data?.id);
+  const foundryItem = getNetherscrollsFoundryItemPayload(data);
+  return normalizeNetherscrollsReferenceValue(
+    data?.netherscrollsId ??
+      data?._id ??
+      data?.id ??
+      data?.flags?.[MODULE_ID]?.netherscrollsId ??
+      data?.flags?.netherscrolls?.id ??
+      foundryItem?.flags?.[MODULE_ID]?.netherscrollsId ??
+      foundryItem?.flags?.netherscrolls?.id
+  );
+}
+
+function getNetherscrollsFoundryItemPayload(data) {
+  return data?.foundryItem ?? data?.foundry ?? data?.document ?? null;
 }
 
 function normalizeNetherscrollsReferenceValue(value) {
@@ -1600,7 +1615,7 @@ function getNetherscrollsImportPack(typeKey) {
 }
 
 function normalizeNetherscrollsClassData(classSource, { featureUuidByKey }) {
-  if (classSource?.foundry || classSource?.document) {
+  if (getNetherscrollsFoundryItemPayload(classSource)) {
     return normalizeNetherscrollsFoundryClassData(classSource, { featureUuidByKey });
   }
 
@@ -1641,7 +1656,7 @@ function normalizeNetherscrollsClassData(classSource, { featureUuidByKey }) {
 }
 
 function normalizeNetherscrollsFoundryClassData(classSource, { featureUuidByKey }) {
-  const source = duplicateNetherscrollsData(classSource?.foundry ?? classSource?.document);
+  const source = duplicateNetherscrollsData(getNetherscrollsFoundryItemPayload(classSource));
   const netherscrollsId = getNetherscrollsSourceId(classSource);
   source.name = toTrimmedStringOrNull(source.name) ?? "Netherscrolls Class";
   source.type = "class";
@@ -1681,7 +1696,7 @@ function normalizeNetherscrollsFoundryClassData(classSource, { featureUuidByKey 
 }
 
 function normalizeNetherscrollsSubclassData(subclassSource, classSource, { featureUuidByKey }) {
-  if (subclassSource?.foundry || subclassSource?.document) {
+  if (getNetherscrollsFoundryItemPayload(subclassSource)) {
     return normalizeNetherscrollsFoundrySubclassData(subclassSource, classSource, { featureUuidByKey });
   }
 
@@ -1721,7 +1736,7 @@ function normalizeNetherscrollsSubclassData(subclassSource, classSource, { featu
 }
 
 function normalizeNetherscrollsFoundrySubclassData(subclassSource, classSource, { featureUuidByKey }) {
-  const source = duplicateNetherscrollsData(subclassSource?.foundry ?? subclassSource?.document);
+  const source = duplicateNetherscrollsData(getNetherscrollsFoundryItemPayload(subclassSource));
   const netherscrollsId = getNetherscrollsSourceId(subclassSource);
   source.name = toTrimmedStringOrNull(source.name) ?? "Netherscrolls Subclass";
   source.type = "subclass";
@@ -2517,7 +2532,7 @@ function buildNetherscrollsCompendiumItemUuid(pack, id) {
 }
 
 function normalizeNetherscrollsFeatData(feat) {
-  if (feat?.foundry || feat?.document) {
+  if (getNetherscrollsFoundryItemPayload(feat)) {
     return normalizeNetherscrollsFoundryFeatData(feat);
   }
 
@@ -2548,7 +2563,7 @@ function normalizeNetherscrollsFeatData(feat) {
 }
 
 function normalizeNetherscrollsFoundryFeatData(feat) {
-  const source = duplicateNetherscrollsData(feat?.foundry ?? feat?.document);
+  const source = duplicateNetherscrollsData(getNetherscrollsFoundryItemPayload(feat));
   const netherscrollsId = getNetherscrollsSourceId(feat);
   source.name = toTrimmedStringOrNull(source.name) ?? "Netherscrolls Feat";
   source.type = "feat";
@@ -2589,7 +2604,7 @@ function normalizeNetherscrollsFoundryFeatData(feat) {
 
 function buildNetherscrollsFeatSystem(source, { descriptionHtml, netherscrollsId, sourceName }) {
   return {
-    activities: source?.system?.activities ?? {},
+    activities: normalizeNetherscrollsActivities(source),
     advancement: normalizeNetherscrollsFeatAdvancement(source),
     description: {
       value: descriptionHtml ?? "",
@@ -2599,7 +2614,7 @@ function buildNetherscrollsFeatSystem(source, { descriptionHtml, netherscrollsId
       toTrimmedStringOrNull(source?.system?.identifier) ??
       (netherscrollsId ? `netherscrolls-${netherscrollsId}` : slugifyNetherscrollsIdentifier(source?.name)),
     source: buildNetherscrollsItemSource(sourceName, source),
-    cover: toNumber(source?.system?.cover ?? source?.cover, 0),
+    cover: normalizeNetherscrollsNullableNumber(source?.system?.cover ?? source?.cover),
     crewed: Boolean(source?.system?.crewed ?? source?.crewed ?? false),
     enchant: {
       max: toTrimmedStringOrNull(source?.system?.enchant?.max ?? source?.enchant?.max) ?? "",
@@ -2614,10 +2629,12 @@ function buildNetherscrollsFeatSystem(source, { descriptionHtml, netherscrollsId
 }
 
 function normalizeNetherscrollsFeatAdvancement(source) {
-  if (source?.system?.advancement && typeof source.system.advancement === "object") {
-    return source.system.advancement;
+  const explicit = source?.system?.advancement ?? source?.advancement;
+  if (explicit && typeof explicit === "object" && !Array.isArray(explicit)) {
+    return explicit;
   }
 
+  if (!isNetherscrollsDemifeatSource(source)) return {};
   const abilities = normalizeNetherscrollsFeatAbilities(source?.ability ?? source?.abilities);
   if (!abilities.length) return {};
 
@@ -2655,12 +2672,22 @@ function normalizeNetherscrollsFeatAbilities(value) {
   return abilities;
 }
 
+function isNetherscrollsDemifeatSource(source) {
+  return (
+    source?.demifeat === true ||
+    source?.system?.demifeat === true ||
+    source?.flags?.[MODULE_ID]?.demifeat === true ||
+    source?.flags?.netherscrolls?.demifeat === true
+  );
+}
+
 function normalizeNetherscrollsFeatPrerequisites(source) {
   const explicit = source?.system?.prerequisites ?? source?.prerequisites;
   if (explicit && typeof explicit === "object") return explicit;
 
   return {
     items: [],
+    level: normalizeNetherscrollsNullableNumber(source?.level ?? source?.minimumLevel),
     repeatable: Boolean(source?.repeatable ?? false),
   };
 }
@@ -2676,7 +2703,7 @@ function normalizeNetherscrollsFeatProperties(source) {
 }
 
 function normalizeNetherscrollsFeatType(source) {
-  const explicit = source?.system?.type;
+  const explicit = source?.system?.type ?? source?.foundryType;
   if (explicit && typeof explicit === "object") {
     return {
       value: toTrimmedStringOrNull(explicit.value) ?? "feat",
@@ -2685,13 +2712,13 @@ function normalizeNetherscrollsFeatType(source) {
   }
 
   return {
-    value: toTrimmedStringOrNull(source?.featType) ?? "feat",
+    value: toTrimmedStringOrNull(source?.foundryType ?? source?.featType) ?? "feat",
     subtype: toTrimmedStringOrNull(source?.subtype) ?? "",
   };
 }
 
 function normalizeNetherscrollsItemData(item) {
-  if (item?.foundry || item?.document) {
+  if (getNetherscrollsFoundryItemPayload(item)) {
     return normalizeNetherscrollsFoundryItemData(item);
   }
 
@@ -2724,7 +2751,7 @@ function normalizeNetherscrollsItemData(item) {
 }
 
 function normalizeNetherscrollsFoundryItemData(item) {
-  const source = duplicateNetherscrollsData(item?.foundry ?? item?.document);
+  const source = duplicateNetherscrollsData(getNetherscrollsFoundryItemPayload(item));
   const netherscrollsId = getNetherscrollsSourceId(item);
   source.name = toTrimmedStringOrNull(source.name) ?? "Netherscrolls Item";
   source.type = normalizeNetherscrollsItemDocumentType({
@@ -2772,20 +2799,20 @@ function normalizeNetherscrollsFoundryItemData(item) {
 
 function buildNetherscrollsItemSystem(source, { itemType, descriptionHtml, netherscrollsId, sourceName }) {
   const system = {
+    activities: normalizeNetherscrollsActivities(source),
     description: {
       value: descriptionHtml ?? "",
       chat: "",
     },
     identifier:
-      toTrimmedStringOrNull(source?.system?.identifier) ??
+      toTrimmedStringOrNull(source?.system?.identifier ?? source?.identifier) ??
       (netherscrollsId ? `netherscrolls-${netherscrollsId}` : slugifyNetherscrollsIdentifier(source?.name)),
     source: buildNetherscrollsItemSource(sourceName, source),
-    identified: true,
-    unidentified: {
-      name: "",
-      description: "",
-    },
+    identified: Boolean(source?.system?.identified ?? source?.identified ?? true),
+    unidentified: normalizeNetherscrollsUnidentifiedData(source),
+    container: source?.system?.container ?? source?.container ?? null,
     quantity: normalizeNetherscrollsItemQuantity(source),
+    uses: normalizeNetherscrollsItemUses(source),
     weight: normalizeNetherscrollsItemWeight(source),
     price: normalizeNetherscrollsItemPrice(source),
     rarity: normalizeNetherscrollsItemRarity(source?.system?.rarity ?? source?.rarity),
@@ -2799,7 +2826,48 @@ function buildNetherscrollsItemSystem(source, { itemType, descriptionHtml, nethe
   }
 
   applyNetherscrollsItemTypeSystem(system, source, itemType);
+  applyNetherscrollsMountableItemFields(system, source);
   return system;
+}
+
+function normalizeNetherscrollsUnidentifiedData(source) {
+  const unidentified = source?.system?.unidentified ?? source?.unidentified ?? {};
+  return {
+    name: toTrimmedStringOrNull(unidentified?.name) ?? "",
+    description: toTrimmedStringOrNull(unidentified?.description) ?? "",
+  };
+}
+
+function applyNetherscrollsMountableItemFields(system, source) {
+  const cover = source?.system?.cover ?? source?.cover;
+  if (cover !== undefined) system.cover = normalizeNetherscrollsNullableNumber(cover);
+
+  const crew = source?.system?.crew ?? source?.crew;
+  if (crew && typeof crew === "object") {
+    system.crew = {
+      max: normalizeNetherscrollsNullableNumber(crew.max),
+      value: Array.isArray(crew.value) ? crew.value : [],
+    };
+  }
+
+  const hp = source?.system?.hp ?? source?.hp;
+  if (hp && typeof hp === "object") {
+    system.hp = {
+      value: normalizeNetherscrollsNullableNumber(hp.value),
+      max: normalizeNetherscrollsNullableNumber(hp.max),
+      dt: normalizeNetherscrollsNullableNumber(hp.dt),
+      conditions: toTrimmedStringOrNull(hp.conditions) ?? "",
+    };
+  }
+
+  const speed = source?.system?.speed ?? source?.speed;
+  if (speed && typeof speed === "object") {
+    system.speed = {
+      value: normalizeNetherscrollsNullableNumber(speed.value),
+      units: toTrimmedStringOrNull(speed.units ?? speed.unit) ?? "ft",
+      conditions: toTrimmedStringOrNull(speed.conditions) ?? "",
+    };
+  }
 }
 
 function applyNetherscrollsItemTypeSystem(system, source, itemType) {
@@ -2818,7 +2886,7 @@ function applyNetherscrollsItemTypeSystem(system, source, itemType) {
       source?.versatileDamage,
       baseData?.versatileDamage
     );
-    system.activities = source?.system?.activities ?? {};
+    system.activities = normalizeNetherscrollsActivities(source);
     system.ammunition = normalizeNetherscrollsWeaponAmmunition(source);
     system.armor = {
       value: Math.max(0, toNumber(source?.system?.armor?.value ?? source?.armor?.value, 0)),
@@ -2837,7 +2905,7 @@ function applyNetherscrollsItemTypeSystem(system, source, itemType) {
 
   if (itemType === "equipment") {
     const baseData = getNetherscrollsArmorBaseData(source);
-    system.activities = source?.system?.activities ?? {};
+    system.activities = normalizeNetherscrollsActivities(source);
     system.armor = normalizeNetherscrollsEquipmentArmor(source, baseData);
     system.proficient = normalizeNetherscrollsNullableNumber(source?.system?.proficient ?? source?.proficient);
     system.strength = normalizeNetherscrollsNullableNumber(
@@ -2848,7 +2916,7 @@ function applyNetherscrollsItemTypeSystem(system, source, itemType) {
   }
 
   if (itemType === "consumable") {
-    system.activities = source?.system?.activities ?? {};
+    system.activities = normalizeNetherscrollsActivities(source);
     system.damage = {
       base: normalizeNetherscrollsItemDamagePart(
         source?.system?.damage?.base ?? source?.damage?.base ?? source?.damage,
@@ -2863,7 +2931,7 @@ function applyNetherscrollsItemTypeSystem(system, source, itemType) {
   }
 
   if (itemType === "tool") {
-    system.activities = source?.system?.activities ?? {};
+    system.activities = normalizeNetherscrollsActivities(source);
     system.ability = normalizeNetherscrollsSaveAbility(source?.system?.ability ?? source?.ability) ?? "";
     system.bonus = sanitizeNetherscrollsBonusFormula(source?.system?.bonus ?? source?.bonus);
     system.chatFlavor = toTrimmedStringOrNull(source?.system?.chatFlavor ?? source?.chatFlavor) ?? "";
@@ -2885,8 +2953,12 @@ function normalizeNetherscrollsItemDocumentType(source) {
   const raw = toTrimmedStringOrNull(
     source?.type ?? source?.itemType ?? source?.documentType ?? source?.system?.documentType
   )?.toLowerCase();
+  const label = raw?.replace(/[_-]+/g, " ").trim();
   if (NETHERSCROLLS_ITEM_TYPES.has(raw)) return raw;
   if (raw === "armor" || raw === "shield") return "equipment";
+  if (["magic item", "wondrous", "wondrous item", "wondrousitem", "ring", "rod", "wand", "staff", "focus", "clothing", "trinket"].includes(label)) {
+    return "equipment";
+  }
   if (raw === "backpack" || raw === "bag") return "container";
   if (raw === "ammunition" || raw === "ammo" || raw === "potion" || raw === "scroll") return "consumable";
   if (raw === "art" || raw === "gem" || raw === "treasure" || raw === "trade") return "loot";
@@ -2897,7 +2969,7 @@ function normalizeNetherscrollsItemDocumentType(source) {
 }
 
 function normalizeNetherscrollsItemSubtype(source, itemType) {
-  const explicit = source?.system?.type;
+  const explicit = source?.system?.type ?? source?.foundryType;
   if (explicit && typeof explicit === "object") {
     const value = normalizeNetherscrollsItemSubtypeValue(
       explicit.value ?? explicit.type ?? source?.subtype,
@@ -2918,6 +2990,7 @@ function normalizeNetherscrollsItemSubtype(source, itemType) {
       source?.consumableType ??
       source?.toolType ??
       source?.lootType ??
+      source?.foundryType ??
       source?.armor?.type ??
       source?.type,
     itemType,
@@ -3337,6 +3410,23 @@ function buildNetherscrollsItemSource(sourceName, source = {}) {
   return buildNetherscrollsSpellSource(sourceName, source);
 }
 
+function getNetherscrollsSystemValue(source, key) {
+  return source?.system?.[key] ?? source?.[key];
+}
+
+function getNetherscrollsFoundrySourceValue(source) {
+  return source?.system?.source ?? source?.foundrySource ?? source?.source;
+}
+
+function normalizeNetherscrollsActivities(source) {
+  const activities = getNetherscrollsSystemValue(source, "activities");
+  return activities && typeof activities === "object" && !Array.isArray(activities) ? activities : {};
+}
+
+function hasNetherscrollsObjectEntries(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length);
+}
+
 function applyNetherscrollsImportFlags(documentData, source, netherscrollsId) {
   if (!netherscrollsId) return;
   documentData.flags = documentData.flags ?? {};
@@ -3349,6 +3439,7 @@ function applyNetherscrollsImportFlags(documentData, source, netherscrollsId) {
   if (lastRev) documentData.flags[MODULE_ID].lastRev = lastRev;
   if (Array.isArray(source?.tags)) documentData.flags[MODULE_ID].tags = source.tags;
   if (Array.isArray(source?.ability)) documentData.flags[MODULE_ID].ability = source.ability;
+  if (Array.isArray(source?.classes)) documentData.flags[MODULE_ID].classes = source.classes;
   if (source?.demifeat != null) documentData.flags[MODULE_ID].demifeat = Boolean(source.demifeat);
   if (source?.isHomebrew != null) documentData.flags[MODULE_ID].isHomebrew = Boolean(source.isHomebrew);
 }
@@ -3364,7 +3455,7 @@ function mergeNetherscrollsDefaults(defaults, data) {
 }
 
 function normalizeNetherscrollsSpellData(spell) {
-  if (spell?.foundry || spell?.document) {
+  if (getNetherscrollsFoundryItemPayload(spell)) {
     return normalizeNetherscrollsFoundrySpellData(spell);
   }
 
@@ -3377,6 +3468,7 @@ function normalizeNetherscrollsSpellData(spell) {
   const school = getNetherscrollsSpellSchool(source);
   const schoolKey = getNetherscrollsSpellSchoolSystemKey(school);
   const inferred = inferNetherscrollsSpellFields(source, descriptionHtml);
+  const activities = normalizeNetherscrollsActivities(source);
   const itemData = {
     name: toTrimmedStringOrNull(source.name) ?? "Netherscrolls Spell",
     type: "spell",
@@ -3386,9 +3478,11 @@ function normalizeNetherscrollsSpellData(spell) {
       default: 0,
     },
     system: {
-      activities: inferred.activity ? { [inferred.activity._id]: inferred.activity } : {},
+      activities: hasNetherscrollsObjectEntries(activities)
+        ? activities
+        : inferred.activity ? { [inferred.activity._id]: inferred.activity } : {},
       activation: inferred.activation,
-      ability: "",
+      ability: normalizeNetherscrollsSaveAbility(source?.system?.ability ?? source?.ability) ?? "",
       description: {
         value: descriptionHtml ?? "",
         chat: "",
@@ -3399,11 +3493,7 @@ function normalizeNetherscrollsSpellData(spell) {
       properties: inferred.properties,
       range: inferred.range,
       target: inferred.target,
-      uses: {
-        spent: 0,
-        max: "",
-        recovery: [],
-      },
+      uses: normalizeNetherscrollsItemUses(source),
     },
     effects: [],
   };
@@ -3411,32 +3501,24 @@ function normalizeNetherscrollsSpellData(spell) {
   itemData.system.identifier =
     toTrimmedStringOrNull(source.system?.identifier) ??
     (netherscrollsId ? `netherscrolls-${netherscrollsId}` : slugifyNetherscrollsIdentifier(itemData.name));
+  itemData.system.actionType = toTrimmedStringOrNull(source?.system?.actionType ?? source?.actionType) ?? "";
+  const sourceItem = toTrimmedStringOrNull(source?.system?.sourceItem ?? source?.sourceItem);
   const sourceClass = getNetherscrollsPrimarySpellClass(source);
-  if (sourceClass) itemData.system.sourceItem = `class:${sourceClass}`;
+  if (sourceItem) itemData.system.sourceItem = sourceItem;
+  else if (sourceClass) itemData.system.sourceItem = `class:${sourceClass}`;
   itemData.system.method =
     toTrimmedStringOrNull(source?.system?.method ?? source?.method) ?? "spell";
   itemData.system.prepared = toNumber(source?.system?.prepared ?? source?.prepared, 0);
 
   itemData.system.source = buildNetherscrollsSpellSource(sourceName, source);
 
-  if (netherscrollsId) {
-    itemData.flags = {
-      [MODULE_ID]: {
-        netherscrollsId,
-      },
-    };
-    const lastRev = normalizeNetherscrollsReferenceValue(source.lastRev);
-    if (lastRev) itemData.flags[MODULE_ID].lastRev = lastRev;
-    if (Array.isArray(source.classes)) {
-      itemData.flags[MODULE_ID].classes = source.classes;
-    }
-  }
+  applyNetherscrollsImportFlags(itemData, source, netherscrollsId);
 
   return itemData;
 }
 
 function normalizeNetherscrollsFoundrySpellData(spell) {
-  const source = duplicateNetherscrollsData(spell?.foundry ?? spell?.document);
+  const source = duplicateNetherscrollsData(getNetherscrollsFoundryItemPayload(spell));
   const netherscrollsId = getNetherscrollsSourceId(spell);
   source.name = toTrimmedStringOrNull(source.name) ?? "Netherscrolls Spell";
   source.type = toTrimmedStringOrNull(source.type) ?? "spell";
@@ -3447,14 +3529,11 @@ function normalizeNetherscrollsFoundrySpellData(spell) {
     netherscrollsId ? `netherscrolls-${netherscrollsId}` : slugifyNetherscrollsIdentifier(source.name);
   const schoolKey = getNetherscrollsSpellSchoolSystemKey(getNetherscrollsSpellSchool(source));
   if (schoolKey) source.system.school = schoolKey;
-  source.system.ability ??= "";
+  source.system.ability ??= normalizeNetherscrollsSaveAbility(spell?.system?.ability ?? spell?.ability) ?? "";
+  source.system.actionType ??= toTrimmedStringOrNull(spell?.system?.actionType ?? spell?.actionType) ?? "";
   source.system.method ??= "spell";
   source.system.prepared ??= 0;
-  source.system.uses ??= {
-    spent: 0,
-    max: "",
-    recovery: [],
-  };
+  source.system.uses ??= normalizeNetherscrollsItemUses(spell);
   const inferred = inferNetherscrollsSpellFields(
     spell,
     source.system?.description?.value ?? spell?.descriptionHtml ?? spell?.description
@@ -3468,10 +3547,15 @@ function normalizeNetherscrollsFoundrySpellData(spell) {
   source.system.range ??= inferred.range;
   source.system.target ??= inferred.target;
   if (!source.system.activities || !Object.keys(source.system.activities).length) {
-    source.system.activities = inferred.activity ? { [inferred.activity._id]: inferred.activity } : {};
+    const activities = normalizeNetherscrollsActivities(spell);
+    source.system.activities = hasNetherscrollsObjectEntries(activities)
+      ? activities
+      : inferred.activity ? { [inferred.activity._id]: inferred.activity } : {};
   }
+  const sourceItem = toTrimmedStringOrNull(spell?.system?.sourceItem ?? spell?.sourceItem);
   const sourceClass = getNetherscrollsPrimarySpellClass(spell);
-  if (sourceClass) source.system.sourceItem ??= `class:${sourceClass}`;
+  if (sourceItem) source.system.sourceItem ??= sourceItem;
+  else if (sourceClass) source.system.sourceItem ??= `class:${sourceClass}`;
   if (source.system.sourceClass) delete source.system.sourceClass;
   const sourceName = toTrimmedStringOrNull(spell?.source ?? source?.system?.source?.book);
   source.system.source = buildNetherscrollsSpellSource(
@@ -3485,13 +3569,7 @@ function normalizeNetherscrollsFoundrySpellData(spell) {
     }
   );
   source.effects ??= [];
-  if (netherscrollsId) {
-    source.flags = source.flags ?? {};
-    source.flags[MODULE_ID] = {
-      ...(source.flags[MODULE_ID] ?? {}),
-      netherscrollsId,
-    };
-  }
+  applyNetherscrollsImportFlags(source, spell, netherscrollsId);
   return source;
 }
 
@@ -3505,13 +3583,15 @@ function slugifyNetherscrollsIdentifier(value) {
 }
 
 function buildNetherscrollsSpellSource(sourceName, source = {}) {
+  const foundrySource = getNetherscrollsFoundrySourceValue(source);
+  const foundrySourceBook = typeof foundrySource === "object" ? foundrySource?.book : foundrySource;
   return {
-    book: toTrimmedStringOrNull(sourceName) ?? "",
-    page: String(source?.page ?? source?.sourcePage ?? source?.system?.source?.page ?? ""),
-    custom: String(source?.customSource ?? source?.system?.source?.custom ?? ""),
-    license: String(source?.license ?? source?.system?.source?.license ?? ""),
-    revision: toNumber(source?.revision ?? source?.system?.source?.revision, 1),
-    rules: String(source?.rules ?? source?.system?.source?.rules ?? "2024"),
+    book: toTrimmedStringOrNull(sourceName ?? foundrySourceBook) ?? "",
+    page: String(source?.page ?? source?.sourcePage ?? foundrySource?.page ?? ""),
+    custom: String(source?.customSource ?? foundrySource?.custom ?? ""),
+    license: String(source?.license ?? foundrySource?.license ?? ""),
+    revision: toNumber(source?.revision ?? foundrySource?.revision, 1),
+    rules: String(source?.rules ?? foundrySource?.rules ?? "2024"),
   };
 }
 
@@ -3608,7 +3688,7 @@ function parseNetherscrollsActivationText(value) {
 }
 
 function inferNetherscrollsSpellDuration(source, text) {
-  const explicit = source?.system?.duration ?? source?.duration;
+  const explicit = source?.system?.duration ?? source?.foundryDuration ?? source?.duration;
   if (explicit && typeof explicit === "object") {
     return {
       value: String(explicit.value ?? ""),
@@ -3733,7 +3813,7 @@ function parseNetherscrollsMaterialText(text) {
 }
 
 function inferNetherscrollsSpellRange(source, text) {
-  const explicit = source?.system?.range ?? source?.range;
+  const explicit = source?.system?.range ?? source?.foundryRange ?? source?.range;
   if (explicit && typeof explicit === "object") {
     return normalizeNetherscrollsRangeObject(explicit);
   }
@@ -6606,9 +6686,13 @@ function duplicateNetherscrollsDocumentData(document) {
 
 function getNetherscrollsDocumentFlag(document, key) {
   try {
-    return document?.getFlag?.(MODULE_ID, key) ?? document?.flags?.[MODULE_ID]?.[key] ?? null;
+    const value = document?.getFlag?.(MODULE_ID, key) ?? document?.flags?.[MODULE_ID]?.[key] ?? null;
+    if (value != null || key !== "netherscrollsId") return value;
+    return document?.getFlag?.("netherscrolls", "id") ?? document?.flags?.netherscrolls?.id ?? null;
   } catch {
-    return document?.flags?.[MODULE_ID]?.[key] ?? null;
+    const value = document?.flags?.[MODULE_ID]?.[key] ?? null;
+    if (value != null || key !== "netherscrollsId") return value;
+    return document?.flags?.netherscrolls?.id ?? null;
   }
 }
 
@@ -7055,7 +7139,11 @@ function compactObject(value) {
 
 function getItemNetherId(item) {
   try {
-    return item?.getFlag?.(MODULE_ID, "netherscrollsId") ?? null;
+    return (
+      item?.getFlag?.(MODULE_ID, "netherscrollsId") ??
+      item?.getFlag?.("netherscrolls", "id") ??
+      null
+    );
   } catch (err) {
     console.warn(`${MODULE_ID} | Unable to read item netherscrollsId flag.`, err);
     return null;
