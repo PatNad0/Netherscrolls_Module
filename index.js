@@ -835,131 +835,268 @@ Hooks.once("init", () => {
   });
 });
 
-class NetherscrollsImportSettings extends (globalThis.FormApplication ?? globalThis.foundry?.appv1?.api?.FormApplication) {
-  static get defaultOptions() {
-    const options = {
-      id: "netherscrolls-import-settings",
-      title: "Import from Netherscroll [EXPERIMENTAL]",
-      template: `modules/${MODULE_ID}/templates/import-from-netherscroll.hbs`,
-      classes: ["netherscrolls-import-window"],
-      width: 520,
-      height: "auto",
-      submitOnChange: false,
-      closeOnSubmit: false,
-    };
-    return foundry?.utils?.mergeObject
-      ? foundry.utils.mergeObject(super.defaultOptions, options)
-      : { ...(super.defaultOptions ?? {}), ...options };
-  }
+const NetherscrollsImportSettings = createNetherscrollsImportSettingsClass();
 
-  getData(options) {
-    const context = super.getData(options) ?? {};
-    const apiKey = getNetherscrollsApiKey();
-    const today = new Date().toISOString().slice(0, 10);
+function createNetherscrollsImportSettingsClass() {
+  const applicationApi = globalThis.foundry?.applications?.api;
+  const ApplicationV2 = applicationApi?.ApplicationV2;
+  const HandlebarsApplicationMixin = applicationApi?.HandlebarsApplicationMixin;
 
-    return {
-      ...context,
-      hasApiKey: Boolean(apiKey),
-      importTypes: IMPORT_TYPES,
-      defaultSinceDate: today,
-    };
-  }
+  if (ApplicationV2 && HandlebarsApplicationMixin) {
+    const HandlebarsApplication = HandlebarsApplicationMixin(ApplicationV2);
 
-  activateListeners(html) {
-    super.activateListeners(html);
+    return class NetherscrollsImportSettingsV2 extends HandlebarsApplication {
+      static DEFAULT_OPTIONS = {
+        id: "netherscrolls-import-settings",
+        classes: ["netherscrolls-import-window"],
+        window: {
+          title: "Import from Netherscroll [EXPERIMENTAL]",
+        },
+        position: {
+          width: 520,
+          height: "auto",
+        },
+      };
 
-    const root = html?.[0] ?? html;
-    root?.classList?.add("ns-import-form");
-    const sinceCheckbox = root?.querySelector?.('[name="sinceEnabled"]');
-    const sinceDate = root?.querySelector?.('[name="sinceDate"]');
-    const sincePanel = root?.querySelector?.(".ns-import-since-panel");
+      static PARTS = {
+        form: {
+          template: `modules/${MODULE_ID}/templates/import-from-netherscroll.hbs`,
+        },
+      };
 
-    const updateSinceState = () => {
-      if (!sinceCheckbox || !sinceDate) return;
-      const enabled = Boolean(sinceCheckbox.checked);
-      sinceDate.disabled = !enabled;
-      sincePanel?.classList?.toggle("is-since-enabled", enabled);
-    };
+      async _prepareContext(options) {
+        const context = await super._prepareContext(options);
+        return getNetherscrollsImportSettingsContext(context);
+      }
 
-    sinceCheckbox?.addEventListener?.("change", updateSinceState);
-    updateSinceState();
-  }
-
-  async _updateObject(_event, formData) {
-    const apiKey = getNetherscrollsApiKey();
-    if (!apiKey) {
-      ui?.notifications?.warn?.(
-        "Netherscrolls API Key is missing. Set it in Module Settings."
-      );
-      return;
-    }
-
-    const selectedTypes = IMPORT_TYPES.filter((type) =>
-      isImportTypeSelected(formData, type.key)
-    );
-    if (!selectedTypes.length) {
-      ui?.notifications?.warn?.("Select at least one Netherscroll import type.");
-      return;
-    }
-
-    const sinceEnabled = Boolean(formData?.sinceEnabled);
-    const sinceDate = String(formData?.sinceDate ?? "").trim();
-    if (sinceEnabled && !sinceDate) {
-      ui?.notifications?.warn?.("Choose a date or disable Since.");
-      return;
-    }
-
-    const since = sinceEnabled ? normalizeNetherscrollsSinceDate(sinceDate) : null;
-    if (sinceEnabled && !since) {
-      ui?.notifications?.warn?.("Choose a valid Since date.");
-      return;
-    }
-
-    const requests = buildNetherscrollsImportRequests({
-      apiKey,
-      selectedTypes,
-      sinceDate: since,
-    });
-    const destinationPlan = buildNetherscrollsImportDestinationPlan(selectedTypes);
-    if (isDebugEnabled()) {
-      console.info(`${MODULE_ID} | Netherscrolls import requests prepared.`, {
-        requests: requests.map(sanitizeNetherscrollsImportRequest),
-        destinations: destinationPlan,
-      });
-    }
-
-    const unsupportedTypes = selectedTypes.filter(
-      (type) => !NETHERSCROLLS_IMPORT_ENDPOINTS[type.key]
-    );
-    if (unsupportedTypes.length) {
-      const labels = unsupportedTypes.map((type) => type.label.toLowerCase()).join(", ");
-      ui?.notifications?.warn?.(`Import endpoint not configured yet for: ${labels}.`);
-    }
-
-    let importedAny = false;
-    for (const request of requests) {
-      try {
-        const response = await sendNetherscrollsImportRequest(request);
-        const result = await applyNetherscrollsImportResponse(response, request.typeKey);
-        importedAny = true;
-        ui?.notifications?.info?.(formatNetherscrollsImportResult(request.typeKey, result));
-      } catch (err) {
-        console.error(`${MODULE_ID} | Netherscrolls ${request.typeKey} import failed.`, err);
-        ui?.notifications?.error?.(
-          `Netherscrolls ${getNetherscrollsImportTypeLabel(request.typeKey)} import failed: ${err?.message ?? err}`
+      async _onRender(context, options) {
+        await super._onRender(context, options);
+        activateNetherscrollsImportSettingsListeners(
+          this.element,
+          handleNetherscrollsImportSettingsSubmitEvent
         );
       }
-    }
-    if (importedAny) {
-      return;
+    };
+  }
+
+  if (ApplicationV2) {
+    return class NetherscrollsImportSettingsV2 extends ApplicationV2 {
+      static DEFAULT_OPTIONS = {
+        id: "netherscrolls-import-settings",
+        classes: ["netherscrolls-import-window"],
+        window: {
+          title: "Import from Netherscroll [EXPERIMENTAL]",
+        },
+        position: {
+          width: 520,
+          height: "auto",
+        },
+      };
+
+      async _prepareContext(options) {
+        const context = await super._prepareContext(options);
+        return getNetherscrollsImportSettingsContext(context);
+      }
+
+      async _renderHTML(context, _options) {
+        const html = await renderTemplate(
+          `modules/${MODULE_ID}/templates/import-from-netherscroll.hbs`,
+          context
+        );
+        const template = document.createElement("template");
+        template.innerHTML = String(html ?? "").trim();
+        return template.content;
+      }
+
+      _replaceHTML(result, content, _options) {
+        content.replaceChildren(result);
+      }
+
+      async _onRender(context, options) {
+        await super._onRender(context, options);
+        activateNetherscrollsImportSettingsListeners(
+          this.element,
+          handleNetherscrollsImportSettingsSubmitEvent
+        );
+      }
+    };
+  }
+
+  const FormApplicationClass =
+    globalThis.FormApplication ?? globalThis.foundry?.appv1?.api?.FormApplication;
+
+  return class NetherscrollsImportSettingsV1 extends FormApplicationClass {
+    static get defaultOptions() {
+      const options = {
+        id: "netherscrolls-import-settings",
+        title: "Import from Netherscroll [EXPERIMENTAL]",
+        template: `modules/${MODULE_ID}/templates/import-from-netherscroll.hbs`,
+        classes: ["netherscrolls-import-window"],
+        width: 520,
+        height: "auto",
+        submitOnChange: false,
+        closeOnSubmit: false,
+      };
+      return foundry?.utils?.mergeObject
+        ? foundry.utils.mergeObject(super.defaultOptions, options)
+        : { ...(super.defaultOptions ?? {}), ...options };
     }
 
-    const range = sinceEnabled ? `since ${sinceDate}` : "since forever";
-    const labels = selectedTypes.map((type) => type.label.toLowerCase()).join(", ");
-    ui?.notifications?.info?.(
-      `Netherscrolls import request prepared: ${labels} ${range}.`
-    );
+    getData(options) {
+      const context = super.getData(options) ?? {};
+      return getNetherscrollsImportSettingsContext(context);
+    }
+
+    activateListeners(html) {
+      super.activateListeners(html);
+      activateNetherscrollsImportSettingsListeners(html);
+    }
+
+    async _updateObject(_event, formData) {
+      await submitNetherscrollsImportSettings(formData);
+    }
+  };
+}
+
+function getNetherscrollsImportSettingsContext(context = {}) {
+  const apiKey = getNetherscrollsApiKey();
+  const today = new Date().toISOString().slice(0, 10);
+
+  return {
+    ...context,
+    hasApiKey: Boolean(apiKey),
+    importTypes: IMPORT_TYPES,
+    defaultSinceDate: today,
+  };
+}
+
+function activateNetherscrollsImportSettingsListeners(html, submitHandler = null) {
+  const root = html?.[0] ?? html;
+  const form = root?.matches?.("form") ? root : root?.querySelector?.("form");
+  const listenerRoot = form ?? root;
+
+  if (root === form || root?.classList?.contains("window-content")) {
+    root?.classList?.add("ns-import-form");
   }
+  form?.classList?.add("ns-import-form");
+
+  const sinceCheckbox = listenerRoot?.querySelector?.('[name="sinceEnabled"]');
+  const sinceDate = listenerRoot?.querySelector?.('[name="sinceDate"]');
+  const sincePanel = listenerRoot?.querySelector?.(".ns-import-since-panel");
+
+  const updateSinceState = () => {
+    if (!sinceCheckbox || !sinceDate) return;
+    const enabled = Boolean(sinceCheckbox.checked);
+    sinceDate.disabled = !enabled;
+    sincePanel?.classList?.toggle("is-since-enabled", enabled);
+  };
+
+  sinceCheckbox?.addEventListener?.("change", updateSinceState);
+  updateSinceState();
+
+  if (!submitHandler || !form || form.dataset.netherscrollsImportSubmitBound === "1") {
+    return;
+  }
+
+  form.dataset.netherscrollsImportSubmitBound = "1";
+  form.addEventListener("submit", submitHandler);
+}
+
+async function handleNetherscrollsImportSettingsSubmitEvent(event) {
+  event?.preventDefault?.();
+  event?.stopPropagation?.();
+
+  const form = event?.currentTarget;
+  const submitter = event?.submitter;
+  const submitButton = submitter?.matches?.('button[type="submit"]')
+    ? submitter
+    : form?.querySelector?.('button[type="submit"]');
+
+  if (submitButton) submitButton.disabled = true;
+  try {
+    await submitNetherscrollsImportSettings(getNetherscrollsFormDataObject(form));
+  } catch (err) {
+    console.error(`${MODULE_ID} | Netherscrolls import form submit failed.`, err);
+    ui?.notifications?.error?.(`Netherscrolls import failed: ${err?.message ?? err}`);
+  } finally {
+    if (submitButton) submitButton.disabled = false;
+  }
+}
+
+async function submitNetherscrollsImportSettings(formData) {
+  const apiKey = getNetherscrollsApiKey();
+  if (!apiKey) {
+    ui?.notifications?.warn?.(
+      "Netherscrolls API Key is missing. Set it in Module Settings."
+    );
+    return;
+  }
+
+  const selectedTypes = IMPORT_TYPES.filter((type) =>
+    isImportTypeSelected(formData, type.key)
+  );
+  if (!selectedTypes.length) {
+    ui?.notifications?.warn?.("Select at least one Netherscroll import type.");
+    return;
+  }
+
+  const sinceEnabled = Boolean(formData?.sinceEnabled);
+  const sinceDate = String(formData?.sinceDate ?? "").trim();
+  if (sinceEnabled && !sinceDate) {
+    ui?.notifications?.warn?.("Choose a date or disable Since.");
+    return;
+  }
+
+  const since = sinceEnabled ? normalizeNetherscrollsSinceDate(sinceDate) : null;
+  if (sinceEnabled && !since) {
+    ui?.notifications?.warn?.("Choose a valid Since date.");
+    return;
+  }
+
+  const requests = buildNetherscrollsImportRequests({
+    apiKey,
+    selectedTypes,
+    sinceDate: since,
+  });
+  const destinationPlan = buildNetherscrollsImportDestinationPlan(selectedTypes);
+  if (isDebugEnabled()) {
+    console.info(`${MODULE_ID} | Netherscrolls import requests prepared.`, {
+      requests: requests.map(sanitizeNetherscrollsImportRequest),
+      destinations: destinationPlan,
+    });
+  }
+
+  const unsupportedTypes = selectedTypes.filter(
+    (type) => !NETHERSCROLLS_IMPORT_ENDPOINTS[type.key]
+  );
+  if (unsupportedTypes.length) {
+    const labels = unsupportedTypes.map((type) => type.label.toLowerCase()).join(", ");
+    ui?.notifications?.warn?.(`Import endpoint not configured yet for: ${labels}.`);
+  }
+
+  let importedAny = false;
+  for (const request of requests) {
+    try {
+      const response = await sendNetherscrollsImportRequest(request);
+      const result = await applyNetherscrollsImportResponse(response, request.typeKey);
+      importedAny = true;
+      ui?.notifications?.info?.(formatNetherscrollsImportResult(request.typeKey, result));
+    } catch (err) {
+      console.error(`${MODULE_ID} | Netherscrolls ${request.typeKey} import failed.`, err);
+      ui?.notifications?.error?.(
+        `Netherscrolls ${getNetherscrollsImportTypeLabel(request.typeKey)} import failed: ${err?.message ?? err}`
+      );
+    }
+  }
+  if (importedAny) {
+    return;
+  }
+
+  const range = sinceEnabled ? `since ${sinceDate}` : "since forever";
+  const labels = selectedTypes.map((type) => type.label.toLowerCase()).join(", ");
+  ui?.notifications?.info?.(
+    `Netherscrolls import request prepared: ${labels} ${range}.`
+  );
 }
 
 Hooks.once("ready", () => {
