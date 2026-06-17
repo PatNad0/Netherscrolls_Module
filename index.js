@@ -50,6 +50,15 @@ const NETHERSCROLLS_IMPORT_ENDPOINTS = {
   spells: `${NETHERSCROLLS_API_BASE}/import/spells`,
 };
 const NETHERSCROLLS_DEFAULT_IMAGE = "icons/svg/item-bag.svg";
+const NETHERSCROLLS_IMPORT_IMAGE = NETHERSCROLLS_DEFAULT_IMAGE;
+const NETHERSCROLLS_GENERIC_IMPORT_IMAGES = new Set([
+  "icons/svg/item-bag.svg",
+  "systems/dnd5e/icons/svg/items/equipment.svg",
+  "systems/dnd5e/icons/svg/items/feature.svg",
+  "systems/dnd5e/icons/svg/items/loot.svg",
+  "systems/dnd5e/icons/svg/items/spell.svg",
+  "systems/dnd5e/icons/svg/items/tool.svg",
+]);
 const NETHERSCROLLS_VALID_IMAGE_EXTENSIONS = new Set([
   "apng",
   "avif",
@@ -1596,6 +1605,17 @@ function normalizeNetherscrollsImagePath(...values) {
   return NETHERSCROLLS_DEFAULT_IMAGE;
 }
 
+function normalizeNetherscrollsImportImagePath(...values) {
+  for (const value of values) {
+    const raw = toTrimmedStringOrNull(value);
+    if (!isValidNetherscrollsImagePath(raw)) continue;
+    if (NETHERSCROLLS_GENERIC_IMPORT_IMAGES.has(raw)) continue;
+    return raw;
+  }
+
+  return NETHERSCROLLS_IMPORT_IMAGE;
+}
+
 function isValidNetherscrollsImagePath(value) {
   const raw = toTrimmedStringOrNull(value);
   if (!raw) return false;
@@ -2545,7 +2565,7 @@ function normalizeNetherscrollsFeatData(feat) {
   const featData = {
     name: toTrimmedStringOrNull(source.name) ?? "Netherscrolls Feat",
     type: "feat",
-    img: normalizeNetherscrollsImagePath(source.img, source.image),
+    img: normalizeNetherscrollsImportImagePath(source.img, source.image),
     sort: 0,
     ownership: {
       default: 0,
@@ -2567,7 +2587,7 @@ function normalizeNetherscrollsFoundryFeatData(feat) {
   const netherscrollsId = getNetherscrollsSourceId(feat);
   source.name = toTrimmedStringOrNull(source.name) ?? "Netherscrolls Feat";
   source.type = "feat";
-  source.img = normalizeNetherscrollsImagePath(source.img, source.image);
+  source.img = normalizeNetherscrollsImportImagePath(source.img, source.image);
   source.sort ??= 0;
   source.ownership ??= { default: 0 };
   source.effects ??= [];
@@ -2732,7 +2752,7 @@ function normalizeNetherscrollsItemData(item) {
   const itemData = {
     name: toTrimmedStringOrNull(source.name) ?? "Netherscrolls Item",
     type: itemType,
-    img: normalizeNetherscrollsImagePath(source.img, source.image),
+    img: normalizeNetherscrollsImportImagePath(source.img, source.image),
     sort: 0,
     ownership: {
       default: 0,
@@ -2759,7 +2779,7 @@ function normalizeNetherscrollsFoundryItemData(item) {
     type: source.type,
     system: source.system,
   });
-  source.img = normalizeNetherscrollsImagePath(source.img, source.image);
+  source.img = normalizeNetherscrollsImportImagePath(source.img, source.image);
   source.sort ??= 0;
   source.ownership ??= { default: 0 };
   source.effects ??= [];
@@ -3427,6 +3447,35 @@ function hasNetherscrollsObjectEntries(value) {
   return Boolean(value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length);
 }
 
+function sanitizeNetherscrollsFormulaCount(value) {
+  const raw = toTrimmedStringOrNull(value);
+  if (!raw) return "";
+  if (/\d+d\d+/i.test(raw)) return "";
+  const allowed = /^(?:\d+(?:\.\d+)?|@[a-z_][\w.]*|[+\-*/%()\s])+$/i;
+  return allowed.test(raw) ? raw : "";
+}
+
+function sanitizeNetherscrollsTargetData(target) {
+  if (!target || typeof target !== "object") return target;
+  const sanitized = duplicateNetherscrollsData(target);
+  sanitized.affects = sanitized.affects ?? {};
+  sanitized.affects.count = sanitizeNetherscrollsFormulaCount(sanitized.affects.count);
+  if (sanitized.template && typeof sanitized.template === "object") {
+    sanitized.template.count = sanitizeNetherscrollsFormulaCount(sanitized.template.count);
+  }
+  return sanitized;
+}
+
+function sanitizeNetherscrollsActivityTargets(activities) {
+  if (!activities || typeof activities !== "object" || Array.isArray(activities)) return activities;
+  for (const activity of Object.values(activities)) {
+    if (activity?.target && typeof activity.target === "object") {
+      activity.target = sanitizeNetherscrollsTargetData(activity.target);
+    }
+  }
+  return activities;
+}
+
 function applyNetherscrollsImportFlags(documentData, source, netherscrollsId) {
   if (!netherscrollsId) return;
   documentData.flags = documentData.flags ?? {};
@@ -3472,15 +3521,15 @@ function normalizeNetherscrollsSpellData(spell) {
   const itemData = {
     name: toTrimmedStringOrNull(source.name) ?? "Netherscrolls Spell",
     type: "spell",
-    img: normalizeNetherscrollsImagePath(source.img, source.image),
+    img: normalizeNetherscrollsImportImagePath(source.img, source.image),
     sort: 0,
     ownership: {
       default: 0,
     },
     system: {
       activities: hasNetherscrollsObjectEntries(activities)
-        ? activities
-        : inferred.activity ? { [inferred.activity._id]: inferred.activity } : {},
+        ? sanitizeNetherscrollsActivityTargets(activities)
+        : inferred.activity ? sanitizeNetherscrollsActivityTargets({ [inferred.activity._id]: inferred.activity }) : {},
       activation: inferred.activation,
       ability: normalizeNetherscrollsSaveAbility(source?.system?.ability ?? source?.ability) ?? "",
       description: {
@@ -3492,7 +3541,7 @@ function normalizeNetherscrollsSpellData(spell) {
       materials: inferred.materials,
       properties: inferred.properties,
       range: inferred.range,
-      target: inferred.target,
+      target: sanitizeNetherscrollsTargetData(inferred.target),
       uses: normalizeNetherscrollsItemUses(source),
     },
     effects: [],
@@ -3522,7 +3571,7 @@ function normalizeNetherscrollsFoundrySpellData(spell) {
   const netherscrollsId = getNetherscrollsSourceId(spell);
   source.name = toTrimmedStringOrNull(source.name) ?? "Netherscrolls Spell";
   source.type = toTrimmedStringOrNull(source.type) ?? "spell";
-  source.img = normalizeNetherscrollsImagePath(source.img, source.image);
+  source.img = normalizeNetherscrollsImportImagePath(source.img, source.image);
   source.system = source.system ?? {};
   source.system.level = getNetherscrollsSpellLevel(source);
   source.system.identifier ??=
@@ -3545,12 +3594,14 @@ function normalizeNetherscrollsFoundrySpellData(spell) {
     source.system.properties = inferred.properties;
   }
   source.system.range ??= inferred.range;
-  source.system.target ??= inferred.target;
+  source.system.target = sanitizeNetherscrollsTargetData(source.system.target ?? inferred.target);
   if (!source.system.activities || !Object.keys(source.system.activities).length) {
     const activities = normalizeNetherscrollsActivities(spell);
     source.system.activities = hasNetherscrollsObjectEntries(activities)
-      ? activities
-      : inferred.activity ? { [inferred.activity._id]: inferred.activity } : {};
+      ? sanitizeNetherscrollsActivityTargets(activities)
+      : inferred.activity ? sanitizeNetherscrollsActivityTargets({ [inferred.activity._id]: inferred.activity }) : {};
+  } else {
+    source.system.activities = sanitizeNetherscrollsActivityTargets(source.system.activities);
   }
   const sourceItem = toTrimmedStringOrNull(spell?.system?.sourceItem ?? spell?.sourceItem);
   const sourceClass = getNetherscrollsPrimarySpellClass(spell);
@@ -3901,7 +3952,7 @@ function inferNetherscrollsSpellTarget(source, text) {
 function normalizeNetherscrollsTargetObject(target) {
   return {
     template: {
-      count: String(target?.template?.count ?? ""),
+      count: sanitizeNetherscrollsFormulaCount(target?.template?.count),
       contiguous: Boolean(target?.template?.contiguous),
       stationary: Boolean(target?.template?.stationary),
       type: String(target?.template?.type ?? ""),
@@ -3911,7 +3962,7 @@ function normalizeNetherscrollsTargetObject(target) {
       units: String(target?.template?.units ?? "ft"),
     },
     affects: {
-      count: String(target?.affects?.count ?? ""),
+      count: sanitizeNetherscrollsFormulaCount(target?.affects?.count),
       type: String(target?.affects?.type ?? ""),
       choice: Boolean(target?.affects?.choice),
       special: String(target?.affects?.special ?? ""),
