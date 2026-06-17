@@ -49,9 +49,9 @@ const NETHERSCROLLS_IMPORT_ENDPOINTS = {
   feats: `${NETHERSCROLLS_API_BASE}/import/feats`,
   spells: `${NETHERSCROLLS_API_BASE}/import/spells`,
 };
-const NETHERSCROLLS_DEFAULT_IMAGE = "icons/svg/item-bag.svg";
+const NETHERSCROLLS_DEFAULT_IMAGE = "https://i.postimg.cc/wBj0LZyj/image.png";
 const NETHERSCROLLS_IMPORT_IMAGE = NETHERSCROLLS_DEFAULT_IMAGE;
-const NETHERSCROLLS_GENERIC_IMPORT_IMAGES = new Set([
+const NETHERSCROLLS_GENERIC_IMAGE_PATHS = new Set([
   "icons/svg/item-bag.svg",
   "systems/dnd5e/icons/svg/items/equipment.svg",
   "systems/dnd5e/icons/svg/items/feature.svg",
@@ -1736,7 +1736,9 @@ function normalizeNetherscrollsReferenceValue(value) {
 function normalizeNetherscrollsImagePath(...values) {
   for (const value of values) {
     const raw = toTrimmedStringOrNull(value);
-    if (isValidNetherscrollsImagePath(raw)) return raw;
+    if (!isValidNetherscrollsImagePath(raw)) continue;
+    if (isNetherscrollsGenericImagePath(raw)) continue;
+    return raw;
   }
 
   return NETHERSCROLLS_DEFAULT_IMAGE;
@@ -1746,11 +1748,18 @@ function normalizeNetherscrollsImportImagePath(...values) {
   for (const value of values) {
     const raw = toTrimmedStringOrNull(value);
     if (!isValidNetherscrollsImagePath(raw)) continue;
-    if (NETHERSCROLLS_GENERIC_IMPORT_IMAGES.has(raw)) continue;
+    if (isNetherscrollsGenericImagePath(raw)) continue;
     return raw;
   }
 
   return NETHERSCROLLS_IMPORT_IMAGE;
+}
+
+function isNetherscrollsGenericImagePath(value) {
+  const raw = toTrimmedStringOrNull(value);
+  if (!raw) return false;
+  const path = raw.split(/[?#]/)[0]?.toLowerCase() ?? "";
+  return NETHERSCROLLS_GENERIC_IMAGE_PATHS.has(path);
 }
 
 function isValidNetherscrollsImagePath(value) {
@@ -1864,7 +1873,7 @@ function normalizeNetherscrollsSubclassData(subclassSource, classSource, { featu
   const itemData = {
     name: toTrimmedStringOrNull(source.name) ?? "Netherscrolls Subclass",
     type: "subclass",
-    img: normalizeNetherscrollsImagePath(source.img, source.image, classSource?.img, classSource?.image),
+    img: normalizeNetherscrollsImagePath(source.img, source.image),
     sort: 0,
     ownership: {
       default: 0,
@@ -1897,7 +1906,7 @@ function normalizeNetherscrollsFoundrySubclassData(subclassSource, classSource, 
   const netherscrollsId = getNetherscrollsSourceId(subclassSource);
   source.name = toTrimmedStringOrNull(source.name) ?? "Netherscrolls Subclass";
   source.type = "subclass";
-  source.img = normalizeNetherscrollsImagePath(source.img, source.image, classSource?.img, classSource?.image);
+  source.img = normalizeNetherscrollsImagePath(source.img, source.image);
   source.sort ??= 0;
   source.ownership ??= { default: 0 };
   source.effects ??= [];
@@ -2001,14 +2010,7 @@ function normalizeNetherscrollsClassFeatureData(descriptor) {
   const itemData = {
     name: featureName,
     type: "feat",
-    img: normalizeNetherscrollsImagePath(
-      feature?.img,
-      feature?.image,
-      descriptor.subclassSource?.img,
-      descriptor.subclassSource?.image,
-      descriptor.classSource?.img,
-      descriptor.classSource?.image
-    ),
+    img: normalizeNetherscrollsImagePath(feature?.img, feature?.image),
     sort: 0,
     ownership: {
       default: 0,
@@ -6854,6 +6856,7 @@ function buildNetherscrollsActorClassFeatureData(feature, ref, uuid, featureLeve
   delete data.folder;
   delete data.ownership;
   data.sort = 0;
+  data.img = normalizeNetherscrollsImagePath(data.img);
   data.flags = data.flags ?? {};
   data.flags[MODULE_ID] = {
     ...(data.flags[MODULE_ID] ?? {}),
