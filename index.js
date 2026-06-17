@@ -41,6 +41,50 @@ const IMPORT_PACKS = {
   spells: "spells",
   monster: "monster",
 };
+const NETHERSCROLLS_WORLD_IMPORT_PACKS = {
+  classes: {
+    name: "netherscrolls-classes",
+    label: "Netherscrolls Classes",
+    type: "Item",
+    system: "dnd5e",
+  },
+  classFeatures: {
+    name: "netherscrolls-class-features",
+    label: "Netherscrolls Class Features",
+    type: "Item",
+    system: "dnd5e",
+  },
+  items: {
+    name: "netherscrolls-items",
+    label: "Netherscrolls Items",
+    type: "Item",
+    system: "dnd5e",
+  },
+  feats: {
+    name: "netherscrolls-feats",
+    label: "Netherscrolls Feats",
+    type: "Item",
+    system: "dnd5e",
+  },
+  spells: {
+    name: "netherscrolls-spells",
+    label: "Netherscrolls Spells",
+    type: "Item",
+    system: "dnd5e",
+  },
+  monster: {
+    name: "netherscrolls-monster",
+    label: "Netherscrolls Monster",
+    type: "Actor",
+    system: "dnd5e",
+  },
+};
+const NETHERSCROLLS_IMPORT_PACK_OWNERSHIP = {
+  PLAYER: "OBSERVER",
+  TRUSTED: "OBSERVER",
+  ASSISTANT: "OWNER",
+  GAMEMASTER: "OWNER",
+};
 const NETHERSCROLLS_API_BASE = "https://api.netherscrolls.ca/api/foundry";
 const SYNC_ENDPOINT = `${NETHERSCROLLS_API_BASE}/sync`;
 const NETHERSCROLLS_IMPORT_ENDPOINTS = {
@@ -1244,9 +1288,8 @@ function sanitizeNetherscrollsImportRequest(request) {
 function buildNetherscrollsImportDestinationPlan(selectedTypes) {
   const destinations = {};
   for (const type of selectedTypes) {
-    const packName = IMPORT_PACKS[type.key] ?? type.key;
     destinations[type.key] = {
-      pack: `${MODULE_ID}.${packName}`,
+      pack: getNetherscrollsImportPackCollection(type.key),
       defaultImage: NETHERSCROLLS_DEFAULT_IMAGE,
     };
   }
@@ -1273,7 +1316,7 @@ function buildNetherscrollsImportDestinationPlan(selectedTypes) {
 
   if (destinations.classes) {
     destinations.classes.folderRule = "Classes / {class|subclass}";
-    destinations.classes.featurePack = `${MODULE_ID}.${IMPORT_PACKS.classFeatures}`;
+    destinations.classes.featurePack = getNetherscrollsImportPackCollection("classFeatures");
     destinations.classes.featureFolderRule = "Class Features / {class} / {feature|subclass}";
   }
 
@@ -1337,10 +1380,10 @@ async function applyNetherscrollsImportResponse(data, requestTypeKey = null) {
 }
 
 async function importNetherscrollsClasses(classes) {
-  const classPack = getNetherscrollsImportPack("classes");
+  const classPack = await getNetherscrollsImportPack("classes");
   if (!classPack) throw new Error("Netherscrolls Classes compendium pack was not found.");
 
-  const featurePack = getNetherscrollsImportPack("classFeatures");
+  const featurePack = await getNetherscrollsImportPack("classFeatures");
   if (!featurePack) throw new Error("Netherscrolls Class Features compendium pack was not found.");
 
   await ensureNetherscrollsImportPackWritable(classPack);
@@ -1501,7 +1544,7 @@ async function importNetherscrollsClassFeatureItems(classes, pack) {
 }
 
 async function importNetherscrollsItems(items) {
-  const pack = getNetherscrollsImportPack("items");
+  const pack = await getNetherscrollsImportPack("items");
   if (!pack) throw new Error("Netherscrolls Items compendium pack was not found.");
   await ensureNetherscrollsImportPackWritable(pack);
 
@@ -1554,7 +1597,7 @@ async function importNetherscrollsItems(items) {
 }
 
 async function importNetherscrollsFeats(feats) {
-  const pack = getNetherscrollsImportPack("feats");
+  const pack = await getNetherscrollsImportPack("feats");
   if (!pack) throw new Error("Netherscrolls Feats compendium pack was not found.");
   await ensureNetherscrollsImportPackWritable(pack);
 
@@ -1607,7 +1650,7 @@ async function importNetherscrollsFeats(feats) {
 }
 
 async function importNetherscrollsSpells(spells) {
-  const pack = getNetherscrollsImportPack("spells");
+  const pack = await getNetherscrollsImportPack("spells");
   if (!pack) throw new Error("Netherscrolls Spells compendium pack was not found.");
   await ensureNetherscrollsImportPackWritable(pack);
 
@@ -1775,9 +1818,60 @@ function isNetherscrollsDeleted(data) {
   return String(data?.deleted ?? "").toLowerCase() === "true";
 }
 
-function getNetherscrollsImportPack(typeKey) {
+function getNetherscrollsImportPackDefinition(typeKey) {
+  return NETHERSCROLLS_WORLD_IMPORT_PACKS[typeKey] ?? null;
+}
+
+function getNetherscrollsImportPackCollection(typeKey) {
+  const definition = getNetherscrollsImportPackDefinition(typeKey);
+  if (definition?.name) return `world.${definition.name}`;
+
   const packName = IMPORT_PACKS[typeKey] ?? typeKey;
-  return game?.packs?.get?.(`${MODULE_ID}.${packName}`) ?? null;
+  return `${MODULE_ID}.${packName}`;
+}
+
+async function getNetherscrollsImportPack(typeKey) {
+  const definition = getNetherscrollsImportPackDefinition(typeKey);
+  if (!definition) return game?.packs?.get?.(getNetherscrollsImportPackCollection(typeKey)) ?? null;
+
+  const collection = getNetherscrollsImportPackCollection(typeKey);
+  const existing = game?.packs?.get?.(collection);
+  if (existing) return existing;
+
+  return createNetherscrollsWorldImportPack(definition);
+}
+
+async function createNetherscrollsWorldImportPack(definition) {
+  const CompendiumCollectionClass =
+    globalThis.CompendiumCollection ??
+    globalThis.foundry?.documents?.collections?.CompendiumCollection;
+
+  if (typeof CompendiumCollectionClass?.createCompendium !== "function") {
+    throw new Error("Foundry world compendium creation API is unavailable.");
+  }
+
+  const metadata = {
+    name: definition.name,
+    label: definition.label,
+    type: definition.type,
+    package: "world",
+  };
+  if (definition.system) metadata.system = definition.system;
+
+  const pack = await CompendiumCollectionClass.createCompendium(metadata);
+  const resolvedPack = pack ?? game?.packs?.get?.(`world.${definition.name}`) ?? null;
+  if (resolvedPack?.configure) {
+    try {
+      await resolvedPack.configure({
+        locked: false,
+        ownership: NETHERSCROLLS_IMPORT_PACK_OWNERSHIP,
+      });
+    } catch (err) {
+      console.warn(`${MODULE_ID} | Unable to configure ${definition.label} compendium.`, err);
+    }
+  }
+
+  return resolvedPack;
 }
 
 function normalizeNetherscrollsClassData(classSource, { featureUuidByKey }) {
@@ -6755,7 +6849,7 @@ function getNetherscrollsItemGrantRefs(item) {
 }
 
 async function resolveNetherscrollsImportedClassLikeDocument(item) {
-  const pack = getNetherscrollsImportPack("classes");
+  const pack = await getNetherscrollsImportPack("classes");
   if (!pack?.getDocuments) return null;
   const itemType = toTrimmedStringOrNull(item?.type);
   const netherscrollsId = getNetherscrollsDocumentFlag(item, "netherscrollsId");
