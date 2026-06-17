@@ -85,6 +85,12 @@ const NETHERSCROLLS_IMPORT_PACK_OWNERSHIP = {
   ASSISTANT: "OWNER",
   GAMEMASTER: "OWNER",
 };
+const NETHERSCROLLS_IMPORT_SIDEBAR_FOLDER = {
+  name: "Netherscrolls",
+  type: "Compendium",
+  sorting: "m",
+  sort: 0,
+};
 const NETHERSCROLLS_API_BASE = "https://api.netherscrolls.ca/api/foundry";
 const SYNC_ENDPOINT = `${NETHERSCROLLS_API_BASE}/sync`;
 const NETHERSCROLLS_IMPORT_ENDPOINTS = {
@@ -1148,6 +1154,7 @@ Hooks.once("ready", () => {
   toggleNpcDeathSaveHook(game.settings.get(MODULE_ID, SETTINGS.npcDeathSave) === true);
   initEnhanceDialogInputHandlers();
   initChatNumberActionHandlers();
+  placeExistingNetherscrollsImportPacksInSidebarFolder();
 });
 
 Hooks.on("renderApplicationV1", (app, html) => {
@@ -1836,9 +1843,21 @@ async function getNetherscrollsImportPack(typeKey) {
 
   const collection = getNetherscrollsImportPackCollection(typeKey);
   const existing = game?.packs?.get?.(collection);
-  if (existing) return existing;
+  if (existing) return ensureNetherscrollsImportPackSidebarFolder(existing);
 
-  return createNetherscrollsWorldImportPack(definition);
+  const created = await createNetherscrollsWorldImportPack(definition);
+  return ensureNetherscrollsImportPackSidebarFolder(created);
+}
+
+async function placeExistingNetherscrollsImportPacksInSidebarFolder() {
+  try {
+    for (const typeKey of Object.keys(NETHERSCROLLS_WORLD_IMPORT_PACKS)) {
+      const pack = game?.packs?.get?.(getNetherscrollsImportPackCollection(typeKey));
+      if (pack) await ensureNetherscrollsImportPackSidebarFolder(pack);
+    }
+  } catch (err) {
+    console.warn(`${MODULE_ID} | Unable to place existing Netherscrolls compendiums in the sidebar folder.`, err);
+  }
 }
 
 async function createNetherscrollsWorldImportPack(definition) {
@@ -1872,6 +1891,52 @@ async function createNetherscrollsWorldImportPack(definition) {
   }
 
   return resolvedPack;
+}
+
+async function ensureNetherscrollsImportPackSidebarFolder(pack) {
+  if (!pack || typeof pack.setFolder !== "function") return pack;
+
+  try {
+    const folder = await findOrCreateNetherscrollsCompendiumFolder();
+    if (!folder?.id) return pack;
+    if (getDocumentId(pack.folder) !== getDocumentId(folder)) {
+      await pack.setFolder(folder);
+    }
+  } catch (err) {
+    console.warn(`${MODULE_ID} | Unable to place ${pack.title ?? pack.collection ?? "compendium"} in the Netherscrolls folder.`, err);
+  }
+
+  return pack;
+}
+
+async function findOrCreateNetherscrollsCompendiumFolder() {
+  const existing = getWorldFolders().find((folder) => {
+    const parentId = getDocumentId(folder?.folder);
+    return (
+      folder?.name === NETHERSCROLLS_IMPORT_SIDEBAR_FOLDER.name &&
+      folder?.type === NETHERSCROLLS_IMPORT_SIDEBAR_FOLDER.type &&
+      !parentId
+    );
+  });
+  if (existing) return existing;
+
+  const FolderDocumentClass =
+    globalThis.foundry?.documents?.Folder ??
+    globalThis.Folder;
+  const FolderClass = FolderDocumentClass?.implementation ?? FolderDocumentClass;
+  if (typeof FolderClass?.create !== "function") return null;
+
+  return FolderClass.create({ ...NETHERSCROLLS_IMPORT_SIDEBAR_FOLDER });
+}
+
+function getWorldFolders() {
+  const folders = game?.folders;
+  if (!folders) return [];
+  if (Array.isArray(folders)) return folders;
+  if (Array.isArray(folders.contents)) return folders.contents;
+  if (typeof folders.values === "function") return Array.from(folders.values());
+  if (typeof folders[Symbol.iterator] === "function") return Array.from(folders);
+  return [];
 }
 
 function normalizeNetherscrollsClassData(classSource, { featureUuidByKey }) {
