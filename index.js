@@ -1843,8 +1843,8 @@ async function getNetherscrollsImportPack(typeKey) {
 
 async function createNetherscrollsWorldImportPack(definition) {
   const CompendiumCollectionClass =
-    globalThis.CompendiumCollection ??
-    globalThis.foundry?.documents?.collections?.CompendiumCollection;
+    globalThis.foundry?.documents?.collections?.CompendiumCollection ??
+    globalThis.CompendiumCollection;
 
   if (typeof CompendiumCollectionClass?.createCompendium !== "function") {
     throw new Error("Foundry world compendium creation API is unavailable.");
