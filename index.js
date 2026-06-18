@@ -2175,8 +2175,8 @@ function normalizeNetherscrollsClassFeatureData(descriptor) {
       default: 0,
     },
     system: {
-      activities: feature?.system?.activities ?? {},
-      advancement: feature?.system?.advancement ?? {},
+      activities: normalizeNetherscrollsActivities(feature),
+      advancement: normalizeNetherscrollsClassFeatureAdvancement(feature),
       description: {
         value: buildNetherscrollsFeatureDescription(feature),
         chat: "",
@@ -2186,7 +2186,7 @@ function normalizeNetherscrollsClassFeatureData(descriptor) {
         ...feature,
         rules: feature?.rules ?? descriptor.classSource?.rules ?? (descriptor.classSource?.legacy ? "2014" : undefined),
       }),
-      cover: 0,
+      cover: normalizeNetherscrollsNullableNumber(feature?.system?.cover ?? feature?.cover),
       crewed: false,
       enchant: {
         max: "",
@@ -2194,6 +2194,7 @@ function normalizeNetherscrollsClassFeatureData(descriptor) {
       },
       prerequisites: {
         items: [],
+        level: null,
         repeatable: false,
       },
       properties: [],
@@ -2234,6 +2235,11 @@ function normalizeNetherscrollsClassFeatureData(descriptor) {
   return itemData;
 }
 
+function normalizeNetherscrollsClassFeatureAdvancement(feature) {
+  const advancement = feature?.system?.advancement ?? feature?.advancement;
+  return advancement && typeof advancement === "object" && !Array.isArray(advancement) ? advancement : {};
+}
+
 function getNetherscrollsClassFeatureDescriptors(classes) {
   const descriptors = [];
   for (const classSource of classes) {
@@ -2242,7 +2248,7 @@ function getNetherscrollsClassFeatureDescriptors(classes) {
     }
 
     for (const subclassSource of getNetherscrollsSubclasses(classSource)) {
-      for (const feature of getNetherscrollsSubclassFeatures(subclassSource)) {
+      for (const feature of getNetherscrollsSubclassFeatures(subclassSource, classSource)) {
         descriptors.push(buildNetherscrollsFeatureDescriptor(classSource, subclassSource, feature));
       }
     }
@@ -2680,6 +2686,24 @@ function isSameNetherscrollsSubclass(left, right, classSource) {
 }
 
 function getNetherscrollsClassFeatures(source) {
+  return mergeNetherscrollsFeatureLists(
+    getExplicitNetherscrollsClassFeatures(source),
+    inferNetherscrollsClassFeatures(source)
+  );
+}
+
+function getNetherscrollsSubclasses(source) {
+  return Array.isArray(source?.subclasses) ? source.subclasses : [];
+}
+
+function getNetherscrollsSubclassFeatures(source, classSource = null) {
+  return mergeNetherscrollsFeatureLists(
+    getExplicitNetherscrollsSubclassFeatures(source),
+    inferNetherscrollsSubclassFeatures(source, classSource)
+  );
+}
+
+function getExplicitNetherscrollsClassFeatures(source) {
   return Array.isArray(source?.classFeatures)
     ? source.classFeatures
     : Array.isArray(source?.features)
@@ -2687,16 +2711,284 @@ function getNetherscrollsClassFeatures(source) {
     : [];
 }
 
-function getNetherscrollsSubclasses(source) {
-  return Array.isArray(source?.subclasses) ? source.subclasses : [];
-}
-
-function getNetherscrollsSubclassFeatures(source) {
+function getExplicitNetherscrollsSubclassFeatures(source) {
   return Array.isArray(source?.subclassFeatures)
     ? source.subclassFeatures
     : Array.isArray(source?.features)
     ? source.features
     : [];
+}
+
+function mergeNetherscrollsFeatureLists(...lists) {
+  const merged = [];
+  const byKey = new Map();
+  for (const list of lists) {
+    if (!Array.isArray(list)) continue;
+    for (const feature of list) {
+      if (!feature || typeof feature !== "object") continue;
+      const key = getNetherscrollsFeatureMergeKey(feature);
+      if (!key) continue;
+      if (!byKey.has(key)) {
+        byKey.set(key, feature);
+        merged.push(feature);
+      }
+    }
+  }
+  return merged;
+}
+
+function getNetherscrollsFeatureMergeKey(feature) {
+  const title = getNetherscrollsFeatureTitle(feature);
+  const level = Math.max(1, Math.trunc(toNumber(feature?.level, 1)));
+  const id = feature?.inferredFrom ? null : getNetherscrollsSourceId(feature);
+  return id ? `id:${id}` : `${level}:${slugifyNetherscrollsIdentifier(title)}`;
+}
+
+function inferNetherscrollsClassFeatures(source) {
+  const progressionFeatures = extractNetherscrollsProgressionFeatures(source);
+  const sectionFeatures = extractNetherscrollsFeatureSections(source, {
+    fallbackFeatures: progressionFeatures,
+    scope: "class",
+  });
+  return mergeNetherscrollsFeatureLists(sectionFeatures, progressionFeatures);
+}
+
+function inferNetherscrollsSubclassFeatures(source, classSource = null) {
+  return extractNetherscrollsFeatureSections(source, {
+    fallbackFeatures: [],
+    scope: "subclass",
+    classSource,
+  });
+}
+
+function buildInferredNetherscrollsFeature(source, { title, level, descriptionHtml = "", inferredFrom = "", choiceType = "" }) {
+  const featureTitle = toTrimmedStringOrNull(title) ?? "Class Feature";
+  const normalizedLevel = Math.max(1, Math.min(20, Math.trunc(toNumber(level, 1))));
+  const keySource = `${getNetherscrollsSourceId(source) ?? normalizeNetherscrollsName(source?.name)}:${normalizedLevel}:${featureTitle}:${inferredFrom}`;
+  return {
+    _id: buildNetherscrollsSyntheticSourceId("feature", keySource),
+    level: normalizedLevel,
+    title: featureTitle,
+    description: descriptionHtml,
+    descriptionHtml,
+    selectable: 0,
+    choices: [],
+    choiceType,
+    inferredFrom,
+  };
+}
+
+function extractNetherscrollsProgressionFeatures(source) {
+  const table = getNetherscrollsProgressionTable(source);
+  const columns = Array.isArray(table?.columns) ? table.columns : [];
+  const rows = Array.isArray(table?.rows) ? table.rows : [];
+  if (!columns.length || !rows.length) return [];
+
+  const features = [];
+  for (const row of rows) {
+    const level = getNetherscrollsProgressionRowLevel(row, columns);
+    if (!level) continue;
+
+    for (const value of getNetherscrollsProgressionFeatureValues(row, columns)) {
+      for (const title of splitNetherscrollsFeatureTitles(value)) {
+        features.push(buildInferredNetherscrollsFeature(source, {
+          title,
+          level,
+          descriptionHtml: "",
+          inferredFrom: "progression",
+        }));
+      }
+    }
+  }
+
+  return mergeNetherscrollsFeatureLists(features);
+}
+
+function getNetherscrollsProgressionRowLevel(row, columns) {
+  const direct = getNetherscrollsProgressionRowValue(row, "level", 0);
+  const directLevel = parseNetherscrollsFeatureLevel(direct);
+  if (directLevel) return directLevel;
+
+  for (const [index, column] of columns.entries()) {
+    const label = getNetherscrollsProgressionColumnLabel(column).toLowerCase();
+    const key = getNetherscrollsProgressionColumnKey(column);
+    if (!/\blevel\b/.test(label) && !/\blevel\b/.test(String(key ?? "").toLowerCase())) continue;
+    const level = parseNetherscrollsFeatureLevel(getNetherscrollsProgressionRowValue(row, column, index));
+    if (level) return level;
+  }
+
+  return null;
+}
+
+function getNetherscrollsProgressionFeatureValues(row, columns) {
+  const values = [];
+  for (const [index, column] of columns.entries()) {
+    const label = getNetherscrollsProgressionColumnLabel(column).toLowerCase();
+    const key = String(getNetherscrollsProgressionColumnKey(column) ?? "").toLowerCase();
+    if (!/\bfeatures?\b/.test(label) && !/\bfeatures?\b/.test(key)) continue;
+    values.push(getNetherscrollsProgressionRowValue(row, column, index));
+  }
+
+  if (!values.length) {
+    values.push(row?.features, row?.classFeatures, row?.feature);
+  }
+
+  return values.filter((value) => value != null);
+}
+
+function getNetherscrollsProgressionColumnKey(column) {
+  if (typeof column === "string") return column;
+  return column?.key ?? column?.id ?? column?.name ?? column?.title ?? column?.label ?? null;
+}
+
+function getNetherscrollsProgressionRowValue(row, column, index = null) {
+  if (!row) return null;
+  if (Array.isArray(row)) return index == null ? null : row[index];
+  if (typeof column === "string") return row[column];
+  const key = getNetherscrollsProgressionColumnKey(column);
+  return key != null ? row[key] : null;
+}
+
+function splitNetherscrollsFeatureTitles(value) {
+  const titles = [];
+  for (const entry of flattenNetherscrollsFeatureTitleValues(value)) {
+    const raw = toTrimmedStringOrNull(entry);
+    if (!raw) continue;
+    const withBreaks = raw
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<\/li>\s*<li>/gi, "\n")
+      .replace(/<[^>]+>/g, " ");
+    for (const piece of withBreaks.split(/[,;\n]+/)) {
+      const title = normalizeNetherscrollsInferredFeatureTitle(piece);
+      if (title) titles.push(title);
+    }
+  }
+  return titles;
+}
+
+function flattenNetherscrollsFeatureTitleValues(value) {
+  if (Array.isArray(value)) return value.flatMap(flattenNetherscrollsFeatureTitleValues);
+  if (value && typeof value === "object") {
+    if (value.title || value.name) return [value.title ?? value.name];
+    return Object.values(value).flatMap(flattenNetherscrollsFeatureTitleValues);
+  }
+  return [value];
+}
+
+function normalizeNetherscrollsInferredFeatureTitle(value) {
+  const title = toTrimmedStringOrNull(String(value ?? "").replace(/^[\s*\u2022\-\u2013\u2014]+/, ""));
+  if (!title) return null;
+  if (/^(?:-|\u2013|\u2014|none|n\/a|null)$/i.test(title)) return null;
+  if (/^\+?\d+(?:d\d+)?$/i.test(title)) return null;
+  return title;
+}
+
+function extractNetherscrollsFeatureSections(source, { fallbackFeatures = [], scope, classSource = null } = {}) {
+  const progressionByTitle = buildNetherscrollsFeatureTitleLookup(fallbackFeatures);
+  const features = [];
+  for (const section of getNetherscrollsStructuredSections(source)) {
+    const rawTitle = toTrimmedStringOrNull(section?.title ?? section?.name);
+    if (!rawTitle) continue;
+
+    const sectionTitle = stripNetherscrollsFeatureLevelPrefix(rawTitle);
+    if (isNetherscrollsGenericClassSectionTitle(sectionTitle)) continue;
+
+    const titleKey = slugifyNetherscrollsIdentifier(sectionTitle);
+    const fallback = progressionByTitle.get(titleKey);
+    const level =
+      parseNetherscrollsFeatureLevel(section?.level ?? section?.classLevel ?? section?.unlockLevel) ??
+      parseNetherscrollsFeatureLevel(rawTitle) ??
+      fallback?.level ??
+      null;
+    if (!level) continue;
+
+    features.push(buildInferredNetherscrollsFeature(classSource ?? source, {
+      title: fallback?.title ?? sectionTitle,
+      level,
+      descriptionHtml: buildNetherscrollsSectionDescription(section),
+      inferredFrom: scope === "subclass" ? "subclass-section" : "class-section",
+      choiceType: inferNetherscrollsFeatureChoiceType(sectionTitle, classSource ?? source),
+    }));
+  }
+
+  return features;
+}
+
+function buildNetherscrollsFeatureTitleLookup(features) {
+  const lookup = new Map();
+  for (const feature of features) {
+    const title = getNetherscrollsFeatureTitle(feature);
+    lookup.set(slugifyNetherscrollsIdentifier(title), feature);
+  }
+  return lookup;
+}
+
+function getNetherscrollsStructuredSections(source) {
+  const sections = [];
+  collectNetherscrollsSections(sections, source?.sections);
+  collectNetherscrollsSections(sections, source?.summary?.sections);
+  collectNetherscrollsSections(sections, source?.presentation?.sections);
+  return sections;
+}
+
+function collectNetherscrollsSections(target, sections) {
+  if (!Array.isArray(sections)) return;
+  for (const section of sections) {
+    if (!section || typeof section !== "object") continue;
+    target.push(section);
+    collectNetherscrollsSections(target, section.sections);
+  }
+}
+
+function buildNetherscrollsSectionDescription(section) {
+  return joinNetherscrollsHtmlSections([
+    getNetherscrollsHtmlValue(section?.descriptionHtml),
+    getNetherscrollsHtmlValue(section?.contentHtml),
+    getNetherscrollsHtmlValue(section?.description),
+    renderNetherscrollsBlocks(section?.blocks),
+  ]);
+}
+
+function parseNetherscrollsFeatureLevel(value) {
+  if (value == null || value === "") return null;
+  const number = Number(value);
+  if (Number.isFinite(number) && number >= 1 && number <= 20) return Math.trunc(number);
+  const raw = String(value);
+  const match = /\b([1-9]|1[0-9]|20)(?:st|nd|rd|th)?(?:\s*[- ]?level|\s*level)?\b/i.exec(raw);
+  if (!match) return null;
+  return Math.max(1, Math.min(20, Math.trunc(Number(match[1]))));
+}
+
+function stripNetherscrollsFeatureLevelPrefix(value) {
+  return (
+    toTrimmedStringOrNull(
+      String(value ?? "").replace(/^\s*(?:at\s+)?(?:[1-9]|1[0-9]|20)(?:st|nd|rd|th)?(?:\s*[- ]?level)?\s*[:.-]\s*/i, "")
+    ) ?? String(value ?? "")
+  );
+}
+
+function isNetherscrollsGenericClassSectionTitle(value) {
+  const normalized = slugifyNetherscrollsIdentifier(value);
+  return [
+    "class-features",
+    "subclasses",
+    "creating-a-class",
+    "creating-a-character",
+    "hit-points",
+    "proficiencies",
+    "equipment",
+    "starting-equipment",
+    "quick-build",
+    "multiclassing",
+  ].includes(normalized);
+}
+
+function inferNetherscrollsFeatureChoiceType(title, source) {
+  const rawSubclassType = toTrimmedStringOrNull(source?.subclassType);
+  if (!rawSubclassType) return "";
+  const titleKey = slugifyNetherscrollsIdentifier(title).replace(/s$/, "");
+  const subclassTypeKey = slugifyNetherscrollsIdentifier(rawSubclassType).replace(/s$/, "");
+  return titleKey === subclassTypeKey ? "subclass" : "";
 }
 
 function getNetherscrollsFeatureTitle(feature) {
@@ -3698,7 +3990,6 @@ function normalizeNetherscrollsItemUses(source) {
     spent: Math.max(0, toNumber(uses.spent, 0)),
     max: toTrimmedStringOrNull(uses.max) ?? "",
     recovery: Array.isArray(uses.recovery) ? uses.recovery : [],
-    autoDestroy: Boolean(uses.autoDestroy),
   };
 }
 
