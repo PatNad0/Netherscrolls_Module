@@ -133,6 +133,8 @@ const NETHERSCROLLS_FEAT_FOLDERS = [
   { key: "feat", label: "Feats", sort: 1000 },
   { key: "demifeat", label: "Demifeats", sort: 2000 },
 ];
+const NETHERSCROLLS_MAIN_CLASS_FEATURE_FOLDER_NAME = "Main Class";
+const NETHERSCROLLS_LEGACY_CLASS_FEATURE_FOLDER_NAME = "Class Features";
 const NETHERSCROLLS_SPELL_LEVEL_FOLDERS = Array.from(
   { length: NETHERSCROLLS_MAX_SPELL_LEVEL + 1 },
   (_value, level) => ({
@@ -1539,6 +1541,10 @@ async function importNetherscrollsClassFeatureItems(classes, pack) {
       }
     }
   }
+
+  await cleanupNetherscrollsLegacyClassFeatureFolders(pack).catch((err) => {
+    console.warn("Netherscrolls legacy class feature folder cleanup failed.", err);
+  });
 
   return {
     uuidByKey,
@@ -5230,13 +5236,7 @@ async function ensureNetherscrollsClassFeatureFolder(pack, descriptor, folderCac
   });
 
   if (descriptor.scope === "class") {
-    return findOrCreatePackFolder(pack, {
-      cache: folderCache,
-      name: "Main Class",
-      type: "Item",
-      parent: classFolder,
-      sort: 1000,
-    });
+    return ensureNetherscrollsMainClassFeatureFolder(pack, classFolder, folderCache);
   }
 
   return findOrCreatePackFolder(pack, {
@@ -5245,6 +5245,63 @@ async function ensureNetherscrollsClassFeatureFolder(pack, descriptor, folderCac
     type: "Item",
     parent: classFolder,
     sort: 2000,
+  });
+}
+
+async function ensureNetherscrollsMainClassFeatureFolder(pack, classFolder, folderCache) {
+  await pack.getIndex({ fields: ["folder", "name", "type"] }).catch(() => null);
+
+  const existing = findPackFolder(pack, {
+    name: NETHERSCROLLS_MAIN_CLASS_FEATURE_FOLDER_NAME,
+    type: "Item",
+    parent: classFolder,
+  });
+  const legacy = findPackFolder(pack, {
+    name: NETHERSCROLLS_LEGACY_CLASS_FEATURE_FOLDER_NAME,
+    type: "Item",
+    parent: classFolder,
+  });
+
+  if (existing) {
+    await updatePackFolderSort(existing, pack, 1000);
+    if (legacy && getDocumentId(legacy) !== getDocumentId(existing)) {
+      await movePackFolderDocuments(pack, legacy, existing);
+      await deletePackFolderIfEmpty(pack, legacy);
+    }
+    return existing;
+  }
+
+  if (legacy) {
+    if (typeof legacy.update === "function") {
+      await legacy.update(
+        {
+          name: NETHERSCROLLS_MAIN_CLASS_FEATURE_FOLDER_NAME,
+          sorting: "m",
+          sort: 1000,
+        },
+        { pack: pack.collection }
+      );
+      folderCache?.set(
+        getPackFolderCacheKey({
+          name: NETHERSCROLLS_MAIN_CLASS_FEATURE_FOLDER_NAME,
+          type: "Item",
+          parent: classFolder,
+        }),
+        legacy
+      );
+      return legacy;
+    }
+
+    await updatePackFolderSort(legacy, pack, 1000);
+    return legacy;
+  }
+
+  return findOrCreatePackFolder(pack, {
+    cache: folderCache,
+    name: NETHERSCROLLS_MAIN_CLASS_FEATURE_FOLDER_NAME,
+    type: "Item",
+    parent: classFolder,
+    sort: 1000,
   });
 }
 
@@ -5358,15 +5415,11 @@ async function ensureNetherscrollsSpellFolder(pack, spellData, folderCache) {
 }
 
 async function findOrCreatePackFolder(pack, { cache, name, type, parent, sort = null }) {
-  const parentId = getDocumentId(parent);
-  const cacheKey = `${parentId ?? "root"}:${type}:${name}`;
+  const cacheKey = getPackFolderCacheKey({ name, type, parent });
   if (cache?.has(cacheKey)) return cache.get(cacheKey);
 
   await pack.getIndex({ fields: ["folder", "name", "type"] }).catch(() => null);
-  const existing = getPackFolders(pack).find((folder) => {
-    const folderParentId = getDocumentId(folder.folder);
-    return folder.name === name && folder.type === type && folderParentId === parentId;
-  });
+  const existing = findPackFolder(pack, { name, type, parent });
 
   if (existing) {
     await updatePackFolderSort(existing, pack, sort);
@@ -5387,6 +5440,81 @@ async function findOrCreatePackFolder(pack, { cache, name, type, parent, sort = 
   );
   cache?.set(cacheKey, created);
   return created;
+}
+
+function getPackFolderCacheKey({ name, type, parent }) {
+  const parentId = getDocumentId(parent);
+  return `${parentId ?? "root"}:${type}:${name}`;
+}
+
+function findPackFolder(pack, { name, type, parent }) {
+  const parentId = getDocumentId(parent);
+  return getPackFolders(pack).find((folder) => {
+    const folderParentId = getDocumentId(folder.folder);
+    return folder.name === name && folder.type === type && folderParentId === parentId;
+  });
+}
+
+async function cleanupNetherscrollsLegacyClassFeatureFolders(pack) {
+  await pack.getIndex({ fields: ["folder", "name", "type"] }).catch(() => null);
+  for (const folder of getPackFolders(pack)) {
+    if (folder?.name !== NETHERSCROLLS_LEGACY_CLASS_FEATURE_FOLDER_NAME) continue;
+    if (folder?.type !== "Item") continue;
+    const target = findPackFolder(pack, {
+      name: NETHERSCROLLS_MAIN_CLASS_FEATURE_FOLDER_NAME,
+      type: "Item",
+      parent: folder.folder,
+    });
+    if (target) await movePackFolderDocuments(pack, folder, target);
+    await deletePackFolderIfEmpty(pack, folder);
+  }
+}
+
+async function movePackFolderDocuments(pack, fromFolder, toFolder) {
+  const fromFolderId = getDocumentId(fromFolder);
+  const toFolderId = getDocumentId(toFolder);
+  if (!fromFolderId || !toFolderId || fromFolderId === toFolderId) return 0;
+
+  await pack.getIndex({ fields: ["folder"] }).catch(() => null);
+  const entries = getPackIndexEntries(pack).filter((entry) => getDocumentId(entry.folder) === fromFolderId);
+  const updates = entries
+    .map((entry) => getDocumentId(entry))
+    .filter(Boolean)
+    .map((id) => ({
+      _id: id,
+      folder: toFolderId,
+    }));
+  if (!updates.length) return 0;
+
+  const DocumentClass = getPackDocumentClass(pack);
+  if (typeof DocumentClass?.updateDocuments !== "function") return 0;
+
+  await DocumentClass.updateDocuments(updates, { pack: pack.collection });
+  for (const entry of entries) {
+    entry.folder = toFolderId;
+  }
+  return updates.length;
+}
+
+function getPackDocumentClass(pack) {
+  const documentName = pack?.documentName ?? pack?.metadata?.type ?? "Item";
+  const DocumentClass = globalThis?.[documentName];
+  return DocumentClass?.implementation ?? DocumentClass ?? null;
+}
+
+async function deletePackFolderIfEmpty(pack, folder) {
+  const folderId = getDocumentId(folder);
+  if (!folderId || typeof folder?.delete !== "function") return false;
+
+  await pack.getIndex({ fields: ["folder"] }).catch(() => null);
+  const hasChildFolder = getPackFolders(pack).some((candidate) => getDocumentId(candidate.folder) === folderId);
+  if (hasChildFolder) return false;
+
+  const hasDocuments = getPackIndexEntries(pack).some((entry) => getDocumentId(entry.folder) === folderId);
+  if (hasDocuments) return false;
+
+  await folder.delete({ pack: pack.collection });
+  return true;
 }
 
 async function updatePackFolderSort(folder, pack, sort) {
@@ -5411,6 +5539,16 @@ function getPackFolders(pack) {
   if (Array.isArray(folders.contents)) return folders.contents;
   if (typeof folders.values === "function") return Array.from(folders.values());
   if (typeof folders[Symbol.iterator] === "function") return Array.from(folders);
+  return [];
+}
+
+function getPackIndexEntries(packOrIndex) {
+  const index = packOrIndex?.index ?? packOrIndex;
+  if (!index) return [];
+  if (Array.isArray(index)) return index;
+  if (Array.isArray(index.contents)) return index.contents;
+  if (typeof index.values === "function") return Array.from(index.values());
+  if (typeof index[Symbol.iterator] === "function") return Array.from(index);
   return [];
 }
 
