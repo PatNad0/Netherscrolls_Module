@@ -1492,13 +1492,14 @@ async function importNetherscrollsClasses(classes) {
 
 async function importNetherscrollsClassFeatureItems(classes, pack) {
   const existingByNetherId = await getCompendiumDocumentsByNetherId(pack);
+  const descriptors = getNetherscrollsClassFeatureItemDescriptors(classes);
   const featureData = [];
   const deleteIds = [];
   const uuidByKey = new Map();
   const folderCache = new Map();
   await ensureNetherscrollsClassFeatureFolderTree(pack, folderCache);
 
-  for (const descriptor of getNetherscrollsClassFeatureItemDescriptors(classes)) {
+  for (const descriptor of descriptors) {
     if (descriptor.deleted) {
       const existing = descriptor.netherscrollsId
         ? existingByNetherId.get(String(descriptor.netherscrollsId))
@@ -1516,6 +1517,8 @@ async function importNetherscrollsClassFeatureItems(classes, pack) {
     if (folder?.id) prepared.folder = folder.id;
     featureData.push(prepared);
   }
+
+  deleteIds.push(...(await getStaleNetherscrollsClassFeatureDocumentIds(pack, classes, descriptors)));
 
   const ItemClass = Item?.implementation ?? Item;
   const uniqueDeleteIds = Array.from(new Set(deleteIds));
@@ -2276,6 +2279,54 @@ function getNetherscrollsClassFeatureItemDescriptors(classes) {
     descriptors.push(...buildNetherscrollsFeatureChoiceDescriptors(descriptor));
   }
   return descriptors;
+}
+
+async function getStaleNetherscrollsClassFeatureDocumentIds(pack, classes, descriptors) {
+  const classIds = new Set(classes.map((source) => getNetherscrollsSourceId(source)).filter(Boolean).map(String));
+  const classIdentifiers = new Set(classes.map(normalizeNetherscrollsClassIdentifier).filter(Boolean));
+  const classNames = new Set(
+    classes
+      .map((source) => normalizeNetherscrollsName(source?.name).toLowerCase())
+      .filter(Boolean)
+  );
+  const expectedIds = new Set(descriptors.map((descriptor) => descriptor.netherscrollsId).filter(Boolean).map(String));
+  const expectedKeys = new Set(descriptors.map((descriptor) => descriptor.key).filter(Boolean));
+  const documents = await pack.getDocuments();
+  const staleIds = [];
+
+  for (const document of documents) {
+    if (!isNetherscrollsImportedClassFeatureDocument(document)) continue;
+    if (!isNetherscrollsClassFeatureOwnedByImportedClass(document, { classIds, classIdentifiers, classNames })) continue;
+
+    const netherscrollsId = getItemNetherId(document);
+    const featureKey = getNetherscrollsDocumentFlag(document, "featureKey");
+    if (netherscrollsId && expectedIds.has(String(netherscrollsId))) continue;
+    if (featureKey && expectedKeys.has(featureKey)) continue;
+    if (document?.id) staleIds.push(document.id);
+  }
+
+  return staleIds;
+}
+
+function isNetherscrollsImportedClassFeatureDocument(document) {
+  if (document?.type !== "feat") return false;
+  return Boolean(
+    getNetherscrollsDocumentFlag(document, "featureScope") ||
+      getNetherscrollsDocumentFlag(document, "featureKey") ||
+      getNetherscrollsDocumentFlag(document, "parentClassNetherscrollsId") ||
+      getNetherscrollsDocumentFlag(document, "parentClassIdentifier")
+  );
+}
+
+function isNetherscrollsClassFeatureOwnedByImportedClass(document, { classIds, classIdentifiers, classNames }) {
+  const parentClassId = toTrimmedStringOrNull(getNetherscrollsDocumentFlag(document, "parentClassNetherscrollsId"));
+  if (parentClassId && classIds.has(parentClassId)) return true;
+
+  const parentClassIdentifier = toTrimmedStringOrNull(getNetherscrollsDocumentFlag(document, "parentClassIdentifier"));
+  if (parentClassIdentifier && classIdentifiers.has(parentClassIdentifier)) return true;
+
+  const parentClassName = normalizeNetherscrollsName(getNetherscrollsDocumentFlag(document, "parentClass")).toLowerCase();
+  return Boolean(parentClassName && classNames.has(parentClassName));
 }
 
 function buildNetherscrollsFeatureDescriptor(classSource, subclassSource, feature) {
