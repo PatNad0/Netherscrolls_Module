@@ -1498,7 +1498,7 @@ async function importNetherscrollsClassFeatureItems(classes, pack) {
   const folderCache = new Map();
   await ensureNetherscrollsClassFeatureFolderTree(pack, folderCache);
 
-  for (const descriptor of getNetherscrollsClassFeatureDescriptors(classes)) {
+  for (const descriptor of getNetherscrollsClassFeatureItemDescriptors(classes)) {
     if (descriptor.deleted) {
       const existing = descriptor.netherscrollsId
         ? existingByNetherId.get(String(descriptor.netherscrollsId))
@@ -2199,15 +2199,15 @@ function normalizeNetherscrollsClassFeatureData(descriptor) {
         period: "",
       },
       prerequisites: {
-        items: [],
+        items: getNetherscrollsClassFeaturePrerequisiteItems(descriptor),
         level: null,
         repeatable: false,
       },
       properties: [],
       requirements: buildNetherscrollsFeatureRequirement(descriptor),
       type: {
-        value: "class",
-        subtype: "",
+        value: getNetherscrollsClassFeatureTypeValue(descriptor),
+        subtype: getNetherscrollsClassFeatureSubtype(descriptor),
       },
       uses: normalizeNetherscrollsItemUses(feature),
     },
@@ -2229,6 +2229,11 @@ function normalizeNetherscrollsClassFeatureData(descriptor) {
     choiceType: toTrimmedStringOrNull(feature?.choiceType) ?? "",
     choices: normalizeNetherscrollsFeatureChoices(feature),
   };
+  if (descriptor.scope === "choice") {
+    itemData.flags[MODULE_ID].parentFeatureKey = descriptor.parentFeatureKey ?? "";
+    itemData.flags[MODULE_ID].parentFeature = getNetherscrollsFeatureTitle(descriptor.parentFeature);
+    itemData.flags[MODULE_ID].choiceIndex = descriptor.choiceIndex ?? 0;
+  }
   if (descriptor.subclassSource) {
     itemData.flags[MODULE_ID].parentSubclass = toTrimmedStringOrNull(descriptor.subclassSource?.name) ?? "";
     itemData.flags[MODULE_ID].parentSubclassIdentifier = normalizeNetherscrollsSubclassIdentifier(
@@ -2263,6 +2268,15 @@ function getNetherscrollsClassFeatureDescriptors(classes) {
   return descriptors;
 }
 
+function getNetherscrollsClassFeatureItemDescriptors(classes) {
+  const descriptors = [];
+  for (const descriptor of getNetherscrollsClassFeatureDescriptors(classes)) {
+    descriptors.push(descriptor);
+    descriptors.push(...buildNetherscrollsFeatureChoiceDescriptors(descriptor));
+  }
+  return descriptors;
+}
+
 function buildNetherscrollsFeatureDescriptor(classSource, subclassSource, feature) {
   const scope = subclassSource ? "subclass" : "class";
   const level = Math.max(1, Math.trunc(toNumber(feature?.level, 1)));
@@ -2283,6 +2297,61 @@ function buildNetherscrollsFeatureDescriptor(classSource, subclassSource, featur
       isNetherscrollsDeleted(classSource) ||
       Boolean(subclassSource && isNetherscrollsDeleted(subclassSource)),
   };
+}
+
+function buildNetherscrollsFeatureChoiceDescriptors(parentDescriptor) {
+  if (!shouldBuildNetherscrollsItemChoiceAdvancement(parentDescriptor.feature)) return [];
+
+  const descriptors = [];
+  for (const [index, choice] of getNetherscrollsFeatureChoices(parentDescriptor.feature).entries()) {
+    const title = getNetherscrollsFeatureChoiceTitle(choice, index);
+    if (!title) continue;
+
+    const choiceKey = getNetherscrollsFeatureChoiceKey(parentDescriptor, choice, index);
+    const netherscrollsId = getNetherscrollsSourceId(choice) ?? buildNetherscrollsSyntheticSourceId("feature-choice", choiceKey);
+    descriptors.push({
+      key: choiceKey,
+      scope: "choice",
+      netherscrollsId,
+      classSource: parentDescriptor.classSource,
+      subclassSource: parentDescriptor.subclassSource,
+      parentFeature: parentDescriptor.feature,
+      parentFeatureKey: parentDescriptor.key,
+      choiceIndex: index,
+      choiceType: toTrimmedStringOrNull(parentDescriptor.feature?.choiceType) ?? "",
+      feature: buildNetherscrollsFeatureChoiceItem(parentDescriptor, choice, index, netherscrollsId),
+      level: parentDescriptor.level,
+      deleted: parentDescriptor.deleted || isNetherscrollsDeleted(choice),
+    });
+  }
+
+  return descriptors;
+}
+
+function buildNetherscrollsFeatureChoiceItem(parentDescriptor, choice, index, netherscrollsId) {
+  const parentFeature = parentDescriptor.feature;
+  const title = getNetherscrollsFeatureChoiceTitle(choice, index);
+  const source = choice && typeof choice === "object" ? choice : {};
+  return {
+    ...source,
+    _id: netherscrollsId,
+    title,
+    name: title,
+    level: parentDescriptor.level,
+    descriptionHtml: buildNetherscrollsFeatureChoiceDescription(choice),
+    choices: [],
+    selectable: 0,
+    choiceType: "",
+    source: source.source ?? parentFeature?.source,
+    rules: source.rules ?? parentFeature?.rules,
+    img: source.img ?? source.image ?? parentFeature?.img ?? parentFeature?.image,
+  };
+}
+
+function getNetherscrollsFeatureChoiceKey(parentDescriptor, choice, index) {
+  const choiceId = getNetherscrollsSourceId(choice);
+  const choiceKey = choiceId ?? `${index + 1}-${slugifyNetherscrollsIdentifier(getNetherscrollsFeatureChoiceTitle(choice, index))}`;
+  return `${parentDescriptor.key}:choice:${choiceKey}`;
 }
 
 function buildNetherscrollsClassFeatureKey(classSource, subclassSource, feature) {
@@ -2326,6 +2395,10 @@ function buildNetherscrollsClassAdvancement(source, { featureUuidByKey }) {
       advancement,
       buildNetherscrollsItemGrantAdvancement(descriptor.feature, uuid, descriptor.level, descriptor.key)
     );
+    addNetherscrollsAdvancement(
+      advancement,
+      buildNetherscrollsItemChoiceAdvancement(descriptor, featureUuidByKey)
+    );
   }
 
   return advancement;
@@ -2341,6 +2414,10 @@ function buildNetherscrollsSubclassAdvancement(source, classSource, { featureUui
     addNetherscrollsAdvancement(
       advancement,
       buildNetherscrollsItemGrantAdvancement(descriptor.feature, uuid, descriptor.level, descriptor.key)
+    );
+    addNetherscrollsAdvancement(
+      advancement,
+      buildNetherscrollsItemChoiceAdvancement(descriptor, featureUuidByKey)
     );
   }
   return advancement;
@@ -2509,6 +2586,64 @@ function buildNetherscrollsItemGrantAdvancement(feature, uuid, level, key) {
   };
 }
 
+function buildNetherscrollsItemChoiceAdvancement(descriptor, featureUuidByKey) {
+  const feature = descriptor.feature;
+  if (!shouldBuildNetherscrollsItemChoiceAdvancement(feature)) return null;
+
+  const choiceDescriptors = buildNetherscrollsFeatureChoiceDescriptors(descriptor);
+  const pool = choiceDescriptors
+    .map((choiceDescriptor, index) => {
+      const uuid = featureUuidByKey.get(choiceDescriptor.key);
+      return uuid
+        ? {
+            uuid,
+            sort: (index + 1) * 100000,
+          }
+        : null;
+    })
+    .filter(Boolean);
+  if (!pool.length) return null;
+
+  const count = getNetherscrollsFeatureChoiceCount(feature, pool.length);
+  const level = descriptor.level;
+  return {
+    _id: buildNetherscrollsAdvancementId(feature, `choice-${descriptor.key}`),
+    type: "ItemChoice",
+    configuration: {
+      allowDrops: true,
+      choices: {
+        [String(level)]: {
+          count,
+          replacement: Boolean(feature?.replacement ?? feature?.replaceable ?? feature?.allowReplacement),
+        },
+      },
+      pool,
+      restriction: {
+        level: "",
+        list: [],
+        subtype: getNetherscrollsItemChoiceSubtype(feature),
+        type: getNetherscrollsItemChoiceType(feature),
+      },
+      sorting: "a",
+      spell: null,
+      type: getNetherscrollsItemChoiceType(feature),
+    },
+    value: {
+      added: {},
+      replaced: {},
+    },
+    level,
+    title: getNetherscrollsFeatureTitle(feature),
+    hint: stripNetherscrollsHtmlTags(buildNetherscrollsFeatureDescription(feature)),
+    flags: {
+      [MODULE_ID]: {
+        featureKey: descriptor.key,
+        choiceType: toTrimmedStringOrNull(feature?.choiceType) ?? "",
+      },
+    },
+  };
+}
+
 function buildNetherscrollsAdvancementId(source, key) {
   return buildNetherscrollsStableId(`adv:${getNetherscrollsSourceId(source) ?? source?.name ?? ""}:${key}`);
 }
@@ -2518,6 +2653,34 @@ function shouldGrantNetherscrollsFeature(feature) {
   const choiceType = toTrimmedStringOrNull(feature?.choiceType)?.toLowerCase();
   if (choiceType === "subclass") return false;
   return true;
+}
+
+function shouldBuildNetherscrollsItemChoiceAdvancement(feature) {
+  const choices = getNetherscrollsFeatureChoices(feature);
+  if (!choices.length) return false;
+
+  const choiceType = toTrimmedStringOrNull(feature?.choiceType)?.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (choiceType === "subclass") return false;
+  if (choiceType && ["feature", "feat", "fightingstyle", "classfeature", "classfeat"].includes(choiceType)) return true;
+  return /fighting\s+style/i.test(getNetherscrollsFeatureTitle(feature));
+}
+
+function getNetherscrollsFeatureChoiceCount(feature, poolSize) {
+  const explicit = toNumber(feature?.selectable ?? feature?.count, Number.NaN);
+  if (Number.isFinite(explicit) && explicit > 0) return Math.min(poolSize, Math.trunc(explicit));
+  return 1;
+}
+
+function getNetherscrollsItemChoiceType(_feature) {
+  return "feat";
+}
+
+function getNetherscrollsItemChoiceSubtype(feature) {
+  const choiceType = toTrimmedStringOrNull(feature?.choiceType)?.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (choiceType === "fightingstyle" || /fighting\s+style/i.test(getNetherscrollsFeatureTitle(feature))) {
+    return "fightingStyle";
+  }
+  return "";
 }
 
 function isNetherscrollsAbilityScoreImprovementFeature(feature) {
@@ -3122,11 +3285,28 @@ function getNetherscrollsFeatureChoices(feature) {
 }
 
 function normalizeNetherscrollsFeatureChoices(feature) {
-  return getNetherscrollsFeatureChoices(feature).map((choice) => ({
+  return getNetherscrollsFeatureChoices(feature).map((choice, index) => ({
     id: getNetherscrollsSourceId(choice) ?? "",
-    title: toTrimmedStringOrNull(choice?.title ?? choice?.name) ?? "",
-    description: toTrimmedStringOrNull(choice?.descriptionHtml ?? choice?.description) ?? "",
+    title: getNetherscrollsFeatureChoiceTitle(choice, index),
+    description: buildNetherscrollsFeatureChoiceDescription(choice),
   }));
+}
+
+function getNetherscrollsFeatureChoiceTitle(choice, index = 0) {
+  if (choice && typeof choice === "object") {
+    return toTrimmedStringOrNull(choice.title ?? choice.name ?? choice.label) ?? `Choice ${index + 1}`;
+  }
+  return toTrimmedStringOrNull(choice) ?? `Choice ${index + 1}`;
+}
+
+function buildNetherscrollsFeatureChoiceDescription(choice) {
+  if (!choice || typeof choice !== "object") return "";
+  return joinNetherscrollsHtmlSections([
+    getNetherscrollsHtmlValue(choice?.descriptionHtml),
+    getNetherscrollsHtmlValue(choice?.contentHtml),
+    getNetherscrollsHtmlValue(choice?.description),
+    renderNetherscrollsBlocks(choice?.blocks),
+  ]);
 }
 
 function buildNetherscrollsFeatureRequirement(descriptor) {
@@ -3135,6 +3315,20 @@ function buildNetherscrollsFeatureRequirement(descriptor) {
     return `${toTrimmedStringOrNull(descriptor.subclassSource?.name) ?? "Subclass"} ${level}`;
   }
   return `${toTrimmedStringOrNull(descriptor.classSource?.name) ?? "Class"} ${level}`;
+}
+
+function getNetherscrollsClassFeatureTypeValue(descriptor) {
+  return descriptor.scope === "choice" ? getNetherscrollsItemChoiceType(descriptor.parentFeature) : "class";
+}
+
+function getNetherscrollsClassFeatureSubtype(descriptor) {
+  return descriptor.scope === "choice" ? getNetherscrollsItemChoiceSubtype(descriptor.parentFeature) : "";
+}
+
+function getNetherscrollsClassFeaturePrerequisiteItems(descriptor) {
+  if (descriptor.scope !== "choice") return [];
+  const parentTitle = getNetherscrollsFeatureTitle(descriptor.parentFeature);
+  return [slugifyNetherscrollsIdentifier(parentTitle)].filter(Boolean);
 }
 
 function buildNetherscrollsClassDescription(source) {
@@ -3236,7 +3430,12 @@ function formatNetherscrollsProgressionCell(value) {
 function renderNetherscrollsFeatureChoices(feature) {
   const choices = normalizeNetherscrollsFeatureChoices(feature).filter((choice) => choice.title);
   if (!choices.length) return "";
-  const items = choices.map((choice) => `<li>${escapeHtml(choice.title)}</li>`).join("");
+  const items = choices
+    .map((choice) => {
+      const description = toTrimmedStringOrNull(choice.description);
+      return `<li><strong>${escapeHtml(choice.title)}</strong>${description ? ` ${description}` : ""}</li>`;
+    })
+    .join("");
   return `<h3>Choices</h3><ul>${items}</ul>`;
 }
 
@@ -5235,7 +5434,7 @@ async function ensureNetherscrollsClassFeatureFolder(pack, descriptor, folderCac
     sort: 1000,
   });
 
-  if (descriptor.scope === "class") {
+  if (descriptor.scope === "class" || (descriptor.scope === "choice" && !descriptor.subclassSource)) {
     return ensureNetherscrollsMainClassFeatureFolder(pack, classFolder, folderCache);
   }
 
