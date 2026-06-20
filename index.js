@@ -1753,6 +1753,7 @@ function isNetherscrollsClassLike(data) {
       (Array.isArray(data.classFeatures) ||
         Array.isArray(data.subclasses) ||
         data.progression ||
+        data.progressionTable ||
         data.presentation?.progressionTable)
   );
 }
@@ -2300,7 +2301,7 @@ function buildNetherscrollsFeatureDescriptor(classSource, subclassSource, featur
 }
 
 function buildNetherscrollsFeatureChoiceDescriptors(parentDescriptor) {
-  if (!shouldBuildNetherscrollsItemChoiceAdvancement(parentDescriptor.feature)) return [];
+  if (!shouldCreateNetherscrollsFeatureChoiceItems(parentDescriptor.feature)) return [];
 
   const descriptors = [];
   for (const [index, choice] of getNetherscrollsFeatureChoices(parentDescriptor.feature).entries()) {
@@ -2656,13 +2657,16 @@ function shouldGrantNetherscrollsFeature(feature) {
 }
 
 function shouldBuildNetherscrollsItemChoiceAdvancement(feature) {
+  return shouldCreateNetherscrollsFeatureChoiceItems(feature);
+}
+
+function shouldCreateNetherscrollsFeatureChoiceItems(feature) {
   const choices = getNetherscrollsFeatureChoices(feature);
   if (!choices.length) return false;
 
   const choiceType = toTrimmedStringOrNull(feature?.choiceType)?.toLowerCase().replace(/[^a-z0-9]/g, "");
   if (choiceType === "subclass") return false;
-  if (choiceType && ["feature", "feat", "fightingstyle", "classfeature", "classfeat"].includes(choiceType)) return true;
-  return /fighting\s+style/i.test(getNetherscrollsFeatureTitle(feature));
+  return true;
 }
 
 function getNetherscrollsFeatureChoiceCount(feature, poolSize) {
@@ -2855,10 +2859,9 @@ function isSameNetherscrollsSubclass(left, right, classSource) {
 }
 
 function getNetherscrollsClassFeatures(source) {
-  return mergeNetherscrollsFeatureLists(
-    getExplicitNetherscrollsClassFeatures(source),
-    inferNetherscrollsClassFeatures(source)
-  );
+  if (Array.isArray(source?.classFeatures)) return source.classFeatures;
+  if (Array.isArray(source?.features)) return source.features;
+  return inferNetherscrollsClassFeatures(source);
 }
 
 function getNetherscrollsSubclasses(source) {
@@ -2866,26 +2869,9 @@ function getNetherscrollsSubclasses(source) {
 }
 
 function getNetherscrollsSubclassFeatures(source, classSource = null) {
-  return mergeNetherscrollsFeatureLists(
-    getExplicitNetherscrollsSubclassFeatures(source),
-    inferNetherscrollsSubclassFeatures(source, classSource)
-  );
-}
-
-function getExplicitNetherscrollsClassFeatures(source) {
-  return Array.isArray(source?.classFeatures)
-    ? source.classFeatures
-    : Array.isArray(source?.features)
-    ? source.features
-    : [];
-}
-
-function getExplicitNetherscrollsSubclassFeatures(source) {
-  return Array.isArray(source?.subclassFeatures)
-    ? source.subclassFeatures
-    : Array.isArray(source?.features)
-    ? source.features
-    : [];
+  if (Array.isArray(source?.subclassFeatures)) return source.subclassFeatures;
+  if (Array.isArray(source?.features)) return source.features;
+  return inferNetherscrollsSubclassFeatures(source, classSource);
 }
 
 function mergeNetherscrollsFeatureLists(...lists) {
@@ -3377,7 +3363,25 @@ function getNetherscrollsHtmlValue(value) {
 }
 
 function joinNetherscrollsHtmlSections(sections) {
-  return sections.map((section) => toTrimmedStringOrNull(section)).filter(Boolean).join("\n");
+  const normalized = new Set();
+  const uniqueSections = [];
+  for (const section of sections) {
+    const html = toTrimmedStringOrNull(section);
+    if (!html) continue;
+
+    const key = normalizeNetherscrollsHtmlSectionKey(html);
+    if (key && normalized.has(key)) continue;
+    if (key) normalized.add(key);
+    uniqueSections.push(html);
+  }
+  return uniqueSections.join("\n");
+}
+
+function normalizeNetherscrollsHtmlSectionKey(value) {
+  return stripNetherscrollsHtmlTags(value)
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function renderNetherscrollsProgressionTable(source) {
@@ -3401,7 +3405,11 @@ function renderNetherscrollsProgressionTable(source) {
 }
 
 function getNetherscrollsProgressionTable(source) {
-  const table = source?.presentation?.progressionTable ?? source?.progression;
+  const table =
+    source?.presentation?.progressionTable ??
+    source?.progressionTable ??
+    source?.presentation?.progression ??
+    source?.progression;
   if (!table || typeof table !== "object") return null;
   const columns = Array.isArray(table.columns) ? table.columns : [];
   const rows = Array.isArray(table.rows) ? table.rows : [];
@@ -3409,7 +3417,13 @@ function getNetherscrollsProgressionTable(source) {
   return {
     columns,
     rows,
-    spellcasting: table.spellcasting ?? source?.progression?.spellcasting ?? {},
+    spellcasting:
+      table.spellcasting ??
+      source?.presentation?.progressionTable?.spellcasting ??
+      source?.progressionTable?.spellcasting ??
+      source?.presentation?.progression?.spellcasting ??
+      source?.progression?.spellcasting ??
+      {},
   };
 }
 

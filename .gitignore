@@ -1,4 +1,5 @@
 # Local debug/reference files
+.env
 Character_element.txt
 séléné.txt
 README.md
