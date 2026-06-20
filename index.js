@@ -5628,6 +5628,7 @@ async function ensureNetherscrollsSpellFolder(pack, spellData, folderCache) {
 }
 
 async function findOrCreatePackFolder(pack, { cache, name, type, parent, sort = null }) {
+  const parentId = getDocumentId(parent);
   const cacheKey = getPackFolderCacheKey({ name, type, parent });
   if (cache?.has(cacheKey)) return cache.get(cacheKey);
 
