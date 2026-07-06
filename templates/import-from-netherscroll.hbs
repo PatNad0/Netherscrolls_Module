@@ -19,6 +19,23 @@
         {{/each}}
       </div>
     </fieldset>
+    <fieldset class="ns-import-panel ns-import-sources-panel">
+      <legend>Sources</legend>
+      {{#if sourceLoadError}}
+        <div class="ns-import-source-message is-error">Sources unavailable: {{sourceLoadError}}</div>
+      {{else}}
+        {{#if hasSources}}
+          <select name="sources" multiple size="8" aria-label="Netherscroll sources">
+            {{#each sources}}
+              <option value="{{value}}">{{label}}</option>
+            {{/each}}
+          </select>
+          <div class="ns-import-source-message">Leave empty to import all sources.</div>
+        {{else}}
+          <div class="ns-import-source-message">No importable sources returned.</div>
+        {{/if}}
+      {{/if}}
+    </fieldset>
 
     <fieldset class="ns-import-panel ns-import-since-panel">
       <legend>Range</legend>

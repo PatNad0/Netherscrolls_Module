@@ -93,6 +93,8 @@ const NETHERSCROLLS_IMPORT_SIDEBAR_FOLDER = {
 };
 const NETHERSCROLLS_API_BASE = "https://api.netherscrolls.ca/api/foundry";
 const SYNC_ENDPOINT = `${NETHERSCROLLS_API_BASE}/sync`;
+const NETHERSCROLLS_SOURCES_ENDPOINT = `${NETHERSCROLLS_API_BASE}/sources`;
+const NETHERSCROLLS_SOURCE_IMPORT_ENDPOINT = `${NETHERSCROLLS_API_BASE}/import/source`;
 const NETHERSCROLLS_IMPORT_ENDPOINTS = {
   classes: `${NETHERSCROLLS_API_BASE}/import/classes`,
   items: `${NETHERSCROLLS_API_BASE}/import/items`,
@@ -905,7 +907,7 @@ function createNetherscrollsImportSettingsClass() {
           title: "Import from Netherscroll [EXPERIMENTAL]",
         },
         position: {
-          width: 520,
+          width: 720,
           height: "auto",
         },
       };
@@ -940,7 +942,7 @@ function createNetherscrollsImportSettingsClass() {
           title: "Import from Netherscroll [EXPERIMENTAL]",
         },
         position: {
-          width: 520,
+          width: 720,
           height: "auto",
         },
       };
@@ -984,7 +986,7 @@ function createNetherscrollsImportSettingsClass() {
         title: "Import from Netherscroll [EXPERIMENTAL]",
         template: `modules/${MODULE_ID}/templates/import-from-netherscroll.hbs`,
         classes: ["netherscrolls-import-window"],
-        width: 520,
+        width: 720,
         height: "auto",
         submitOnChange: false,
         closeOnSubmit: false,
@@ -994,8 +996,8 @@ function createNetherscrollsImportSettingsClass() {
         : { ...(super.defaultOptions ?? {}), ...options };
     }
 
-    getData(options) {
-      const context = super.getData(options) ?? {};
+    async getData(options) {
+      const context = (await super.getData(options)) ?? {};
       return getNetherscrollsImportSettingsContext(context);
     }
 
@@ -1010,16 +1012,83 @@ function createNetherscrollsImportSettingsClass() {
   };
 }
 
-function getNetherscrollsImportSettingsContext(context = {}) {
+async function getNetherscrollsImportSettingsContext(context = {}) {
   const apiKey = getNetherscrollsApiKey();
   const today = new Date().toISOString().slice(0, 10);
+  const sourceContext = apiKey
+    ? await getNetherscrollsImportSourceContext(apiKey)
+    : { sources: [], sourceLoadError: null };
 
   return {
     ...context,
     hasApiKey: Boolean(apiKey),
     importTypes: IMPORT_TYPES,
+    sources: sourceContext.sources,
+    sourceLoadError: sourceContext.sourceLoadError,
+    hasSources: sourceContext.sources.length > 0,
     defaultSinceDate: today,
   };
+}
+
+async function getNetherscrollsImportSourceContext(apiKey) {
+  try {
+    const response = await fetch(NETHERSCROLLS_SOURCES_ENDPOINT, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        "x-api-key": apiKey,
+      },
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok) {
+      const message =
+        data?.error?.message ??
+        data?.message ??
+        `Source list failed (${response.status} ${response.statusText}).`;
+      throw new Error(message);
+    }
+
+    return {
+      sources: normalizeNetherscrollsImportSources(data),
+      sourceLoadError: null,
+    };
+  } catch (err) {
+    console.error(`${MODULE_ID} | Unable to load Netherscrolls sources.`, err);
+    return {
+      sources: [],
+      sourceLoadError: err?.message ?? String(err ?? "Unable to load sources."),
+    };
+  }
+}
+
+function normalizeNetherscrollsImportSources(data) {
+  const rows = Array.isArray(data?.data?.sources)
+    ? data.data.sources
+    : Array.isArray(data?.sources)
+      ? data.sources
+      : Array.isArray(data)
+        ? data
+        : [];
+
+  return rows
+    .map((source) => {
+      const value = normalizeNetherscrollsReferenceValue(
+        source?._id ?? source?.id ?? source?.netherscrollsId ?? source?.key
+      );
+      if (!value) return null;
+
+      const name = toTrimmedStringOrNull(source?.name) ?? value;
+      const abbreviation = toTrimmedStringOrNull(source?.abbreviation);
+      const key = toTrimmedStringOrNull(source?.key);
+      const detailParts = [abbreviation, key].filter(Boolean);
+      return {
+        value,
+        label: detailParts.length ? `${name} (${detailParts.join(" / ")})` : name,
+        sortName: name.toLowerCase(),
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.sortName.localeCompare(b.sortName));
 }
 
 function activateNetherscrollsImportSettingsListeners(html, submitHandler = null) {
@@ -1105,10 +1174,12 @@ async function submitNetherscrollsImportSettings(formData) {
     return;
   }
 
+  const selectedSources = getSelectedNetherscrollsSourceValues(formData);
   const requests = buildNetherscrollsImportRequests({
     apiKey,
     selectedTypes,
     sinceDate: since,
+    selectedSources,
   });
   const destinationPlan = buildNetherscrollsImportDestinationPlan(selectedTypes);
   if (isDebugEnabled()) {
@@ -1130,9 +1201,13 @@ async function submitNetherscrollsImportSettings(formData) {
   for (const request of requests) {
     try {
       const response = await sendNetherscrollsImportRequest(request);
-      const result = await applyNetherscrollsImportResponse(response, request.typeKey);
+      const result = await applyNetherscrollsImportResponse(response, request.typeKey, request.typeKeys);
       importedAny = true;
-      ui?.notifications?.info?.(formatNetherscrollsImportResult(request.typeKey, result));
+      ui?.notifications?.info?.(
+        request.typeKey === "source"
+          ? formatNetherscrollsSourceImportResult(result, request.typeKeys)
+          : formatNetherscrollsImportResult(request.typeKey, result)
+      );
     } catch (err) {
       console.error(`${MODULE_ID} | Netherscrolls ${request.typeKey} import failed.`, err);
       ui?.notifications?.error?.(
@@ -1231,7 +1306,12 @@ function getNetherscrollsFormDataObject(form, formData) {
   if (formData?.object && typeof formData.object === "object") return formData.object;
 
   const source = formData instanceof FormData ? formData : new FormData(form);
-  return Object.fromEntries(source.entries());
+  const data = Object.fromEntries(source.entries());
+  for (const key of new Set(Array.from(source.keys()))) {
+    const values = source.getAll(key);
+    if (values.length > 1) data[key] = values;
+  }
+  return data;
 }
 
 function isImportTypeSelected(formData, key) {
@@ -1245,7 +1325,33 @@ function normalizeNetherscrollsSinceDate(value) {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
-function buildNetherscrollsImportRequests({ apiKey, selectedTypes, sinceDate }) {
+function getSelectedNetherscrollsSourceValues(formData) {
+  const raw = formData?.sources ?? formData?.source;
+  const values = Array.isArray(raw) ? raw : [raw];
+  return Array.from(
+    new Set(
+      values
+        .flatMap((value) => String(value ?? "").split(","))
+        .map((value) => toTrimmedStringOrNull(value))
+        .filter(Boolean)
+    )
+  );
+}
+
+function buildNetherscrollsImportRequests({ apiKey, selectedTypes, sinceDate, selectedSources = [] }) {
+  if (selectedSources.length) {
+    const supportedTypes = selectedTypes.filter((type) => NETHERSCROLLS_IMPORT_ENDPOINTS[type.key]);
+    if (!supportedTypes.length) return [];
+    return [
+      buildNetherscrollsSourceImportRequest({
+        apiKey,
+        selectedTypes: supportedTypes,
+        selectedSources,
+        sinceDate,
+      }),
+    ];
+  }
+
   return selectedTypes
     .map((type) =>
       buildNetherscrollsImportRequest({
@@ -1255,6 +1361,37 @@ function buildNetherscrollsImportRequests({ apiKey, selectedTypes, sinceDate }) 
       })
     )
     .filter(Boolean);
+}
+
+function buildNetherscrollsSourceImportRequest({
+  apiKey,
+  selectedTypes,
+  selectedSources,
+  sinceDate,
+}) {
+  const url = new URL(NETHERSCROLLS_SOURCE_IMPORT_ENDPOINT);
+  for (const source of selectedSources) {
+    url.searchParams.append("sources", source);
+  }
+  if (sinceDate) url.searchParams.set("since", sinceDate);
+
+  return {
+    typeKey: "source",
+    typeKeys: selectedTypes.map((type) => type.key),
+    url: url.toString(),
+    options: {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        "x-api-key": apiKey,
+      },
+    },
+    payload: {
+      datasets: selectedTypes.map((type) => type.key),
+      sources: selectedSources,
+      since: sinceDate || null,
+    },
+  };
 }
 
 function buildNetherscrollsImportRequest({ apiKey, typeKey, sinceDate }) {
@@ -1344,6 +1481,19 @@ function formatNetherscrollsImportResult(typeKey, result) {
   return `Netherscrolls ${label} imported: ${imported} created, ${updated} updated, ${removed} removed.`;
 }
 
+function formatNetherscrollsSourceImportResult(result, typeKeys = []) {
+  const labels = (Array.isArray(typeKeys) ? typeKeys : [])
+    .filter((typeKey) => result?.[typeKey])
+    .map((typeKey) => {
+      const counts = result[typeKey] ?? {};
+      return `${getNetherscrollsImportTypeLabel(typeKey)}: ${counts.created ?? 0} created, ${counts.updated ?? 0} updated, ${counts.deleted ?? 0} removed`;
+    });
+
+  return labels.length
+    ? `Netherscrolls source import complete. ${labels.join("; ")}.`
+    : "Netherscrolls source import complete. No selected dataset returned importable data.";
+}
+
 function getNetherscrollsImportTypeLabel(typeKey) {
   const definition = IMPORT_TYPES.find((type) => type.key === typeKey);
   return definition?.label?.toLowerCase?.() ?? String(typeKey ?? "content");
@@ -1363,24 +1513,35 @@ async function sendNetherscrollsImportRequest(importRequest) {
   return data;
 }
 
-async function applyNetherscrollsImportResponse(data, requestTypeKey = null) {
+async function applyNetherscrollsImportResponse(data, requestTypeKey = null, allowedTypeKeys = null) {
   const result = {};
-  const classes = getNetherscrollsResponseDataset(data, "classes", requestTypeKey);
+  const allowedTypes = Array.isArray(allowedTypeKeys) ? new Set(allowedTypeKeys) : null;
+  const shouldImportType = (typeKey) => !allowedTypes || allowedTypes.has(typeKey);
+
+  const classes = shouldImportType("classes")
+    ? getNetherscrollsResponseDataset(data, "classes", requestTypeKey)
+    : null;
   if (Array.isArray(classes)) {
     result.classes = await importNetherscrollsClasses(classes);
   }
 
-  const items = getNetherscrollsResponseDataset(data, "items", requestTypeKey);
+  const items = shouldImportType("items")
+    ? getNetherscrollsResponseDataset(data, "items", requestTypeKey)
+    : null;
   if (Array.isArray(items)) {
     result.items = await importNetherscrollsItems(items);
   }
 
-  const feats = getNetherscrollsResponseDataset(data, "feats", requestTypeKey);
+  const feats = shouldImportType("feats")
+    ? getNetherscrollsResponseDataset(data, "feats", requestTypeKey)
+    : null;
   if (Array.isArray(feats)) {
     result.feats = await importNetherscrollsFeats(feats);
   }
 
-  const spells = getNetherscrollsResponseDataset(data, "spells", requestTypeKey);
+  const spells = shouldImportType("spells")
+    ? getNetherscrollsResponseDataset(data, "spells", requestTypeKey)
+    : null;
   if (Array.isArray(spells)) {
     result.spells = await importNetherscrollsSpells(spells);
   }
@@ -1744,6 +1905,7 @@ function getNetherscrollsResponseDataset(data, dataKey, requestTypeKey = null) {
   if (data?.meta?.dataKey === dataKey && Array.isArray(data?.data)) return data.data;
   if (requestTypeKey === dataKey && Array.isArray(data?.data)) return data.data;
   if (Array.isArray(data?.data?.[dataKey])) return data.data[dataKey];
+  if (Array.isArray(data?.data?.byDataset?.[dataKey])) return data.data.byDataset[dataKey];
   if (dataKey === "classes" && isNetherscrollsClassLike(data)) return [data];
   return null;
 }
