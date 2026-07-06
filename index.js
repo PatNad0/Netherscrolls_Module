@@ -1072,19 +1072,22 @@ function normalizeNetherscrollsImportSources(data) {
 
   return rows
     .map((source) => {
-      const value = normalizeNetherscrollsReferenceValue(
-        source?._id ?? source?.id ?? source?.netherscrollsId ?? source?.key
+      const id = normalizeNetherscrollsReferenceValue(
+        source?._id ?? source?.id ?? source?.netherscrollsId
       );
-      if (!value || NETHERSCROLLS_EXCLUDED_IMPORT_SOURCE_IDS.has(value)) return null;
+      if (id && NETHERSCROLLS_EXCLUDED_IMPORT_SOURCE_IDS.has(id)) return null;
 
-      const name = toTrimmedStringOrNull(source?.name) ?? value;
-      const abbreviation = toTrimmedStringOrNull(source?.abbreviation);
       const key = toTrimmedStringOrNull(source?.key);
+      const abbreviation = toTrimmedStringOrNull(source?.abbreviation);
+      const name = toTrimmedStringOrNull(source?.name) ?? key ?? abbreviation ?? id;
+      const value = normalizeNetherscrollsReferenceValue(name ?? key ?? abbreviation ?? id);
+      if (!value) return null;
+
       const detailParts = [abbreviation, key].filter(Boolean);
       return {
         value,
         label: detailParts.length ? `${name} (${detailParts.join(" / ")})` : name,
-        sortName: name.toLowerCase(),
+        sortName: String(name).toLowerCase(),
       };
     })
     .filter(Boolean)
@@ -1396,16 +1399,17 @@ function getSelectedNetherscrollsSourceValues(formData) {
 
 function buildNetherscrollsImportRequests({ apiKey, selectedTypes, sinceDate, selectedSources = [] }) {
   if (selectedSources.length) {
-    const supportedTypes = selectedTypes.filter((type) => NETHERSCROLLS_IMPORT_ENDPOINTS[type.key]);
-    if (!supportedTypes.length) return [];
-    return [
-      buildNetherscrollsSourceImportRequest({
-        apiKey,
-        selectedTypes: supportedTypes,
-        selectedSources,
-        sinceDate,
-      }),
-    ];
+    return selectedTypes
+      .filter((type) => NETHERSCROLLS_IMPORT_ENDPOINTS[type.key])
+      .map((type) =>
+        buildNetherscrollsSourceImportRequest({
+          apiKey,
+          typeKey: type.key,
+          selectedSources,
+          sinceDate,
+        })
+      )
+      .filter(Boolean);
   }
 
   return selectedTypes
@@ -1421,7 +1425,7 @@ function buildNetherscrollsImportRequests({ apiKey, selectedTypes, sinceDate, se
 
 function buildNetherscrollsSourceImportRequest({
   apiKey,
-  selectedTypes,
+  typeKey,
   selectedSources,
   sinceDate,
 }) {
@@ -1429,11 +1433,13 @@ function buildNetherscrollsSourceImportRequest({
   for (const source of selectedSources) {
     url.searchParams.append("sources", source);
   }
+  url.searchParams.set("dataset", getNetherscrollsSourceImportDataset(typeKey));
   if (sinceDate) url.searchParams.set("since", sinceDate);
 
   return {
-    typeKey: "source",
-    typeKeys: selectedTypes.map((type) => type.key),
+    typeKey,
+    typeKeys: [typeKey],
+    sourceFiltered: true,
     url: url.toString(),
     options: {
       method: "GET",
@@ -1443,11 +1449,22 @@ function buildNetherscrollsSourceImportRequest({
       },
     },
     payload: {
-      datasets: selectedTypes.map((type) => type.key),
+      dataset: typeKey,
+      sourceDataset: getNetherscrollsSourceImportDataset(typeKey),
       sources: selectedSources,
       since: sinceDate || null,
     },
   };
+}
+
+function getNetherscrollsSourceImportDataset(typeKey) {
+  const datasets = {
+    classes: "class",
+    feats: "feat",
+    items: "item",
+    spells: "spell",
+  };
+  return datasets[typeKey] ?? typeKey;
 }
 
 function buildNetherscrollsImportRequest({ apiKey, typeKey, sinceDate }) {
