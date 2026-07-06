@@ -21,19 +21,18 @@
     </fieldset>
     <fieldset class="ns-import-panel ns-import-sources-panel">
       <legend>Sources</legend>
+      <div class="ns-import-source-list {{#if sourceLoading}}is-loading{{/if}}" role="group" aria-label="Netherscroll sources">
+        {{#each sources}}
+          <label class="ns-import-source-option">
+            <input type="checkbox" name="sources" value="{{value}}">
+            <span>{{label}}</span>
+          </label>
+        {{/each}}
+      </div>
       {{#if sourceLoadError}}
         <div class="ns-import-source-message is-error">Sources unavailable: {{sourceLoadError}}</div>
       {{else}}
-        {{#if hasSources}}
-          <select name="sources" multiple size="8" aria-label="Netherscroll sources">
-            {{#each sources}}
-              <option value="{{value}}">{{label}}</option>
-            {{/each}}
-          </select>
-          <div class="ns-import-source-message">Leave empty to import all sources.</div>
-        {{else}}
-          <div class="ns-import-source-message">No importable sources returned.</div>
-        {{/if}}
+        <div class="ns-import-source-message">{{#if sourceLoading}}Connecting to the API server...{{else}}{{#if hasSources}}Pick any sources to limit the import. Leave all unchecked to import all sources.{{else}}No importable sources returned.{{/if}}{{/if}}</div>
       {{/if}}
     </fieldset>
 

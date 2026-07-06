@@ -26,12 +26,13 @@ const IMPORT_TYPES = [
     icon: "fa-solid fa-wand-sparkles",
     checked: true,
   },
-  {
-    key: "monster",
-    label: "Monster",
-    icon: "fa-solid fa-dragon",
-    checked: false,
-  },
+  // Monster import is not available yet. Keep this definition ready for the endpoint.
+  // {
+  //   key: "monster",
+  //   label: "Monster",
+  //   icon: "fa-solid fa-dragon",
+  //   checked: false,
+  // },
 ];
 const IMPORT_PACKS = {
   classes: "classes",
@@ -95,6 +96,7 @@ const NETHERSCROLLS_API_BASE = "https://api.netherscrolls.ca/api/foundry";
 const SYNC_ENDPOINT = `${NETHERSCROLLS_API_BASE}/sync`;
 const NETHERSCROLLS_SOURCES_ENDPOINT = `${NETHERSCROLLS_API_BASE}/sources`;
 const NETHERSCROLLS_SOURCE_IMPORT_ENDPOINT = `${NETHERSCROLLS_API_BASE}/import/source`;
+const NETHERSCROLLS_EXCLUDED_IMPORT_SOURCE_IDS = new Set(["6a4b21868f309c84b6cb7908"]);
 const NETHERSCROLLS_IMPORT_ENDPOINTS = {
   classes: `${NETHERSCROLLS_API_BASE}/import/classes`,
   items: `${NETHERSCROLLS_API_BASE}/import/items`,
@@ -907,7 +909,7 @@ function createNetherscrollsImportSettingsClass() {
           title: "Import from Netherscroll [EXPERIMENTAL]",
         },
         position: {
-          width: 720,
+          width: 900,
           height: "auto",
         },
       };
@@ -942,7 +944,7 @@ function createNetherscrollsImportSettingsClass() {
           title: "Import from Netherscroll [EXPERIMENTAL]",
         },
         position: {
-          width: 720,
+          width: 900,
           height: "auto",
         },
       };
@@ -986,7 +988,7 @@ function createNetherscrollsImportSettingsClass() {
         title: "Import from Netherscroll [EXPERIMENTAL]",
         template: `modules/${MODULE_ID}/templates/import-from-netherscroll.hbs`,
         classes: ["netherscrolls-import-window"],
-        width: 720,
+        width: 900,
         height: "auto",
         submitOnChange: false,
         closeOnSubmit: false,
@@ -1012,20 +1014,18 @@ function createNetherscrollsImportSettingsClass() {
   };
 }
 
-async function getNetherscrollsImportSettingsContext(context = {}) {
+function getNetherscrollsImportSettingsContext(context = {}) {
   const apiKey = getNetherscrollsApiKey();
   const today = new Date().toISOString().slice(0, 10);
-  const sourceContext = apiKey
-    ? await getNetherscrollsImportSourceContext(apiKey)
-    : { sources: [], sourceLoadError: null };
 
   return {
     ...context,
     hasApiKey: Boolean(apiKey),
     importTypes: IMPORT_TYPES,
-    sources: sourceContext.sources,
-    sourceLoadError: sourceContext.sourceLoadError,
-    hasSources: sourceContext.sources.length > 0,
+    sources: [],
+    sourceLoading: Boolean(apiKey),
+    sourceLoadError: null,
+    hasSources: false,
     defaultSinceDate: today,
   };
 }
@@ -1075,7 +1075,7 @@ function normalizeNetherscrollsImportSources(data) {
       const value = normalizeNetherscrollsReferenceValue(
         source?._id ?? source?.id ?? source?.netherscrollsId ?? source?.key
       );
-      if (!value) return null;
+      if (!value || NETHERSCROLLS_EXCLUDED_IMPORT_SOURCE_IDS.has(value)) return null;
 
       const name = toTrimmedStringOrNull(source?.name) ?? value;
       const abbreviation = toTrimmedStringOrNull(source?.abbreviation);
@@ -1114,6 +1114,7 @@ function activateNetherscrollsImportSettingsListeners(html, submitHandler = null
 
   sinceCheckbox?.addEventListener?.("change", updateSinceState);
   updateSinceState();
+  loadNetherscrollsImportSourcesIntoForm(listenerRoot, getNetherscrollsApiKey());
 
   if (!submitHandler || !form || form.dataset.netherscrollsImportSubmitBound === "1") {
     return;
@@ -1121,6 +1122,54 @@ function activateNetherscrollsImportSettingsListeners(html, submitHandler = null
 
   form.dataset.netherscrollsImportSubmitBound = "1";
   form.addEventListener("submit", submitHandler);
+}
+
+async function loadNetherscrollsImportSourcesIntoForm(root, apiKey) {
+  const sourceList = root?.querySelector?.(".ns-import-source-list");
+  const message = root?.querySelector?.(".ns-import-source-message");
+  if (!sourceList || !apiKey || sourceList.dataset.netherscrollsSourcesBound === "1") return;
+
+  sourceList.dataset.netherscrollsSourcesBound = "1";
+  sourceList.classList.add("is-loading");
+  if (message) {
+    message.classList.remove("is-error");
+    message.textContent = "Connecting to the API server...";
+  }
+
+  const sourceContext = await getNetherscrollsImportSourceContext(apiKey);
+  sourceList.replaceChildren();
+  sourceList.classList.remove("is-loading");
+
+  if (sourceContext.sourceLoadError) {
+    if (message) {
+      message.classList.add("is-error");
+      message.textContent = `Sources unavailable: ${sourceContext.sourceLoadError}`;
+    }
+    return;
+  }
+
+  for (const source of sourceContext.sources) {
+    const label = document.createElement("label");
+    label.classList.add("ns-import-source-option");
+
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.name = "sources";
+    checkbox.value = source.value;
+
+    const text = document.createElement("span");
+    text.textContent = source.label;
+
+    label.append(checkbox, text);
+    sourceList.appendChild(label);
+  }
+
+  if (message) {
+    message.classList.remove("is-error");
+    message.textContent = sourceContext.sources.length
+      ? "Pick any sources to limit the import. Leave all unchecked to import all sources."
+      : "No importable sources returned.";
+  }
 }
 
 async function handleNetherscrollsImportSettingsSubmitEvent(event) {
@@ -1133,14 +1182,21 @@ async function handleNetherscrollsImportSettingsSubmitEvent(event) {
     ? submitter
     : form?.querySelector?.('button[type="submit"]');
 
-  if (submitButton) submitButton.disabled = true;
+  const originalButtonHtml = submitButton?.innerHTML;
+  if (submitButton) {
+    submitButton.disabled = true;
+    submitButton.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Connecting to the API server...`;
+  }
   try {
     await submitNetherscrollsImportSettings(getNetherscrollsFormDataObject(form));
   } catch (err) {
     console.error(`${MODULE_ID} | Netherscrolls import form submit failed.`, err);
     ui?.notifications?.error?.(`Netherscrolls import failed: ${err?.message ?? err}`);
   } finally {
-    if (submitButton) submitButton.disabled = false;
+    if (submitButton) {
+      submitButton.disabled = false;
+      if (originalButtonHtml != null) submitButton.innerHTML = originalButtonHtml;
+    }
   }
 }
 
