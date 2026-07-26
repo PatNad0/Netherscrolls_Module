@@ -26,6 +26,18 @@ const IMPORT_TYPES = [
     icon: "fa-solid fa-wand-sparkles",
     checked: true,
   },
+  {
+    key: "backgrounds",
+    label: "Backgrounds",
+    icon: "fa-solid fa-scroll",
+    checked: true,
+  },
+  {
+    key: "races",
+    label: "Races",
+    icon: "fa-solid fa-person",
+    checked: true,
+  },
   // Monster import is not available yet. Keep this definition ready for the endpoint.
   // {
   //   key: "monster",
@@ -40,6 +52,8 @@ const IMPORT_PACKS = {
   items: "items",
   feats: "feats",
   spells: "spells",
+  backgrounds: "backgrounds",
+  races: "races",
   monster: "monster",
 };
 const NETHERSCROLLS_WORLD_IMPORT_PACKS = {
@@ -73,6 +87,18 @@ const NETHERSCROLLS_WORLD_IMPORT_PACKS = {
     type: "Item",
     system: "dnd5e",
   },
+  backgrounds: {
+    name: "netherscrolls-backgrounds",
+    label: "Netherscrolls Backgrounds",
+    type: "Item",
+    system: "dnd5e",
+  },
+  races: {
+    name: "netherscrolls-races",
+    label: "Netherscrolls Races",
+    type: "Item",
+    system: "dnd5e",
+  },
   monster: {
     name: "netherscrolls-monster",
     label: "Netherscrolls Monster",
@@ -95,6 +121,7 @@ const NETHERSCROLLS_IMPORT_SIDEBAR_FOLDER = {
 const NETHERSCROLLS_API_BASE = "https://api.netherscrolls.ca/api/foundry";
 const SYNC_ENDPOINT = `${NETHERSCROLLS_API_BASE}/sync`;
 const NETHERSCROLLS_SOURCES_ENDPOINT = `${NETHERSCROLLS_API_BASE}/sources`;
+const NETHERSCROLLS_CAMPAIGNS_ENDPOINT = `${NETHERSCROLLS_API_BASE}/campaigns`;
 const NETHERSCROLLS_SOURCE_IMPORT_ENDPOINT = `${NETHERSCROLLS_API_BASE}/import/source`;
 const NETHERSCROLLS_EXCLUDED_IMPORT_SOURCE_IDS = new Set(["6a4b21868f309c84b6cb7908"]);
 const NETHERSCROLLS_IMPORT_ENDPOINTS = {
@@ -102,6 +129,14 @@ const NETHERSCROLLS_IMPORT_ENDPOINTS = {
   items: `${NETHERSCROLLS_API_BASE}/import/items`,
   feats: `${NETHERSCROLLS_API_BASE}/import/feats`,
   spells: `${NETHERSCROLLS_API_BASE}/import/spells`,
+  backgrounds: `${NETHERSCROLLS_API_BASE}/import/backgrounds`,
+  races: `${NETHERSCROLLS_API_BASE}/import/races`,
+};
+const NETHERSCROLLS_CHARACTER_FOLDER = {
+  name: "NS-Character",
+  type: "Actor",
+  sorting: "m",
+  sort: 0,
 };
 const NETHERSCROLLS_DEFAULT_IMAGE = "https://i.postimg.cc/wBj0LZyj/image.png";
 const NETHERSCROLLS_IMPORT_IMAGE = NETHERSCROLLS_DEFAULT_IMAGE;
@@ -124,6 +159,7 @@ const NETHERSCROLLS_VALID_IMAGE_EXTENSIONS = new Set([
   "svg",
   "webp",
 ]);
+const netherscrollsCharacterImportState = new WeakMap();
 const NETHERSCROLLS_MAX_SPELL_LEVEL = 15;
 const NETHERSCROLLS_ITEM_FOLDERS = [
   { type: "weapon", label: "Weapons", sort: 1000 },
@@ -854,9 +890,9 @@ Hooks.once("init", () => {
   });
 
   game.settings.registerMenu(MODULE_ID, SETTINGS.importFromNetherscroll, {
-    name: "Import from Netherscroll [EXPERIMENTAL]",
+    name: "Netherscrolls Importer",
     label: "Open Importer",
-    hint: "Import classes, items, spells, and monsters from the Netherscroll website.",
+    hint: "Import Netherscrolls compendium content and campaign characters.",
     icon: "fa-solid fa-cloud-arrow-down",
     type: NetherscrollsImportSettings,
     restricted: true,
@@ -906,7 +942,7 @@ function createNetherscrollsImportSettingsClass() {
         id: "netherscrolls-import-settings",
         classes: ["netherscrolls-import-window"],
         window: {
-          title: "Import from Netherscroll [EXPERIMENTAL]",
+          title: "Netherscrolls Importer",
         },
         position: {
           width: 900,
@@ -941,7 +977,7 @@ function createNetherscrollsImportSettingsClass() {
         id: "netherscrolls-import-settings",
         classes: ["netherscrolls-import-window"],
         window: {
-          title: "Import from Netherscroll [EXPERIMENTAL]",
+          title: "Netherscrolls Importer",
         },
         position: {
           width: 900,
@@ -985,7 +1021,7 @@ function createNetherscrollsImportSettingsClass() {
     static get defaultOptions() {
       const options = {
         id: "netherscrolls-import-settings",
-        title: "Import from Netherscroll [EXPERIMENTAL]",
+        title: "Netherscrolls Importer",
         template: `modules/${MODULE_ID}/templates/import-from-netherscroll.hbs`,
         classes: ["netherscrolls-import-window"],
         width: 900,
@@ -1014,13 +1050,16 @@ function createNetherscrollsImportSettingsClass() {
   };
 }
 
-function getNetherscrollsImportSettingsContext(context = {}) {
+async function getNetherscrollsImportSettingsContext(context = {}) {
   const apiKey = getNetherscrollsApiKey();
   const today = new Date().toISOString().slice(0, 10);
+  const compendiumState = await getNetherscrollsCompendiumReadiness();
 
   return {
     ...context,
     hasApiKey: Boolean(apiKey),
+    compendiumReady: compendiumState.ready,
+    compendiumDocumentCount: compendiumState.documentCount,
     importTypes: IMPORT_TYPES,
     sources: [],
     sourceLoading: Boolean(apiKey),
@@ -1118,6 +1157,7 @@ function activateNetherscrollsImportSettingsListeners(html, submitHandler = null
   sinceCheckbox?.addEventListener?.("change", updateSinceState);
   updateSinceState();
   loadNetherscrollsImportSourcesIntoForm(listenerRoot, getNetherscrollsApiKey());
+  activateNetherscrollsCharacterImportListeners(listenerRoot);
 
   if (!submitHandler || !form || form.dataset.netherscrollsImportSubmitBound === "1") {
     return;
@@ -1191,7 +1231,10 @@ async function handleNetherscrollsImportSettingsSubmitEvent(event) {
     submitButton.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Connecting to the API server...`;
   }
   try {
-    await submitNetherscrollsImportSettings(getNetherscrollsFormDataObject(form));
+    const result = await submitNetherscrollsImportSettings(getNetherscrollsFormDataObject(form));
+    if (result?.importedAny) {
+      await refreshNetherscrollsCharacterImportAvailability(form);
+    }
   } catch (err) {
     console.error(`${MODULE_ID} | Netherscrolls import form submit failed.`, err);
     ui?.notifications?.error?.(`Netherscrolls import failed: ${err?.message ?? err}`);
@@ -1209,7 +1252,7 @@ async function submitNetherscrollsImportSettings(formData) {
     ui?.notifications?.warn?.(
       "Netherscrolls API Key is missing. Set it in Module Settings."
     );
-    return;
+    return { importedAny: false };
   }
 
   const selectedTypes = IMPORT_TYPES.filter((type) =>
@@ -1217,20 +1260,20 @@ async function submitNetherscrollsImportSettings(formData) {
   );
   if (!selectedTypes.length) {
     ui?.notifications?.warn?.("Select at least one Netherscroll import type.");
-    return;
+    return { importedAny: false };
   }
 
   const sinceEnabled = Boolean(formData?.sinceEnabled);
   const sinceDate = String(formData?.sinceDate ?? "").trim();
   if (sinceEnabled && !sinceDate) {
     ui?.notifications?.warn?.("Choose a date or disable Since.");
-    return;
+    return { importedAny: false };
   }
 
   const since = sinceEnabled ? normalizeNetherscrollsSinceDate(sinceDate) : null;
   if (sinceEnabled && !since) {
     ui?.notifications?.warn?.("Choose a valid Since date.");
-    return;
+    return { importedAny: false };
   }
 
   const selectedSources = getSelectedNetherscrollsSourceValues(formData);
@@ -1275,7 +1318,7 @@ async function submitNetherscrollsImportSettings(formData) {
     }
   }
   if (importedAny) {
-    return;
+    return { importedAny: true };
   }
 
   const range = sinceEnabled ? `since ${sinceDate}` : "since forever";
@@ -1283,6 +1326,742 @@ async function submitNetherscrollsImportSettings(formData) {
   ui?.notifications?.info?.(
     `Netherscrolls import request prepared: ${labels} ${range}.`
   );
+  return { importedAny: false };
+}
+
+async function getNetherscrollsCompendiumReadiness() {
+  let documentCount = 0;
+  for (const typeKey of Object.keys(NETHERSCROLLS_WORLD_IMPORT_PACKS)) {
+    if (typeKey === "monster") continue;
+    const pack = game?.packs?.get?.(getNetherscrollsImportPackCollection(typeKey));
+    if (!pack) continue;
+
+    try {
+      const index = await pack.getIndex?.({
+        fields: [`flags.${MODULE_ID}.netherscrollsId`, "flags.netherscrolls.id"],
+      });
+      const entries = index?.contents ?? (index ? Array.from(index) : []);
+      const imported = entries.filter((entry) =>
+        Boolean(entry?.flags?.[MODULE_ID]?.netherscrollsId ?? entry?.flags?.netherscrolls?.id)
+      );
+      documentCount += imported.length;
+    } catch (err) {
+      console.warn(`${MODULE_ID} | Unable to read Netherscrolls compendium index.`, err);
+    }
+  }
+  return { ready: documentCount > 0, documentCount };
+}
+
+function activateNetherscrollsCharacterImportListeners(root) {
+  const panel = root?.querySelector?.("[data-ns-character-import-panel]");
+  if (!panel || panel.dataset.netherscrollsCharacterImportBound === "1") return;
+  panel.dataset.netherscrollsCharacterImportBound = "1";
+
+  const state = getNetherscrollsCharacterImportState(root);
+  const campaignSelect = panel.querySelector("[data-ns-campaign-select]");
+  panel.querySelector('[data-ns-character-action="refresh-campaigns"]')?.addEventListener("click", () => {
+    loadNetherscrollsCampaignsIntoForm(root, { force: true });
+  });
+  campaignSelect?.addEventListener("change", () => {
+    loadNetherscrollsCampaignCharactersIntoForm(root, campaignSelect.value);
+  });
+  panel.querySelector('[data-ns-character-action="select-all"]')?.addEventListener("click", () => {
+    panel.querySelectorAll('[name="characterIds"]:not(:disabled)').forEach((input) => {
+      input.checked = true;
+    });
+  });
+  panel.querySelector('[data-ns-character-action="clear-selection"]')?.addEventListener("click", () => {
+    panel.querySelectorAll('[name="characterIds"]').forEach((input) => {
+      input.checked = false;
+    });
+  });
+  root?.querySelector?.('[data-ns-character-action="import-selected"]')?.addEventListener("click", async (event) => {
+    const selectedIds = Array.from(panel.querySelectorAll('[name="characterIds"]:checked')).map((input) => input.value);
+    const selected = selectedIds
+      .map((id) => state.charactersById.get(id))
+      .filter(Boolean);
+    if (!selected.length) {
+      ui?.notifications?.warn?.("Select at least one Netherscrolls character to import.");
+      return;
+    }
+
+    const button = event.currentTarget;
+    const originalHtml = button.innerHTML;
+    button.disabled = true;
+    button.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Importing characters…';
+    try {
+      await importNetherscrollsSelectedCampaignCharacters(root, selected);
+    } catch (err) {
+      console.error(`${MODULE_ID} | Character import failed.`, err);
+      ui?.notifications?.error?.(`Character import failed: ${err?.message ?? err}`);
+    } finally {
+      button.disabled = false;
+      button.innerHTML = originalHtml;
+    }
+  });
+
+  if (!panel.disabled && getNetherscrollsApiKey()) {
+    loadNetherscrollsCampaignsIntoForm(root);
+  }
+}
+
+function getNetherscrollsCharacterImportState(root) {
+  let state = netherscrollsCharacterImportState.get(root);
+  if (state) return state;
+  state = {
+    campaigns: [],
+    charactersById: new Map(),
+  };
+  netherscrollsCharacterImportState.set(root, state);
+  return state;
+}
+
+async function refreshNetherscrollsCharacterImportAvailability(root) {
+  const panel = root?.querySelector?.("[data-ns-character-import-panel]");
+  if (!panel) return;
+  const state = await getNetherscrollsCompendiumReadiness();
+  const enabled = state.ready;
+  panel.disabled = !enabled;
+  panel.querySelectorAll("button, select, input").forEach((control) => {
+    control.disabled = !enabled;
+  });
+
+  const status = root.querySelector("[data-ns-compendium-status]");
+  status?.classList.toggle("is-ready", enabled);
+  status?.classList.toggle("is-missing", !enabled);
+  if (status) {
+    status.replaceChildren();
+    const icon = document.createElement("i");
+    icon.className = enabled ? "fa-solid fa-boxes-stacked" : "fa-solid fa-lock";
+    const text = document.createElement("span");
+    text.textContent = enabled
+      ? `Netherscrolls library ready (${state.documentCount} documents)`
+      : "Import the Netherscrolls library to unlock characters";
+    status.append(icon, text);
+  }
+
+  const prerequisite = panel.querySelector("[data-ns-character-prerequisite]");
+  prerequisite?.classList.toggle("is-ready", enabled);
+  prerequisite?.classList.toggle("is-blocked", !enabled);
+  if (prerequisite) {
+    prerequisite.textContent = enabled
+      ? "Select a campaign, then choose the Netherscrolls characters to create or update in Foundry."
+      : "Import Netherscrolls compendium content first. Character import is locked until the library contains Netherscrolls documents.";
+  }
+  if (enabled) await loadNetherscrollsCampaignsIntoForm(root, { force: true });
+}
+
+async function loadNetherscrollsCampaignsIntoForm(root, { force = false } = {}) {
+  const panel = root?.querySelector?.("[data-ns-character-import-panel]");
+  const select = panel?.querySelector?.("[data-ns-campaign-select]");
+  if (!panel || !select || panel.disabled) return;
+  const state = getNetherscrollsCharacterImportState(root);
+  if (state.loadingCampaigns || (!force && state.campaigns.length)) return;
+
+  state.loadingCampaigns = true;
+  setNetherscrollsCharacterImportMessage(root, "Loading campaigns available to this API key…");
+  select.disabled = true;
+  try {
+    const campaigns = await fetchNetherscrollsCampaigns();
+    state.campaigns = campaigns;
+    const previousValue = select.value;
+    select.replaceChildren();
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = campaigns.length ? "Select a campaign" : "No importable campaigns found";
+    select.appendChild(placeholder);
+    for (const campaign of campaigns) {
+      const option = document.createElement("option");
+      option.value = campaign.id;
+      option.textContent = campaign.label;
+      if (campaign.id === previousValue) option.selected = true;
+      select.appendChild(option);
+    }
+    setNetherscrollsCharacterImportMessage(
+      root,
+      campaigns.length
+        ? "Select a campaign to load its Netherscrolls characters."
+        : "This API key is not a DM for any importable Netherscrolls campaigns."
+    );
+  } catch (err) {
+    console.error(`${MODULE_ID} | Unable to load Netherscrolls campaigns.`, err);
+    select.replaceChildren();
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "Campaigns unavailable";
+    select.appendChild(option);
+    setNetherscrollsCharacterImportMessage(root, `Campaigns unavailable: ${err?.message ?? err}`, { error: true });
+  } finally {
+    state.loadingCampaigns = false;
+    select.disabled = false;
+  }
+}
+
+async function fetchNetherscrollsCampaigns() {
+  const apiKey = getNetherscrollsApiKey();
+  if (!apiKey) throw new Error("Netherscrolls API Key is missing. Set it in Module Settings.");
+  const data = await fetchNetherscrollsApiJson(NETHERSCROLLS_CAMPAIGNS_ENDPOINT, apiKey);
+  const rows = getNetherscrollsApiRows(data, ["campaigns"]);
+  return rows
+    .map((campaign) => {
+      const id = normalizeNetherscrollsReferenceValue(
+        campaign?._id ?? campaign?.id ?? campaign?.campaignId ?? campaign?.netherscrollsId
+      );
+      if (!id) return null;
+      const name = toTrimmedStringOrNull(campaign?.name ?? campaign?.title) ?? id;
+      const detail = toTrimmedStringOrNull(campaign?.system ?? campaign?.description ?? campaign?.code);
+      return { id, label: detail ? `${name} — ${detail}` : name };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.label.localeCompare(b.label));
+}
+
+async function loadNetherscrollsCampaignCharactersIntoForm(root, campaignId) {
+  const panel = root?.querySelector?.("[data-ns-character-import-panel]");
+  const list = panel?.querySelector?.("[data-ns-character-list]");
+  if (!panel || !list) return;
+  const id = normalizeNetherscrollsReferenceValue(campaignId);
+  const state = getNetherscrollsCharacterImportState(root);
+  state.charactersById.clear();
+  list.replaceChildren();
+  if (!id) {
+    setNetherscrollsCharacterImportMessage(root, "Select a campaign to load its Netherscrolls characters.");
+    return;
+  }
+
+  setNetherscrollsCharacterImportMessage(root, "Loading campaign characters…");
+  try {
+    const characters = await fetchNetherscrollsCampaignCharacters(id);
+    for (const character of characters) state.charactersById.set(character.id, character);
+    renderNetherscrollsCampaignCharacterList(list, characters);
+    setNetherscrollsCharacterImportMessage(
+      root,
+      characters.length ? "Choose one or more characters to import." : "This campaign has no exportable Netherscrolls characters."
+    );
+  } catch (err) {
+    console.error(`${MODULE_ID} | Unable to load Netherscrolls campaign characters.`, err);
+    setNetherscrollsCharacterImportMessage(root, `Characters unavailable: ${err?.message ?? err}`, { error: true });
+  }
+}
+
+async function fetchNetherscrollsCampaignCharacters(campaignId) {
+  const apiKey = getNetherscrollsApiKey();
+  if (!apiKey) throw new Error("Netherscrolls API Key is missing. Set it in Module Settings.");
+  const endpoint = `${NETHERSCROLLS_CAMPAIGNS_ENDPOINT}/${encodeURIComponent(campaignId)}/characters`;
+  const data = await fetchNetherscrollsApiJson(endpoint, apiKey);
+  return getNetherscrollsApiRows(data, ["characters", "exports"])
+    .map(normalizeNetherscrollsExportedCharacter)
+    .filter(Boolean);
+}
+
+async function fetchNetherscrollsApiJson(url, apiKey) {
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      "x-api-key": apiKey,
+    },
+  });
+  const data = await response.json().catch(() => null);
+  if (!response.ok) {
+    const message = data?.error?.message ?? data?.message ?? `Request failed (${response.status} ${response.statusText}).`;
+    throw new Error(message);
+  }
+  return data;
+}
+
+function getNetherscrollsApiRows(data, keys = []) {
+  if (Array.isArray(data)) return data;
+  for (const container of [data?.data, data]) {
+    if (Array.isArray(container)) return container;
+    for (const key of keys) {
+      if (Array.isArray(container?.[key])) return container[key];
+    }
+  }
+  return [];
+}
+
+function normalizeNetherscrollsExportedCharacter(entry) {
+  const character = entry?.character ?? entry?.data?.character ?? entry;
+  const foundryActor = entry?.foundryActor ?? entry?.actor ?? entry?.data?.foundryActor ?? character?.foundryActor;
+  const id = normalizeNetherscrollsReferenceValue(
+    entry?.characterId ??
+      character?.netherscrollsId ??
+      character?._id ??
+      character?.id ??
+      foundryActor?.flags?.[MODULE_ID]?.characterId ??
+      foundryActor?.flags?.netherscrolls?.characterId
+  );
+  if (!id) return null;
+  const name = toTrimmedStringOrNull(foundryActor?.name ?? character?.name ?? entry?.name) ?? "Unnamed Character";
+  return { id, name, character, foundryActor, raw: entry };
+}
+
+function renderNetherscrollsCampaignCharacterList(root, characters) {
+  root.replaceChildren();
+  if (!characters.length) return;
+  const table = document.createElement("table");
+  table.className = "ns-character-table";
+  const thead = document.createElement("thead");
+  const headerRow = document.createElement("tr");
+  for (const label of ["", "Character", "Details", "Foundry"]) {
+    const cell = document.createElement("th");
+    cell.textContent = label;
+    headerRow.appendChild(cell);
+  }
+  thead.appendChild(headerRow);
+  const tbody = document.createElement("tbody");
+  for (const exported of characters) {
+    const row = document.createElement("tr");
+    const selectCell = document.createElement("td");
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.name = "characterIds";
+    checkbox.value = exported.id;
+    checkbox.setAttribute("aria-label", `Import ${exported.name}`);
+    selectCell.appendChild(checkbox);
+
+    const nameCell = document.createElement("td");
+    nameCell.textContent = exported.name;
+    const detailsCell = document.createElement("td");
+    detailsCell.textContent = getNetherscrollsCharacterImportDetail(exported);
+    const statusCell = document.createElement("td");
+    const existing = findNetherscrollsActorByCharacterId(exported.id);
+    statusCell.className = `ns-character-status ${existing ? "is-existing" : "is-new"}`;
+    statusCell.textContent = existing ? "Will update" : "Will create";
+    row.append(selectCell, nameCell, detailsCell, statusCell);
+    tbody.appendChild(row);
+  }
+  table.append(thead, tbody);
+  root.appendChild(table);
+}
+
+function getNetherscrollsCharacterImportDetail(exported) {
+  const source = exported?.character ?? {};
+  const parts = [
+    toTrimmedStringOrNull(source?.race?.name ?? source?.raceName),
+    toTrimmedStringOrNull(source?.class?.name ?? source?.className ?? source?.characterClass),
+  ].filter(Boolean);
+  const level = source?.level ?? source?.levels ?? source?.characterLevel;
+  if (level != null) parts.push(`Level ${level}`);
+  return parts.join(" · ") || "—";
+}
+
+function setNetherscrollsCharacterImportMessage(root, message, { error = false } = {}) {
+  const element = root?.querySelector?.("[data-ns-character-message]");
+  if (!element) return;
+  element.textContent = message;
+  element.classList.toggle("is-error", Boolean(error));
+}
+
+async function importNetherscrollsSelectedCampaignCharacters(root, selected) {
+  const readiness = await getNetherscrollsCompendiumReadiness();
+  if (!readiness.ready) {
+    throw new Error("Import Netherscrolls compendium content before importing characters.");
+  }
+
+  const campaignId = normalizeNetherscrollsReferenceValue(
+    root?.querySelector?.("[data-ns-campaign-select]")?.value
+  );
+  if (!campaignId) throw new Error("Select a campaign before importing characters.");
+
+  const folder = await findOrCreateNetherscrollsCharacterFolder();
+  if (!folder?.id) throw new Error("Foundry could not create the NS-Character Actor folder.");
+
+  const results = [];
+  for (const selectedCharacter of selected) {
+    try {
+      const exported = await hydrateNetherscrollsExportedCharacter(selectedCharacter, campaignId);
+      const result = await importNetherscrollsCampaignCharacter(exported, folder);
+      results.push({ ...result, name: exported.name, ok: true });
+    } catch (err) {
+      console.error(`${MODULE_ID} | Unable to import character ${selectedCharacter?.name ?? ""}.`, err);
+      results.push({ name: selectedCharacter?.name ?? "Unnamed Character", ok: false, error: err?.message ?? String(err) });
+    }
+  }
+
+  const created = results.filter((result) => result.ok && result.created).length;
+  const updated = results.filter((result) => result.ok && !result.created).length;
+  const failed = results.filter((result) => !result.ok);
+  const fetched = results.reduce((total, result) => total + (result.fetched ?? 0), 0);
+  const message = [
+    `Netherscrolls characters: ${created} created, ${updated} updated`,
+    fetched ? `${fetched} missing content record${fetched === 1 ? "" : "s"} fetched` : null,
+    failed.length ? `${failed.length} failed` : null,
+  ]
+    .filter(Boolean)
+    .join("; ");
+  setNetherscrollsCharacterImportMessage(root, message, { error: Boolean(failed.length) });
+  if (failed.length) {
+    ui?.notifications?.warn?.(`${message}. See the console for individual failures.`);
+  } else {
+    ui?.notifications?.info?.(message);
+  }
+
+  const list = root?.querySelector?.("[data-ns-character-list]");
+  const state = getNetherscrollsCharacterImportState(root);
+  if (list) renderNetherscrollsCampaignCharacterList(list, Array.from(state.charactersById.values()));
+}
+
+async function hydrateNetherscrollsExportedCharacter(exported, campaignId) {
+  if (exported?.foundryActor && typeof exported.foundryActor === "object") return exported;
+  const apiKey = getNetherscrollsApiKey();
+  const endpoint = `${NETHERSCROLLS_CAMPAIGNS_ENDPOINT}/${encodeURIComponent(campaignId)}/characters/${encodeURIComponent(exported.id)}`;
+  const data = await fetchNetherscrollsApiJson(endpoint, apiKey);
+  const direct = normalizeNetherscrollsExportedCharacter(data?.data ?? data);
+  if (!direct?.foundryActor) {
+    throw new Error("The campaign character export did not include a Foundry Actor payload.");
+  }
+  return direct;
+}
+
+async function findOrCreateNetherscrollsCharacterFolder() {
+  const existing = getWorldFolders().find((folder) => {
+    const parentId = folder?.folder?.id ?? folder?.folder ?? folder?.parent?.id ?? folder?.parent ?? null;
+    return (
+      folder?.name === NETHERSCROLLS_CHARACTER_FOLDER.name &&
+      folder?.type === NETHERSCROLLS_CHARACTER_FOLDER.type &&
+      !parentId
+    );
+  });
+  if (existing) return existing;
+
+  const FolderDocumentClass = globalThis.foundry?.documents?.Folder ?? globalThis.Folder;
+  const FolderClass = FolderDocumentClass?.implementation ?? FolderDocumentClass;
+  if (typeof FolderClass?.create !== "function") return null;
+  return FolderClass.create({ ...NETHERSCROLLS_CHARACTER_FOLDER });
+}
+
+async function importNetherscrollsCampaignCharacter(exported, folder) {
+  const characterId = normalizeNetherscrollsReferenceValue(exported?.id);
+  if (!characterId) throw new Error("The character export has no Netherscrolls character id.");
+  if (!exported?.foundryActor || typeof exported.foundryActor !== "object") {
+    throw new Error("The character export has no Foundry Actor payload.");
+  }
+
+  const actorPayload = duplicateNetherscrollsData(exported.foundryActor);
+  const itemSources = collectNetherscrollsCharacterItemSources(exported);
+  const effectSources = Array.isArray(actorPayload.effects) ? actorPayload.effects : [];
+  delete actorPayload.items;
+  delete actorPayload.effects;
+  delete actorPayload._id;
+  delete actorPayload.id;
+  delete actorPayload.uuid;
+  actorPayload.type = "character";
+  actorPayload.folder = folder.id;
+  actorPayload.name = toTrimmedStringOrNull(actorPayload.name) ?? exported.name;
+  actorPayload.flags = actorPayload.flags ?? {};
+  actorPayload.flags[MODULE_ID] = {
+    ...(actorPayload.flags[MODULE_ID] ?? {}),
+    characterId,
+  };
+  actorPayload.flags.netherscrolls = {
+    ...(actorPayload.flags.netherscrolls ?? {}),
+    characterId,
+  };
+
+  let actor = findNetherscrollsActorByCharacterId(characterId);
+  const created = !actor;
+  if (actor) {
+    delete actorPayload.type;
+    await actor.update(actorPayload);
+  } else {
+    const ActorDocumentClass = globalThis.Actor?.implementation ?? globalThis.Actor;
+    if (typeof ActorDocumentClass?.create !== "function") {
+      throw new Error("Foundry Actor creation API is unavailable.");
+    }
+    actor = await ActorDocumentClass.create(actorPayload);
+  }
+  await setActorCharacterId(actor, characterId);
+
+  const content = await resolveNetherscrollsCharacterItemSources(itemSources);
+  const itemResult = await syncNetherscrollsCharacterActorItems(actor, content.items, characterId);
+  const effectResult = await syncNetherscrollsCharacterActorEffects(actor, effectSources, characterId);
+  let repairedFeatures = 0;
+  try {
+    const repair = await repairNetherscrollsActorClassFeatures(actor, { notify: false });
+    repairedFeatures = repair.created ?? 0;
+  } catch (err) {
+    console.warn(`${MODULE_ID} | Unable to repair imported class features.`, err);
+  }
+
+  return {
+    actor,
+    created,
+    fetched: content.fetched,
+    items: itemResult,
+    effects: effectResult,
+    repairedFeatures,
+  };
+}
+
+function getWorldActors() {
+  const actors = game?.actors;
+  if (!actors) return [];
+  if (Array.isArray(actors)) return actors;
+  if (Array.isArray(actors.contents)) return actors.contents;
+  if (typeof actors.values === "function") return Array.from(actors.values());
+  if (typeof actors[Symbol.iterator] === "function") return Array.from(actors);
+  return [];
+}
+
+function findNetherscrollsActorByCharacterId(characterId) {
+  const id = normalizeNetherscrollsReferenceValue(characterId);
+  if (!id) return null;
+  return (
+    getWorldActors().find((actor) => String(getActorCharacterId(actor) ?? "") === id) ??
+    getWorldActors().find((actor) => String(actor?.flags?.netherscrolls?.characterId ?? "") === id) ??
+    null
+  );
+}
+
+function collectNetherscrollsCharacterItemSources(exported) {
+  const sources = [];
+  const add = (value, dataset = null) => {
+    const rows = Array.isArray(value) ? value : value == null ? [] : [value];
+    for (const row of rows) {
+      const source = typeof row === "string" ? { netherscrollsId: row } : row;
+      if (!source || typeof source !== "object") continue;
+      sources.push({ source, dataset });
+    }
+  };
+  const actor = exported?.foundryActor ?? {};
+  const character = exported?.character ?? {};
+  add(actor.items);
+  add(character.items, "items");
+  add(character.spells, "spells");
+  add(character.feats, "feats");
+  add(character.classes, "classes");
+  add(character.subclasses, "classes");
+  add(character.class, "classes");
+  add(character.subclass, "classes");
+  add(character.background, "backgrounds");
+  add(character.race, "races");
+
+  const seen = new Set();
+  return sources.filter(({ source, dataset }) => {
+    const id = getNetherscrollsCharacterSourceId(source);
+    const type = toTrimmedStringOrNull(
+      getNetherscrollsFoundryItemPayload(source)?.type ?? source?.type
+    );
+    const name = toTrimmedStringOrNull(
+      getNetherscrollsFoundryItemPayload(source)?.name ?? source?.name
+    );
+    const key = `${dataset ?? ""}:${id ?? ""}:${type ?? ""}:${name ?? ""}`.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function getNetherscrollsCharacterItemDataset(source, fallback = null) {
+  const explicit = toTrimmedStringOrNull(source?.dataset ?? source?.dataSet ?? source?.collection)?.toLowerCase();
+  if (explicit) {
+    const normalized = explicit.replace(/[^a-z]/g, "");
+    if (normalized === "classfeatures") return "classFeatures";
+    if (["classes", "items", "feats", "spells", "backgrounds", "races"].includes(normalized)) return normalized;
+  }
+  if (fallback) return fallback;
+  const type = toTrimmedStringOrNull(
+    getNetherscrollsFoundryItemPayload(source)?.type ?? source?.type
+  )?.toLowerCase();
+  if (type === "spell") return "spells";
+  if (type === "feat") {
+    const flags = getNetherscrollsFoundryItemPayload(source)?.flags ?? source?.flags ?? {};
+    if (
+      flags?.[MODULE_ID]?.featureScope ||
+      flags?.[MODULE_ID]?.parentClassNetherscrollsId ||
+      flags?.[MODULE_ID]?.parentClassIdentifier
+    ) {
+      return "classFeatures";
+    }
+    return "feats";
+  }
+  if (type === "class" || type === "subclass") return "classes";
+  if (type === "background") return "backgrounds";
+  if (type === "race") return "races";
+  return "items";
+}
+
+async function resolveNetherscrollsCharacterItemSources(sources) {
+  const items = [];
+  let fetched = 0;
+  for (const descriptor of sources) {
+    const resolved = await resolveNetherscrollsCharacterItemSource(descriptor.source, descriptor.dataset);
+    if (resolved?.item) items.push(resolved.item);
+    fetched += resolved?.fetched ?? 0;
+  }
+  return { items, fetched };
+}
+
+async function resolveNetherscrollsCharacterItemSource(source, fallbackDataset = null) {
+  const dataset = getNetherscrollsCharacterItemDataset(source, fallbackDataset);
+  const netherscrollsId = getNetherscrollsCharacterSourceId(source);
+  const direct = getNetherscrollsFoundryItemPayload(source) ?? source;
+  let document = netherscrollsId
+    ? await findNetherscrollsCompendiumDocumentById(dataset, netherscrollsId)
+    : null;
+  let fetched = 0;
+  if (!document && netherscrollsId) {
+    try {
+      const imported = await fetchAndImportNetherscrollsCharacterContent(dataset, netherscrollsId);
+      if (imported) fetched = 1;
+      document = await findNetherscrollsCompendiumDocumentById(dataset, netherscrollsId);
+    } catch (err) {
+      console.warn(
+        `${MODULE_ID} | Unable to fetch missing ${dataset} ${netherscrollsId}; ${toTrimmedStringOrNull(direct?.type) ? "using character payload" : "skipping that embedded document"}.`,
+        err
+      );
+    }
+  }
+
+  if (!document && (!direct || typeof direct !== "object" || !toTrimmedStringOrNull(direct?.type))) {
+    console.warn(
+      `${MODULE_ID} | Could not resolve Netherscrolls ${dataset} ${netherscrollsId ?? "reference"}; skipping that embedded document.`
+    );
+    return { item: null, fetched };
+  }
+  const item = prepareNetherscrollsCharacterActorItemData(document, direct, source, netherscrollsId);
+  return { item, fetched };
+}
+
+function getNetherscrollsCharacterSourceId(source) {
+  const foundryItem = getNetherscrollsFoundryItemPayload(source);
+  return normalizeNetherscrollsReferenceValue(
+    source?.netherscrollsId ??
+      source?.flags?.[MODULE_ID]?.netherscrollsId ??
+      source?.flags?.netherscrolls?.id ??
+      foundryItem?.flags?.[MODULE_ID]?.netherscrollsId ??
+      foundryItem?.flags?.netherscrolls?.id ??
+      source?._id ??
+      source?.id
+  );
+}
+
+async function findNetherscrollsCompendiumDocumentById(dataset, netherscrollsId) {
+  const pack = await getNetherscrollsImportPack(dataset);
+  if (!pack) return null;
+  const documents = await pack.getDocuments();
+  return documents.find((document) => String(getItemNetherId(document) ?? "") === String(netherscrollsId)) ?? null;
+}
+
+async function fetchAndImportNetherscrollsCharacterContent(dataset, netherscrollsId) {
+  const endpoint = NETHERSCROLLS_IMPORT_ENDPOINTS[dataset === "classFeatures" ? "classes" : dataset];
+  const apiKey = getNetherscrollsApiKey();
+  if (!endpoint || !apiKey) return false;
+
+  const url = new URL(endpoint);
+  // The content endpoint accepts its stable Netherscrolls id; servers which do not
+  // narrow the response still return a dataset that is filtered below.
+  url.searchParams.set("id", netherscrollsId);
+  url.searchParams.set("netherscrollsId", netherscrollsId);
+  const data = await fetchNetherscrollsApiJson(url.toString(), apiKey);
+  const responseDataset = dataset === "classFeatures" ? "classes" : dataset;
+  const rows = getNetherscrollsResponseDataset(data, responseDataset, responseDataset) ?? [];
+  const matches = rows.filter((row) => isNetherscrollsCharacterContentMatch(row, responseDataset, netherscrollsId));
+  if (!matches.length) return false;
+  await importNetherscrollsCharacterContentRows(matches, dataset);
+  return true;
+}
+
+function isNetherscrollsCharacterContentMatch(row, dataset, netherscrollsId) {
+  const id = String(netherscrollsId);
+  if (String(getNetherscrollsSourceId(row) ?? "") === id) return true;
+  if (dataset !== "classes") return false;
+  if (getNetherscrollsSubclasses(row).some((subclass) => String(getNetherscrollsSourceId(subclass) ?? "") === id)) return true;
+  return getNetherscrollsClassFeatureItemDescriptors([row]).some(
+    (feature) => String(feature?.netherscrollsId ?? "") === id
+  );
+}
+
+async function importNetherscrollsCharacterContentRows(rows, dataset) {
+  if (dataset === "classes" || dataset === "classFeatures") return importNetherscrollsClasses(rows);
+  if (dataset === "items") return importNetherscrollsItems(rows);
+  if (dataset === "feats") return importNetherscrollsFeats(rows);
+  if (dataset === "spells") return importNetherscrollsSpells(rows);
+  return importNetherscrollsGenericFoundryItems(rows, dataset);
+}
+
+function prepareNetherscrollsCharacterActorItemData(document, direct, source, netherscrollsId) {
+  const fromCompendium = document ? duplicateNetherscrollsDocumentData(document) : {};
+  const sourceData = duplicateNetherscrollsData(direct ?? {});
+  const data = mergeNetherscrollsDefaults(fromCompendium, sourceData);
+  delete data._id;
+  delete data.id;
+  delete data.uuid;
+  delete data.folder;
+  delete data.ownership;
+  delete data.parent;
+  data.name = toTrimmedStringOrNull(data.name) ?? "Netherscrolls Item";
+  data.type = toTrimmedStringOrNull(data.type) ?? "loot";
+  data.flags = data.flags ?? {};
+  data.flags[MODULE_ID] = {
+    ...(data.flags[MODULE_ID] ?? {}),
+    ...(netherscrollsId ? { netherscrollsId } : {}),
+  };
+  if (source?.lastRev) data.flags[MODULE_ID].lastRev = source.lastRev;
+  return data;
+}
+
+async function syncNetherscrollsCharacterActorItems(actor, itemData, characterId) {
+  const existingById = new Map();
+  for (const item of getNetherscrollsActorItems(actor)) {
+    const id = getItemNetherId(item);
+    if (id) existingById.set(String(id), item);
+  }
+  const creates = [];
+  const updates = [];
+  for (const data of itemData) {
+    const netherscrollsId = getNetherscrollsSourceId(data);
+    data.flags = data.flags ?? {};
+    data.flags[MODULE_ID] = {
+      ...(data.flags[MODULE_ID] ?? {}),
+      characterId,
+      importedCharacterItem: true,
+    };
+    const existing = netherscrollsId ? existingById.get(String(netherscrollsId)) : null;
+    if (existing?.id) {
+      updates.push({ ...data, _id: existing.id });
+    } else {
+      creates.push(data);
+    }
+  }
+  if (updates.length) await actor.updateEmbeddedDocuments("Item", updates);
+  if (creates.length) await actor.createEmbeddedDocuments("Item", creates, { renderSheet: false });
+  return { created: creates.length, updated: updates.length };
+}
+
+async function syncNetherscrollsCharacterActorEffects(actor, effectSources, characterId) {
+  if (!Array.isArray(effectSources) || !effectSources.length) return { created: 0, updated: 0 };
+  const existingByKey = new Map();
+  for (const effect of Array.from(actor?.effects ?? [])) {
+    const key = effect?.getFlag?.(MODULE_ID, "effectKey") ?? effect?.flags?.[MODULE_ID]?.effectKey;
+    if (key) existingByKey.set(String(key), effect);
+  }
+  const creates = [];
+  const updates = [];
+  for (const source of effectSources) {
+    const data = duplicateNetherscrollsData(source);
+    delete data._id;
+    delete data.id;
+    delete data.parent;
+    const key = toTrimmedStringOrNull(
+      source?.netherscrollsId ?? source?.id ?? source?.origin ?? source?.name
+    ) ?? buildNetherscrollsStableId(JSON.stringify(source));
+    data.flags = data.flags ?? {};
+    data.flags[MODULE_ID] = {
+      ...(data.flags[MODULE_ID] ?? {}),
+      characterId,
+      effectKey: key,
+      importedCharacterEffect: true,
+    };
+    const existing = existingByKey.get(key);
+    if (existing?.id) updates.push({ ...data, _id: existing.id });
+    else creates.push(data);
+  }
+  if (updates.length) await actor.updateEmbeddedDocuments("ActiveEffect", updates);
+  if (creates.length) await actor.createEmbeddedDocuments("ActiveEffect", creates, { renderSheet: false });
+  return { created: creates.length, updated: updates.length };
 }
 
 Hooks.once("ready", () => {
@@ -1463,6 +2242,8 @@ function getNetherscrollsSourceImportDataset(typeKey) {
     feats: "feat",
     items: "item",
     spells: "spell",
+    backgrounds: "background",
+    races: "race",
   };
   return datasets[typeKey] ?? typeKey;
 }
@@ -1617,6 +2398,20 @@ async function applyNetherscrollsImportResponse(data, requestTypeKey = null, all
     : null;
   if (Array.isArray(spells)) {
     result.spells = await importNetherscrollsSpells(spells);
+  }
+
+  const backgrounds = shouldImportType("backgrounds")
+    ? getNetherscrollsResponseDataset(data, "backgrounds", requestTypeKey)
+    : null;
+  if (Array.isArray(backgrounds)) {
+    result.backgrounds = await importNetherscrollsGenericFoundryItems(backgrounds, "backgrounds");
+  }
+
+  const races = shouldImportType("races")
+    ? getNetherscrollsResponseDataset(data, "races", requestTypeKey)
+    : null;
+  if (Array.isArray(races)) {
+    result.races = await importNetherscrollsGenericFoundryItems(races, "races");
   }
 
   return result;
@@ -1948,6 +2743,60 @@ async function importNetherscrollsSpells(spells) {
     created: created.length,
     updated: updates.length,
     deleted: deleteIds.length,
+  };
+}
+
+async function importNetherscrollsGenericFoundryItems(rows, typeKey) {
+  const pack = await getNetherscrollsImportPack(typeKey);
+  if (!pack) throw new Error(`Netherscrolls ${getNetherscrollsImportTypeLabel(typeKey)} compendium pack was not found.`);
+  await ensureNetherscrollsImportPackWritable(pack);
+
+  const existingByNetherId = await getCompendiumDocumentsByNetherId(pack);
+  const itemData = [];
+  const deleteIds = [];
+  for (const row of rows) {
+    const netherscrollsId = getNetherscrollsSourceId(row);
+    if (isNetherscrollsDeleted(row)) {
+      const existing = netherscrollsId ? existingByNetherId.get(String(netherscrollsId)) : null;
+      if (existing?.id) deleteIds.push(existing.id);
+      continue;
+    }
+
+    const foundryItem = getNetherscrollsFoundryItemPayload(row);
+    const source = duplicateNetherscrollsData(foundryItem ?? row);
+    delete source._id;
+    delete source.id;
+    delete source.folder;
+    source.name = toTrimmedStringOrNull(source.name) ?? toTrimmedStringOrNull(row?.name) ?? "Netherscrolls Content";
+    source.type = toTrimmedStringOrNull(source.type) ?? (typeKey === "races" ? "race" : "background");
+    source.img = normalizeNetherscrollsImportImagePath(source.img, row?.img, row?.image);
+    source.system ??= {};
+    source.effects ??= [];
+    applyNetherscrollsImportFlags(source, row, netherscrollsId);
+    if (netherscrollsId && existingByNetherId.has(String(netherscrollsId))) {
+      source._id = existingByNetherId.get(String(netherscrollsId)).id;
+    }
+    itemData.push(source);
+  }
+
+  const ItemClass = Item?.implementation ?? Item;
+  const uniqueDeleteIds = Array.from(new Set(deleteIds));
+  if (uniqueDeleteIds.length) {
+    await ItemClass.deleteDocuments(uniqueDeleteIds, { pack: pack.collection });
+  }
+
+  const updates = itemData.filter((item) => item._id);
+  const creates = itemData.filter((item) => !item._id);
+  if (updates.length) {
+    await ItemClass.updateDocuments(updates, { pack: pack.collection });
+  }
+  const created = creates.length
+    ? await ItemClass.createDocuments(creates, { pack: pack.collection })
+    : [];
+  return {
+    created: created.length,
+    updated: updates.length,
+    deleted: uniqueDeleteIds.length,
   };
 }
 

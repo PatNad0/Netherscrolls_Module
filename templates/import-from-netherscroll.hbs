@@ -4,6 +4,10 @@
       <i class="{{#if hasApiKey}}fa-solid fa-key{{else}}fa-solid fa-triangle-exclamation{{/if}}"></i>
       <span>{{#if hasApiKey}}API key ready{{else}}API key missing{{/if}}</span>
     </div>
+    <div class="ns-import-library-status {{#if compendiumReady}}is-ready{{else}}is-missing{{/if}}" data-ns-compendium-status>
+      <i class="{{#if compendiumReady}}fa-solid fa-boxes-stacked{{else}}fa-solid fa-lock{{/if}}"></i>
+      <span>{{#if compendiumReady}}Netherscrolls library ready ({{compendiumDocumentCount}} documents){{else}}Import the Netherscrolls library to unlock characters{{/if}}</span>
+    </div>
   </header>
 
   <div class="ns-import-layout">
@@ -47,10 +51,46 @@
     </fieldset>
   </div>
 
+  <fieldset class="ns-import-panel ns-character-import-panel" data-ns-character-import-panel {{#unless compendiumReady}}disabled{{/unless}}>
+    <legend>Campaign Characters</legend>
+    <div class="ns-character-import-prerequisite {{#if compendiumReady}}is-ready{{else}}is-blocked{{/if}}" data-ns-character-prerequisite>
+      {{#if compendiumReady}}
+        Select a campaign, then choose the Netherscrolls characters to create or update in Foundry.
+      {{else}}
+        Import Netherscrolls compendium content first. Character import is locked until the library contains Netherscrolls documents.
+      {{/if}}
+    </div>
+    <div class="ns-character-import-controls">
+      <label>
+        <span>Campaign</span>
+        <select name="campaignId" data-ns-campaign-select {{#unless compendiumReady}}disabled{{/unless}}>
+          <option value="">{{#if compendiumReady}}Loading campaigns…{{else}}Library import required{{/if}}</option>
+        </select>
+      </label>
+      <button type="button" class="ns-character-refresh" data-ns-character-action="refresh-campaigns" {{#unless compendiumReady}}disabled{{/unless}}>
+        <i class="fa-solid fa-rotate"></i> Refresh campaigns
+      </button>
+      <button type="button" data-ns-character-action="select-all" {{#unless compendiumReady}}disabled{{/unless}}>
+        Select all
+      </button>
+      <button type="button" data-ns-character-action="clear-selection" {{#unless compendiumReady}}disabled{{/unless}}>
+        Clear
+      </button>
+    </div>
+    <div class="ns-character-import-message" data-ns-character-message>
+      {{#if compendiumReady}}Loading campaigns available to this API key…{{else}}Character import is unavailable until the Netherscrolls library has been imported.{{/if}}
+    </div>
+    <div class="ns-character-list" data-ns-character-list></div>
+  </fieldset>
+
   <footer class="sheet-footer flexrow">
     <button type="submit">
       <i class="fa-solid fa-cloud-arrow-down"></i>
-      Import Selected
+      Import Library Content
+    </button>
+    <button type="button" data-ns-character-action="import-selected" {{#unless compendiumReady}}disabled{{/unless}}>
+      <i class="fa-solid fa-users"></i>
+      Import Selected Characters
     </button>
   </footer>
 </form>
