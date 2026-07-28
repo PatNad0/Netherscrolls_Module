@@ -1906,11 +1906,21 @@ async function importNetherscrollsSelectedCampaignCharacters(root, selected) {
 }
 
 async function hydrateNetherscrollsImportedCharacter(importedCharacter, campaignId) {
-  if (importedCharacter?.foundryActor && typeof importedCharacter.foundryActor === "object") {
+  const listActor = importedCharacter?.foundryActor;
+  const hasListActor = listActor && typeof listActor === "object";
+  const hasUnresolvedListImage = isNetherscrollsUnresolvedImageKey(listActor?.img);
+  if (hasListActor && !hasUnresolvedListImage) {
     debugNetherscrollsCharacterImport("Using Foundry Actor payload supplied by the campaign list.", {
       characterId: importedCharacter.id,
     });
     return importedCharacter;
+  }
+  if (hasUnresolvedListImage) {
+    console.warn(
+      `${MODULE_ID} | Foundry Import | Campaign list returned an unresolved image key; ` +
+      "refreshing the Actor from the single-character route.",
+      listActor.img
+    );
   }
   const apiKey = getNetherscrollsApiKey();
   const endpoint = `${NETHERSCROLLS_CAMPAIGNS_ENDPOINT}/${encodeURIComponent(campaignId)}/characters/${encodeURIComponent(importedCharacter.id)}`;
@@ -2043,6 +2053,15 @@ async function applyNetherscrollsCampaignCharacter(importedCharacter, folder, { 
   onProgress?.(`adding or updating ${content.items.length} item${content.items.length === 1 ? "" : "s"}...`);
   const itemResult = await reconcileNetherscrollsCharacterActorItems(actor, content.items, characterId);
   debugNetherscrollsCharacterImport("Reconciled character items.", { characterId, itemResult });
+  onProgress?.("linking background, race, and original class...");
+  const documentLinks = await repairNetherscrollsCharacterActorDocumentLinks(
+    actor,
+    importedCharacter.character
+  );
+  debugNetherscrollsCharacterImport("Repaired Actor embedded-document links.", {
+    characterId,
+    documentLinks,
+  });
   onProgress?.(`adding or updating ${effectSources.length} effect${effectSources.length === 1 ? "" : "s"}...`);
   const effectResult = await reconcileNetherscrollsCharacterActorEffects(actor, effectSources, characterId);
   debugNetherscrollsCharacterImport("Reconciled character effects.", { characterId, effectResult });
@@ -2071,6 +2090,7 @@ async function applyNetherscrollsCampaignCharacter(importedCharacter, folder, { 
     fetched: content.fetched,
     items: itemResult,
     effects: effectResult,
+    documentLinks,
     repairedFeatures,
   };
 }
@@ -2803,6 +2823,71 @@ async function reconcileNetherscrollsCharacterActorItems(actor, itemData, charac
     updated: updates.length,
     deletedDuplicates: duplicateExistingIds.length,
   };
+}
+
+async function repairNetherscrollsCharacterActorDocumentLinks(actor, character = null) {
+  if (!actor?.update) return {};
+  const references = [
+    {
+      path: "system.details.background",
+      types: new Set(["background"]),
+      netherscrollsId: normalizeNetherscrollsReferenceValue(
+        character?.backgroundId ?? character?.background?.backgroundId ?? character?.background?.id
+      ),
+    },
+    {
+      path: "system.details.race",
+      types: new Set(["race", "species"]),
+      netherscrollsId: normalizeNetherscrollsReferenceValue(
+        character?.raceId ??
+        character?.speciesId ??
+        character?.race?.raceId ??
+        character?.race?.id ??
+        character?.species?.speciesId ??
+        character?.species?.id
+      ),
+    },
+    {
+      path: "system.details.originalClass",
+      types: new Set(["class"]),
+      netherscrollsId: getNetherscrollsCharacterOriginalClassId(character),
+    },
+  ];
+  const items = getNetherscrollsActorItems(actor);
+  const updates = {};
+  const repaired = {};
+
+  for (const reference of references) {
+    if (!reference.netherscrollsId) continue;
+    const item = items.find((candidate) => (
+      reference.types.has(candidate?.type) &&
+      String(getItemNetherId(candidate) ?? "") === reference.netherscrollsId
+    ));
+    if (!item?.id) continue;
+    updates[reference.path] = item.id;
+    repaired[reference.path] = item.id;
+  }
+
+  if (Object.keys(updates).length) await actor.update(updates);
+  return repaired;
+}
+
+function getNetherscrollsCharacterOriginalClassId(character) {
+  const direct = normalizeNetherscrollsReferenceValue(
+    character?.originalClassId ??
+    character?.classId ??
+    character?.originalClass?.classId ??
+    character?.originalClass?.id ??
+    character?.class?.classId ??
+    character?.class?.id
+  );
+  if (direct) return direct;
+  const classes = Array.isArray(character?.classes) ? character.classes : [];
+  for (const entry of classes) {
+    const id = normalizeNetherscrollsReferenceValue(entry?.classId ?? entry?.id);
+    if (id) return id;
+  }
+  return null;
 }
 
 async function reconcileNetherscrollsCharacterActorEffects(actor, effectSources, characterId) {
@@ -3905,7 +3990,7 @@ function normalizeNetherscrollsPersistentImageValues(values, fallback) {
 function normalizeNetherscrollsPersistentImagePath(value, fallback = NETHERSCROLLS_DEFAULT_IMAGE) {
   const img = String(value ?? "").trim();
   if (/^https?:\/\//i.test(img)) return img;
-  if (/^image\//i.test(img)) {
+  if (isNetherscrollsUnresolvedImageKey(img)) {
     console.error(
       `${MODULE_ID} | Netherscrolls returned an unresolved image key. ` +
       "The API requires R2_PUBLIC_BASE_URL.",
@@ -3914,6 +3999,10 @@ function normalizeNetherscrollsPersistentImagePath(value, fallback = NETHERSCROL
     return fallback;
   }
   return img || fallback;
+}
+
+function isNetherscrollsUnresolvedImageKey(value) {
+  return /^image\//i.test(String(value ?? "").trim());
 }
 
 function isNetherscrollsDeleted(data) {

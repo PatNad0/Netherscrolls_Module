@@ -205,6 +205,7 @@ globalThis.__test = {
   resolveNetherscrollsCharacterItemSources,
   resolveNetherscrollsCharacterItemSource,
   reconcileNetherscrollsCharacterActorItems,
+  repairNetherscrollsCharacterActorDocumentLinks,
   reconcileNetherscrollsCharacterActorEffects,
   getNetherscrollsCompendiumDocumentsById,
   applyNetherscrollsImportResponse,
@@ -818,6 +819,55 @@ test("deduplicates embedded items and effects on first import and re-import", as
   assert.equal(actor.effects.length, 1);
 });
 
+test("repairs D&D5e background, race, and original-class embedded Item links", async () => {
+  const { context, importer } = createHarness();
+  const actor = makeActor(context, {
+    name: "Hero",
+    system: { details: {} },
+  });
+  actor.items.push(
+    makeDocument({
+      _id: "foundry-background",
+      name: "Acolyte",
+      type: "background",
+      flags: { netherscrolls: { id: "background-1" } },
+    }),
+    makeDocument({
+      _id: "foundry-race",
+      name: "Aasimar",
+      type: "race",
+      flags: { netherscrolls: { id: "race-1" } },
+    }),
+    makeDocument({
+      _id: "foundry-class",
+      name: "Cleric",
+      type: "class",
+      flags: { netherscrolls: { id: "class-1" } },
+    })
+  );
+  let changes = null;
+  actor.update = async (update) => {
+    changes = update;
+  };
+
+  const repaired = await importer.repairNetherscrollsCharacterActorDocumentLinks(
+    actor,
+    {
+      backgroundId: "background-1",
+      raceId: "race-1",
+      classes: [{ classId: "class-1", level: 12 }],
+    }
+  );
+
+  const expected = {
+    "system.details.background": "foundry-background",
+    "system.details.race": "foundry-race",
+    "system.details.originalClass": "foundry-class",
+  };
+  assert.deepEqual(clone(changes), expected);
+  assert.deepEqual(clone(repaired), expected);
+});
+
 test("imports classes, subclasses, and features into separate idempotent packs", async () => {
   const { context, importer } = createHarness();
   const classPack = makePack("world.netherscrolls-classes", [
@@ -1155,7 +1205,11 @@ test("fetches a detailed Foundry Import character at most once", async () => {
   const fullImport = {
     characterId: "character-1",
     character: { _id: "character-1", name: "Hero" },
-    foundryActor: { name: "Hero", type: "character" },
+    foundryActor: {
+      name: "Hero",
+      type: "character",
+      img: "https://assets.example.com/image/hero.png",
+    },
   };
   let fetches = 0;
   context.fetch = async () => {
@@ -1180,6 +1234,18 @@ test("fetches a detailed Foundry Import character at most once", async () => {
     name: "Hero",
   }, "campaign-1");
   assert.equal(fetches, 1);
+
+  const refreshed = await importer.hydrateNetherscrollsImportedCharacter({
+    id: "character-1",
+    name: "Hero",
+    foundryActor: {
+      name: "Hero",
+      type: "character",
+      img: "image/old-list-snapshot.png",
+    },
+  }, "campaign-1");
+  assert.equal(fetches, 2);
+  assert.equal(refreshed.foundryActor.img, "https://assets.example.com/image/hero.png");
 });
 
 test("declares every intended world compendium", () => {
