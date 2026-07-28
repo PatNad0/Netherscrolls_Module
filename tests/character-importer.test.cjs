@@ -193,6 +193,9 @@ function createHarness() {
 globalThis.__test = {
   NETHERSCROLLS_WORLD_IMPORT_PACKS,
   normalizeNetherscrollsCharacterActorCreationData,
+  normalizeNetherscrollsImagePath,
+  normalizeNetherscrollsImportImagePath,
+  sortNetherscrollsSpellbookSections,
   buildNetherscrollsPortableActiveEffects,
   buildNetherscrollsSourceImportRequest,
   getNetherscrollsCharacterSourceId,
@@ -437,6 +440,42 @@ test("uses real website reference shapes without treating Foundry _id as identit
   assert.deepEqual(Array.from(blankOptionalLinks), []);
 });
 
+test("uses permanent public Actor images verbatim and rejects unresolved object keys", () => {
+  const { importer, logs } = createHarness();
+  const publicUrl = "https://assets.example.com/image/S%C3%A9l%C3%A9n%C3%A9.png?rev=2";
+  const actor = {
+    name: "Séléné",
+    img: `  ${publicUrl}  `,
+    system: { traits: {}, attributes: {} },
+  };
+
+  importer.normalizeNetherscrollsCharacterActorCreationData(actor);
+  assert.equal(actor.img, publicUrl);
+
+  actor.img = "image/1770592213931-e2fee0caf4b0-image.png";
+  importer.normalizeNetherscrollsCharacterActorCreationData(actor);
+  assert.equal(actor.img, "https://i.postimg.cc/wBj0LZyj/image.png");
+  assert.match(logs.error.at(-1)[0], /R2_PUBLIC_BASE_URL/);
+
+  assert.equal(
+    importer.normalizeNetherscrollsImportImagePath("modules/example/portrait.webp"),
+    "modules/example/portrait.webp"
+  );
+
+  const item = importer.prepareNetherscrollsCharacterActorItemData(
+    null,
+    {
+      name: "Unresolved Portrait",
+      type: "loot",
+      img: "image/unresolved-item.png",
+      system: {},
+    },
+    { id: "item-1" },
+    "item-1"
+  );
+  assert.equal(item.img, "https://i.postimg.cc/wBj0LZyj/image.png");
+});
+
 test("keeps compendium data canonical while preserving mutable character state", () => {
   const { importer } = createHarness();
   const canonical = makeDocument({
@@ -537,6 +576,26 @@ test("normalizes library spells for leveled Actor spellbook sections", () => {
   assert.equal(repairedActorSpell.system.method, "spell");
   assert.equal(repairedActorSpell.system.prepared, 1);
   assert.equal(repairedActorSpell.system.sourceItem, "");
+});
+
+test("orders D&D5e spellbook sections by method priority and spell level", () => {
+  const { importer } = createHarness();
+  const spellbook = {
+    spell2: { label: "2nd Level", order: 1000, dataset: { level: 2 } },
+    spell4: { label: "4th Level", order: 1000, dataset: { level: 4 } },
+    spell6: { label: "6th Level", order: 1000, dataset: { level: 6 } },
+    spell5: { label: "5th Level", order: 1000, dataset: { level: 5 } },
+    innate: { label: "Innate", order: 2000, dataset: { level: null } },
+    spell0: { label: "Cantrips", order: 0, dataset: { level: 0 } },
+  };
+
+  const ordered = importer.sortNetherscrollsSpellbookSections(spellbook);
+
+  assert.deepEqual(
+    Object.keys(ordered),
+    ["spell0", "spell2", "spell4", "spell5", "spell6", "innate"]
+  );
+  assert.equal(ordered.spell5, spellbook.spell5);
 });
 
 test("repairs stale spell methods and levels during an idempotent library update", async () => {

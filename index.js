@@ -149,25 +149,6 @@ const NETHERSCROLLS_CHARACTER_FOLDER = {
 };
 const NETHERSCROLLS_DEFAULT_IMAGE = "https://i.postimg.cc/wBj0LZyj/image.png";
 const NETHERSCROLLS_IMPORT_IMAGE = NETHERSCROLLS_DEFAULT_IMAGE;
-const NETHERSCROLLS_GENERIC_IMAGE_PATHS = new Set([
-  "icons/svg/item-bag.svg",
-  "systems/dnd5e/icons/svg/items/equipment.svg",
-  "systems/dnd5e/icons/svg/items/feature.svg",
-  "systems/dnd5e/icons/svg/items/loot.svg",
-  "systems/dnd5e/icons/svg/items/spell.svg",
-  "systems/dnd5e/icons/svg/items/tool.svg",
-]);
-const NETHERSCROLLS_VALID_IMAGE_EXTENSIONS = new Set([
-  "apng",
-  "avif",
-  "bmp",
-  "gif",
-  "jpeg",
-  "jpg",
-  "png",
-  "svg",
-  "webp",
-]);
 const netherscrollsCharacterImportState = new WeakMap();
 const netherscrollsCharacterImportLocks = new Map();
 const NETHERSCROLLS_MAX_SPELL_LEVEL = 15;
@@ -2097,6 +2078,11 @@ async function applyNetherscrollsCampaignCharacter(importedCharacter, folder, { 
 function normalizeNetherscrollsCharacterActorCreationData(actorPayload, character = null) {
   if (!actorPayload || typeof actorPayload !== "object") return;
 
+  actorPayload.img = normalizeNetherscrollsPersistentImagePath(
+    actorPayload.img,
+    NETHERSCROLLS_DEFAULT_IMAGE
+  );
+
   // D&D5e calculates a new character's prototype-token dimensions from its
   // trait size. Import payloads created with a display name (for example "Medium")
   // instead of a D&D5e size key cause that calculation to fail during Actor.create.
@@ -2618,6 +2604,7 @@ function prepareNetherscrollsCharacterActorItemData(document, direct, source, ne
   delete data.parent;
   data.name = toTrimmedStringOrNull(data.name) ?? "Netherscrolls Item";
   data.type = toTrimmedStringOrNull(data.type) ?? "loot";
+  data.img = normalizeNetherscrollsImportImagePath(data.img);
   if (data.type === "spell") {
     data.system = data.system && typeof data.system === "object" ? data.system : {};
     data.system.level = getNetherscrollsSpellLevel(data);
@@ -2911,6 +2898,7 @@ function isNetherscrollsImportedCharacterDocument(document, markerFlag, characte
 }
 
 Hooks.once("ready", () => {
+  installNetherscrollsSpellbookSectionOrdering();
   toggleRerollInitHook(game.settings.get(MODULE_ID, SETTINGS.rerollInit) === true);
   toggleNpcDeathSaveHook(game.settings.get(MODULE_ID, SETTINGS.npcDeathSave) === true);
   initEnhanceDialogInputHandlers();
@@ -2969,8 +2957,62 @@ let enhanceDialogInputHandlersBound = false;
 let chatNumberActionHandlersBound = false;
 let chatNumberActionToolbar = null;
 const netherscrollsClassFeatureRepairTimers = new Map();
+const netherscrollsSpellbookPatchedClasses = new WeakSet();
 let netherscrollsImportQueuePollTimer = null;
 let netherscrollsImportQueuePollRunning = false;
+
+function installNetherscrollsSpellbookSectionOrdering() {
+  const characterSheets = globalThis.CONFIG?.Actor?.sheetClasses?.character ?? {};
+  for (const registration of Object.values(characterSheets)) {
+    const SheetClass = registration?.cls;
+    const prototype = SheetClass?.prototype;
+    if (
+      typeof SheetClass !== "function" ||
+      typeof prototype?._prepareSpellbook !== "function" ||
+      netherscrollsSpellbookPatchedClasses.has(SheetClass)
+    ) {
+      continue;
+    }
+
+    const prepareSpellbook = prototype._prepareSpellbook;
+    Object.defineProperty(prototype, "_prepareSpellbook", {
+      configurable: true,
+      writable: true,
+      value: function prepareOrderedNetherscrollsSpellbook(...args) {
+        return sortNetherscrollsSpellbookSections(prepareSpellbook.apply(this, args));
+      },
+    });
+    netherscrollsSpellbookPatchedClasses.add(SheetClass);
+  }
+}
+
+function sortNetherscrollsSpellbookSections(spellbook) {
+  if (!spellbook || typeof spellbook !== "object" || Array.isArray(spellbook)) return spellbook;
+  return Object.fromEntries(
+    Object.entries(spellbook).sort(([leftKey, left], [rightKey, right]) => {
+      const orderDifference =
+        toNumber(left?.order, 1000) - toNumber(right?.order, 1000);
+      if (orderDifference) return orderDifference;
+
+      const levelDifference =
+        getNetherscrollsSpellbookSectionLevel(leftKey, left) -
+        getNetherscrollsSpellbookSectionLevel(rightKey, right);
+      if (levelDifference) return levelDifference;
+
+      return String(left?.label ?? leftKey).localeCompare(
+        String(right?.label ?? rightKey),
+        game?.i18n?.lang
+      );
+    })
+  );
+}
+
+function getNetherscrollsSpellbookSectionLevel(key, section) {
+  const datasetLevel = Number(section?.dataset?.level);
+  if (Number.isFinite(datasetLevel)) return datasetLevel;
+  const keyLevel = /^spell(\d+)$/i.exec(String(key ?? ""));
+  return keyLevel ? Number(keyLevel[1]) : Number.POSITIVE_INFINITY;
+}
 
 function rerenderActorSheets() {
   const apps = Object.values(ui?.windows ?? {});
@@ -3845,40 +3887,33 @@ function normalizeNetherscrollsReferenceValue(value) {
 }
 
 function normalizeNetherscrollsImagePath(...values) {
-  for (const value of values) {
-    const raw = toTrimmedStringOrNull(value);
-    if (!isValidNetherscrollsImagePath(raw)) continue;
-    if (isNetherscrollsGenericImagePath(raw)) continue;
-    return raw;
-  }
-
-  return NETHERSCROLLS_DEFAULT_IMAGE;
+  return normalizeNetherscrollsPersistentImageValues(values, NETHERSCROLLS_DEFAULT_IMAGE);
 }
 
 function normalizeNetherscrollsImportImagePath(...values) {
+  return normalizeNetherscrollsPersistentImageValues(values, NETHERSCROLLS_IMPORT_IMAGE);
+}
+
+function normalizeNetherscrollsPersistentImageValues(values, fallback) {
   for (const value of values) {
     const raw = toTrimmedStringOrNull(value);
-    if (!isValidNetherscrollsImagePath(raw)) continue;
-    if (isNetherscrollsGenericImagePath(raw)) continue;
-    return raw;
+    if (raw) return normalizeNetherscrollsPersistentImagePath(raw, fallback);
   }
-
-  return NETHERSCROLLS_IMPORT_IMAGE;
+  return fallback;
 }
 
-function isNetherscrollsGenericImagePath(value) {
-  const raw = toTrimmedStringOrNull(value);
-  if (!raw) return false;
-  const path = raw.split(/[?#]/)[0]?.toLowerCase() ?? "";
-  return NETHERSCROLLS_GENERIC_IMAGE_PATHS.has(path);
-}
-
-function isValidNetherscrollsImagePath(value) {
-  const raw = toTrimmedStringOrNull(value);
-  if (!raw) return false;
-  const path = raw.split(/[?#]/)[0]?.toLowerCase() ?? "";
-  const extension = /\.([a-z0-9]+)$/i.exec(path)?.[1];
-  return Boolean(extension && NETHERSCROLLS_VALID_IMAGE_EXTENSIONS.has(extension));
+function normalizeNetherscrollsPersistentImagePath(value, fallback = NETHERSCROLLS_DEFAULT_IMAGE) {
+  const img = String(value ?? "").trim();
+  if (/^https?:\/\//i.test(img)) return img;
+  if (/^image\//i.test(img)) {
+    console.error(
+      `${MODULE_ID} | Netherscrolls returned an unresolved image key. ` +
+      "The API requires R2_PUBLIC_BASE_URL.",
+      img
+    );
+    return fallback;
+  }
+  return img || fallback;
 }
 
 function isNetherscrollsDeleted(data) {
