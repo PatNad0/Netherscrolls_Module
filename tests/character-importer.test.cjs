@@ -402,7 +402,9 @@ test("uses real website reference shapes without treating Foundry _id as identit
         level: 7,
         subclass: { subclassId: "subclass-1" },
       }],
+      race: { name: "Partial race label without an id" },
       raceId: "race-1",
+      background: { name: "Partial background label without an id" },
       backgroundId: "background-1",
     },
   });
@@ -1127,6 +1129,12 @@ test("declares every intended world compendium", () => {
       "subclasses",
     ]
   );
+});
+
+test("exposes the Foundry Import material submit action", () => {
+  const template = fs.readFileSync("templates/import-from-netherscroll.hbs", "utf8");
+  assert.match(template, /<button type="submit" data-ns-import-action="library">/);
+  assert.match(template, /Foundry Import Material/);
 });
 
 test("builds the exact unpruned schema-v2 Foundry Export envelope", () => {

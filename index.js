@@ -1823,11 +1823,6 @@ async function importNetherscrollsSelectedCampaignCharacters(root, selected) {
   debugNetherscrollsCharacterImport("Starting selected-character import.", {
     selectedCount: selected.length,
   });
-  const readiness = await getNetherscrollsCompendiumReadiness();
-  debugNetherscrollsCharacterImport("Checked compendium readiness.", readiness);
-  if (!readiness.ready) {
-    throw new Error("Import Netherscrolls compendium content before importing characters.");
-  }
 
   const campaignId = normalizeNetherscrollsReferenceValue(
     root?.querySelector?.("[data-ns-campaign-select]")?.value
@@ -1874,7 +1869,12 @@ async function importNetherscrollsSelectedCampaignCharacters(root, selected) {
         effectResult: result.effects,
         repairedFeatures: result.repairedFeatures,
       });
-      results.push({ ...result, name: importedCharacter.name, ok: true });
+      results.push({
+        ...result,
+        characterId: importedCharacter.id,
+        name: importedCharacter.name,
+        ok: true,
+      });
     } catch (err) {
       setNetherscrollsCharacterImportMessage(root, `${progressLabel} — failed: ${err?.message ?? String(err)}`, { error: true });
       debugNetherscrollsCharacterImport("Character import failed.", {
@@ -1885,7 +1885,12 @@ async function importNetherscrollsSelectedCampaignCharacters(root, selected) {
         stack: err?.stack,
       });
       console.error(`${MODULE_ID} | Unable to import character ${selectedCharacter?.name ?? ""}.`, err);
-      results.push({ name: selectedCharacter?.name ?? "Unnamed Character", ok: false, error: err?.message ?? String(err) });
+      results.push({
+        characterId: selectedCharacter?.id,
+        name: selectedCharacter?.name ?? "Unnamed Character",
+        ok: false,
+        error: err?.message ?? String(err),
+      });
     }
   }
 
@@ -1910,7 +1915,13 @@ async function importNetherscrollsSelectedCampaignCharacters(root, selected) {
 
   const list = root?.querySelector?.("[data-ns-character-list]");
   const state = getNetherscrollsCharacterImportState(root);
-  if (list) renderNetherscrollsCampaignCharacterList(list, Array.from(state.charactersById.values()));
+  if (list) {
+    renderNetherscrollsCampaignCharacterList(list, Array.from(state.charactersById.values()));
+    const failedIds = new Set(failed.map((result) => String(result.characterId ?? "")));
+    list.querySelectorAll?.('[name="characterIds"]').forEach((input) => {
+      input.checked = failedIds.has(String(input.value));
+    });
+  }
 }
 
 async function hydrateNetherscrollsImportedCharacter(importedCharacter, campaignId) {
@@ -2367,8 +2378,8 @@ function collectNetherscrollsCharacterItemSources(importedCharacter) {
   addSubclassWithFeatures(character.subclasses);
   addSubclassWithFeatures(character.subclass);
   add(character.classFeatures, "classFeatures", { embed: false });
-  add(character.background ?? character.backgroundId, "backgrounds");
-  add(character.race ?? character.raceId, "races");
+  add(character.backgroundId, "backgrounds");
+  add(character.raceId, "races");
   // Actor items are complete direct Foundry payloads. Add them last so the
   // character-record form wins when both represent the same Netherscrolls id,
   // and never interpret their local Foundry `_id` as a Netherscrolls id.
