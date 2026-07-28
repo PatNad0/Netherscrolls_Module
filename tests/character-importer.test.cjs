@@ -526,6 +526,28 @@ test("keeps compendium data canonical while preserving mutable character state",
   assert.equal(prepared.sort, 42);
 });
 
+test("enforces the canonical embedded type for background and race datasets", () => {
+  const { importer } = createHarness();
+  const staleBackground = makeDocument({
+    _id: "stale-background",
+    name: "Acolyte",
+    type: "feat",
+    system: {},
+    flags: { netherscrolls: { id: "background-1" } },
+  });
+
+  const prepared = importer.prepareNetherscrollsCharacterActorItemData(
+    staleBackground,
+    {},
+    { backgroundId: "background-1" },
+    "background-1",
+    "backgrounds"
+  );
+
+  assert.equal(prepared.type, "background");
+  assert.equal(prepared.flags.netherscrolls.id, "background-1");
+});
+
 test("normalizes library spells for leveled Actor spellbook sections", () => {
   const { importer } = createHarness();
   const normalized = importer.normalizeNetherscrollsSpellData({

@@ -2513,7 +2513,13 @@ async function resolveNetherscrollsCharacterItemSource(
     console.warn(`${MODULE_ID} | ${message}`);
     return { item: null };
   }
-  const item = prepareNetherscrollsCharacterActorItemData(document, direct, source, netherscrollsId);
+  const item = prepareNetherscrollsCharacterActorItemData(
+    document,
+    direct,
+    source,
+    netherscrollsId,
+    dataset
+  );
   return { item };
 }
 
@@ -2608,7 +2614,13 @@ async function findNetherscrollsCompendiumDocumentById(dataset, netherscrollsId)
   return document;
 }
 
-function prepareNetherscrollsCharacterActorItemData(document, direct, source, netherscrollsId) {
+function prepareNetherscrollsCharacterActorItemData(
+  document,
+  direct,
+  source,
+  netherscrollsId,
+  dataset = null
+) {
   const fromCompendium = document ? duplicateNetherscrollsDocumentData(document) : {};
   const sourceData = duplicateNetherscrollsData(direct ?? {});
   // A local library match is canonical. Only copy mutable Actor-owned state
@@ -2624,6 +2636,15 @@ function prepareNetherscrollsCharacterActorItemData(document, direct, source, ne
   delete data.parent;
   data.name = toTrimmedStringOrNull(data.name) ?? "Netherscrolls Item";
   data.type = toTrimmedStringOrNull(data.type) ?? "loot";
+  const requiredType = {
+    backgrounds: "background",
+    races: "race",
+    classes: "class",
+    subclasses: "subclass",
+    spells: "spell",
+    feats: "feat",
+  }[dataset];
+  if (requiredType) data.type = requiredType;
   data.img = normalizeNetherscrollsImportImagePath(data.img);
   if (data.type === "spell") {
     data.system = data.system && typeof data.system === "object" ? data.system : {};
@@ -3840,7 +3861,15 @@ async function importNetherscrollsGenericFoundryItems(rows, typeKey) {
       if (classId) source.flags.netherscrolls.classId = classId;
     }
     if (netherscrollsId && existingByNetherId.has(String(netherscrollsId))) {
-      source._id = existingByNetherId.get(String(netherscrollsId)).id;
+      const existing = existingByNetherId.get(String(netherscrollsId));
+      if (
+        fallbackTypes[typeKey] &&
+        toTrimmedStringOrNull(existing?.type) !== source.type
+      ) {
+        if (existing?.id) deleteIds.push(existing.id);
+      } else {
+        source._id = existing.id;
+      }
     }
     itemData.push(source);
   }
