@@ -426,6 +426,15 @@ test("uses real website reference shapes without treating Foundry _id as identit
   assert.equal(byDataset.subclasses.netherscrollsId, "subclass-1");
   assert.equal(byDataset.races.netherscrollsId, "race-1");
   assert.equal(byDataset.backgrounds.netherscrollsId, "background-1");
+
+  const blankOptionalLinks = importer.collectNetherscrollsCharacterItemSources({
+    character: {
+      raceId: "   ",
+      backgroundId: "",
+    },
+    foundryActor: { items: [] },
+  });
+  assert.deepEqual(Array.from(blankOptionalLinks), []);
 });
 
 test("keeps compendium data canonical while preserving mutable character state", () => {
@@ -1020,6 +1029,8 @@ test("creates then updates one Actor with canonical identity and progress feedba
     name: "Hero",
     character: {
       armorClass: { value: 10, misc: 2, bonus: 1 },
+      backgroundId: "",
+      raceId: "",
     },
     foundryActor: {
       name: "Hero",

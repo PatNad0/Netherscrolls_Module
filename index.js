@@ -2334,7 +2334,11 @@ function collectNetherscrollsCharacterItemSources(importedCharacter) {
   ) => {
     const rows = Array.isArray(value) ? value : value == null ? [] : [value];
     for (const row of rows) {
-      const source = typeof row === "string" ? { netherscrollsId: row } : row;
+      const stringId = typeof row === "string"
+        ? normalizeNetherscrollsReferenceValue(row)
+        : null;
+      if (typeof row === "string" && !stringId) continue;
+      const source = typeof row === "string" ? { netherscrollsId: stringId } : row;
       if (!source || typeof source !== "object") continue;
       const resolvedDataset = getNetherscrollsCharacterItemDataset(source, dataset);
       sources.push({
