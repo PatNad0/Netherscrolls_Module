@@ -10121,13 +10121,10 @@ function duplicateNetherscrollsDocumentData(document) {
 }
 
 function getNetherscrollsDocumentFlag(document, key) {
+  if (key === "netherscrollsId") return document?.flags?.netherscrolls?.id ?? null;
   try {
-    if (key === "netherscrollsId") {
-      return document?.getFlag?.("netherscrolls", "id") ?? document?.flags?.netherscrolls?.id ?? null;
-    }
     return document?.getFlag?.(MODULE_ID, key) ?? document?.flags?.[MODULE_ID]?.[key] ?? null;
   } catch {
-    if (key === "netherscrollsId") return document?.flags?.netherscrolls?.id ?? null;
     return document?.flags?.[MODULE_ID]?.[key] ?? null;
   }
 }
@@ -10171,15 +10168,7 @@ function normalizeNetherscrollsName(name) {
 }
 
 function getItemNetherId(item) {
-  try {
-    return normalizeNetherscrollsReferenceValue(
-      item?.getFlag?.("netherscrolls", "id") ??
-      item?.flags?.netherscrolls?.id
-    );
-  } catch (err) {
-    console.warn(`${MODULE_ID} | Unable to read item flags.netherscrolls.id.`, err);
-    return null;
-  }
+  return normalizeNetherscrollsReferenceValue(item?.flags?.netherscrolls?.id);
 }
 
 async function setItemNetherId(item, id) {
@@ -10188,24 +10177,28 @@ async function setItemNetherId(item, id) {
 
 async function setNetherscrollsItemIdentifiers(item, { id = null, classId = null } = {}) {
   try {
-    if (!item?.setFlag) return;
+    if (!item?.update) return;
     const canonicalId = normalizeNetherscrollsReferenceValue(id);
     const canonicalClassId = normalizeNetherscrollsReferenceValue(classId);
-    if (canonicalId) {
-      const current = normalizeNetherscrollsReferenceValue(
-        item?.getFlag?.("netherscrolls", "id") ?? item?.flags?.netherscrolls?.id
-      );
-      if (current !== canonicalId) await item.setFlag("netherscrolls", "id", canonicalId);
-    }
-    if (canonicalClassId && item?.type === "subclass") {
-      const currentClassId = normalizeNetherscrollsReferenceValue(
-        item?.getFlag?.("netherscrolls", "classId") ??
-        item?.flags?.netherscrolls?.classId
-      );
-      if (currentClassId !== canonicalClassId) {
-        await item.setFlag("netherscrolls", "classId", canonicalClassId);
-      }
-    }
+    const currentId = normalizeNetherscrollsReferenceValue(item?.flags?.netherscrolls?.id);
+    const currentClassId = normalizeNetherscrollsReferenceValue(
+      item?.flags?.netherscrolls?.classId
+    );
+    const needsId = Boolean(canonicalId && currentId !== canonicalId);
+    const needsClassId = Boolean(
+      canonicalClassId &&
+      item?.type === "subclass" &&
+      currentClassId !== canonicalClassId
+    );
+    if (!needsId && !needsClassId) return;
+
+    const flags = duplicateNetherscrollsData(item?.flags ?? {});
+    flags.netherscrolls = {
+      ...(flags.netherscrolls ?? {}),
+      ...(needsId ? { id: canonicalId } : {}),
+      ...(needsClassId ? { classId: canonicalClassId } : {}),
+    };
+    await item.update({ flags });
   } catch (err) {
     console.warn(`${MODULE_ID} | Unable to write canonical Netherscrolls Item flags.`, err);
     throw err;
@@ -10235,26 +10228,23 @@ function toNumberOrNull(value) {
 }
 
 function getActorCharacterId(actor) {
-  try {
-    return normalizeNetherscrollsReferenceValue(
-      actor?.getFlag?.("netherscrolls", "characterId") ??
-      actor?.flags?.netherscrolls?.characterId
-    );
-  } catch (err) {
-    console.warn(`${MODULE_ID} | Unable to read actor flags.netherscrolls.characterId.`, err);
-    return null;
-  }
+  return normalizeNetherscrollsReferenceValue(actor?.flags?.netherscrolls?.characterId);
 }
 
 async function setActorCharacterId(actor, characterId) {
   try {
-    if (!actor?.setFlag || !characterId) return;
-    const current =
-      actor?.getFlag?.("netherscrolls", "characterId") ??
-      actor?.flags?.netherscrolls?.characterId ??
-      null;
-    if (current === characterId) return;
-    await actor.setFlag("netherscrolls", "characterId", characterId);
+    const canonicalId = normalizeNetherscrollsReferenceValue(characterId);
+    if (!actor?.update || !canonicalId) return;
+    const current = normalizeNetherscrollsReferenceValue(
+      actor?.flags?.netherscrolls?.characterId
+    );
+    if (current === canonicalId) return;
+    const flags = duplicateNetherscrollsData(actor?.flags ?? {});
+    flags.netherscrolls = {
+      ...(flags.netherscrolls ?? {}),
+      characterId: canonicalId,
+    };
+    await actor.update({ flags });
   } catch (err) {
     console.warn(`${MODULE_ID} | Unable to set actor flags.netherscrolls.characterId.`, err);
     throw err;

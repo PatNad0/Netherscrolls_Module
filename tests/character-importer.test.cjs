@@ -23,12 +23,21 @@ function makeDocument(data) {
   const document = {
     ...raw,
     id,
-    getFlag: (scope, key) => raw.flags?.[scope]?.[key],
+    getFlag(scope, key) {
+      if (scope === "netherscrolls") throw new Error('Flag scope "netherscrolls" is not valid or not currently active');
+      return raw.flags?.[scope]?.[key];
+    },
     async setFlag(scope, key, value) {
+      if (scope === "netherscrolls") throw new Error('Flag scope "netherscrolls" is not valid or not currently active');
       raw.flags ??= {};
       raw.flags[scope] ??= {};
       raw.flags[scope][key] = value;
       this.flags = raw.flags;
+    },
+    async update(changes) {
+      const updated = merge(raw, changes);
+      Object.assign(raw, updated);
+      Object.assign(this, updated);
     },
     toObject: () => clone(raw),
   };
@@ -237,9 +246,11 @@ function makeActor(context, payload = {}) {
       });
     },
     getFlag(scope, key) {
+      if (scope === "netherscrolls") throw new Error('Flag scope "netherscrolls" is not valid or not currently active');
       return this.flags?.[scope]?.[key];
     },
     async setFlag(scope, key, value) {
+      if (scope === "netherscrolls") throw new Error('Flag scope "netherscrolls" is not valid or not currently active');
       this.flags[scope] ??= {};
       this.flags[scope][key] = value;
     },
@@ -567,7 +578,7 @@ test("repairs stale spell methods and levels during an idempotent library update
   assert.equal(spellPack.documents[0].system.sourceItem, "");
 });
 
-test("reuses compendium indexes and one targeted Foundry Import selection", async () => {
+test("resolves targeted Import selections without using an invalid Foundry flag scope", async () => {
   const { context, importer } = createHarness();
   const cachePack = makePack("world.cache", [
     makeDocument({
@@ -628,7 +639,7 @@ test("reuses compendium indexes and one targeted Foundry Import selection", asyn
     backgrounds: ["bg-1", "bg-2"],
   });
   assert.deepEqual(
-    backgrounds.documents.map((document) => document.getFlag("netherscrolls", "id")).sort(),
+    backgrounds.documents.map((document) => document.flags.netherscrolls.id).sort(),
     ["bg-1", "bg-2"]
   );
   assert.deepEqual(Array.from(resolved.items, (item) => item.name).sort(), ["One", "Two"]);
@@ -979,7 +990,7 @@ test("class feature repair filters level/optional/owned features and is idempote
   const first = await importer.repairNetherscrollsActorClassFeatures(actor);
   const second = await importer.repairNetherscrollsActorClassFeatures(actor);
   const ids = actor.items
-    .map((item) => item.getFlag?.("netherscrolls", "id"))
+    .map((item) => item.flags?.netherscrolls?.id)
     .filter(Boolean);
   assert.equal(first.created, 2);
   assert.equal(second.created, 0);
@@ -1194,11 +1205,11 @@ test("writes canonical Actor, Item, and subclass ids from Foundry Export respons
     },
   });
 
-  assert.equal(actor.getFlag("netherscrolls", "characterId"), "character-1");
-  assert.equal(actor.items[0].getFlag("netherscrolls", "id"), "class-1");
-  assert.equal(actor.items[1].getFlag("netherscrolls", "id"), "subclass-1");
-  assert.equal(actor.items[1].getFlag("netherscrolls", "classId"), "class-1");
-  assert.equal(actor.items[2].getFlag("netherscrolls", "id"), "spell-1");
+  assert.equal(actor.flags.netherscrolls.characterId, "character-1");
+  assert.equal(actor.items[0].flags.netherscrolls.id, "class-1");
+  assert.equal(actor.items[1].flags.netherscrolls.id, "subclass-1");
+  assert.equal(actor.items[1].flags.netherscrolls.classId, "class-1");
+  assert.equal(actor.items[2].flags.netherscrolls.id, "spell-1");
 });
 
 test("retries only failed entries from a 207 campaign Foundry Export", async () => {
@@ -1328,7 +1339,7 @@ test("acknowledges Foundry Import queue entries only after a complete apply", as
     methods.some((entry) => entry.method === "DELETE" && entry.url.endsWith("/imports/character-1")),
     true
   );
-  assert.equal(context.game.actors[0].getFlag("netherscrolls", "characterId"), "character-1");
+  assert.equal(context.game.actors[0].flags.netherscrolls.characterId, "character-1");
 });
 
 test("leaves a Foundry Import queued when a required library document is unavailable", async () => {
