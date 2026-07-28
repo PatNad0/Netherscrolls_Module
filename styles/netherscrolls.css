@@ -101,6 +101,9 @@
 
 .netherscrolls-import-window .window-content {
   padding: 0;
+  /* Keep the importer usable when its options exceed the available viewport. */
+  max-height: calc(100vh - 5rem);
+  overflow-y: auto;
 }
 
 .netherscrolls-import-window .window-content.ns-import-form,

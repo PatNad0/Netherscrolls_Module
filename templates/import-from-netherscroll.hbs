@@ -23,6 +23,16 @@
         {{/each}}
       </div>
     </fieldset>
+    <fieldset class="ns-import-panel ns-import-since-panel">
+      <legend>Range</legend>
+      <label class="ns-import-since-toggle">
+        <input type="checkbox" name="sinceEnabled" value="1">
+        <span>Since...</span>
+      </label>
+      <input type="date" name="sinceDate" value="{{defaultSinceDate}}" disabled>
+      <div class="ns-import-forever">Forever</div>
+    </fieldset>
+
     <fieldset class="ns-import-panel ns-import-sources-panel">
       <legend>Sources</legend>
       <div class="ns-import-source-list {{#if sourceLoading}}is-loading{{/if}}" role="group" aria-label="Netherscroll sources">
@@ -38,16 +48,6 @@
       {{else}}
         <div class="ns-import-source-message">{{#if sourceLoading}}Connecting to the API server...{{else}}{{#if hasSources}}Pick any sources to limit the import. Leave all unchecked to import all sources.{{else}}No importable sources returned.{{/if}}{{/if}}</div>
       {{/if}}
-    </fieldset>
-
-    <fieldset class="ns-import-panel ns-import-since-panel">
-      <legend>Range</legend>
-      <label class="ns-import-since-toggle">
-        <input type="checkbox" name="sinceEnabled" value="1">
-        <span>Since...</span>
-      </label>
-      <input type="date" name="sinceDate" value="{{defaultSinceDate}}" disabled>
-      <div class="ns-import-forever">Forever</div>
     </fieldset>
   </div>
 
@@ -70,12 +70,6 @@
       <button type="button" class="ns-character-refresh" data-ns-character-action="refresh-campaigns" {{#unless compendiumReady}}disabled{{/unless}}>
         <i class="fa-solid fa-rotate"></i> Refresh campaigns
       </button>
-      <button type="button" data-ns-character-action="select-all" {{#unless compendiumReady}}disabled{{/unless}}>
-        Select all
-      </button>
-      <button type="button" data-ns-character-action="clear-selection" {{#unless compendiumReady}}disabled{{/unless}}>
-        Clear
-      </button>
     </div>
     <div class="ns-character-import-message" data-ns-character-message>
       {{#if compendiumReady}}Loading campaigns available to this API key…{{else}}Character import is unavailable until the Netherscrolls library has been imported.{{/if}}
@@ -84,10 +78,6 @@
   </fieldset>
 
   <footer class="sheet-footer flexrow">
-    <button type="submit">
-      <i class="fa-solid fa-cloud-arrow-down"></i>
-      Import Library Content
-    </button>
     <button type="button" data-ns-character-action="import-selected" {{#unless compendiumReady}}disabled{{/unless}}>
       <i class="fa-solid fa-users"></i>
       Import Selected Characters
