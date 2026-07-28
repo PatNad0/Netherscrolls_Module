@@ -1815,7 +1815,10 @@ async function importNetherscrollsCampaignCharacter(exported, folder, { onProgre
   const itemSources = collectNetherscrollsCharacterItemSources(exported);
   const classSourceCount = itemSources.filter((entry) => entry.dataset === "classes").length;
   const classFeatureSourceCount = itemSources.filter((entry) => entry.dataset === "classFeatures").length;
-  const effectSources = Array.isArray(actorPayload.effects) ? actorPayload.effects : [];
+  const effectSources = [
+    ...(Array.isArray(actorPayload.effects) ? actorPayload.effects : []),
+    ...buildNetherscrollsPortableActiveEffects(exported.character),
+  ];
   delete actorPayload.items;
   delete actorPayload.effects;
   delete actorPayload._id;
@@ -1920,6 +1923,19 @@ function normalizeNetherscrollsCharacterActorCreationData(actorPayload, characte
   actorPayload.system.traits = actorPayload.system.traits && typeof actorPayload.system.traits === "object"
     ? actorPayload.system.traits
     : {};
+
+  // XP belongs to the character record. Prefer it over a stale Foundry export
+  // so subsequent character imports keep the Actor's progression in sync.
+  const characterXp = toNumberOrNull(character?.xp ?? character?.experience);
+  if (characterXp != null) {
+    actorPayload.system.details = actorPayload.system.details && typeof actorPayload.system.details === "object"
+      ? actorPayload.system.details
+      : {};
+    actorPayload.system.details.xp = actorPayload.system.details.xp && typeof actorPayload.system.details.xp === "object"
+      ? actorPayload.system.details.xp
+      : {};
+    actorPayload.system.details.xp.value = Math.max(0, Math.trunc(characterXp));
+  }
 
   const sizes = globalThis.CONFIG?.DND5E?.actorSizes ?? {};
   const sizeValue = actorPayload.system.traits.size;
@@ -2398,6 +2414,10 @@ function prepareNetherscrollsCharacterActorItemData(document, direct, source, ne
   if (data.type === "spell") {
     data.system = data.system && typeof data.system === "object" ? data.system : {};
     data.system.level = getNetherscrollsSpellLevel(data);
+    // Library records intentionally share a neutral sort value. Actor spells
+    // need a level-based value so D&D5e builds spellbook sections in level
+    // order instead of the arbitrary order of the character reference array.
+    data.sort = getNetherscrollsCharacterSpellSort(data.system.level);
     data.system.method = normalizeNetherscrollsSpellMethod(sourceData, data);
     data.system.prepared = getNetherscrollsSpellPreparedState(sourceData, data);
     // `sourceItem` is an Actor-owned association. Never retain an inferred
@@ -2446,6 +2466,10 @@ function prepareNetherscrollsCharacterActorItemData(document, direct, source, ne
   };
   if (source?.lastRev) data.flags[MODULE_ID].lastRev = source.lastRev;
   return data;
+}
+
+function getNetherscrollsCharacterSpellSort(level) {
+  return Math.max(0, Math.trunc(toNumber(level, 0))) * 100000;
 }
 
 function applyNetherscrollsCharacterItemState(target, source) {
@@ -6386,6 +6410,12 @@ function sanitizeNetherscrollsActivityTargets(activities) {
 }
 
 function applyNetherscrollsImportFlags(documentData, source, netherscrollsId) {
+  const portableEffects = buildNetherscrollsPortableActiveEffects(source);
+  if (portableEffects.length) {
+    const existingEffects = Array.isArray(documentData.effects) ? documentData.effects : [];
+    documentData.effects = [...existingEffects, ...portableEffects];
+  }
+
   if (!netherscrollsId) return;
   documentData.flags = documentData.flags ?? {};
   documentData.flags[MODULE_ID] = {
@@ -6400,6 +6430,69 @@ function applyNetherscrollsImportFlags(documentData, source, netherscrollsId) {
   if (Array.isArray(source?.classes)) documentData.flags[MODULE_ID].classes = source.classes;
   if (source?.demifeat != null) documentData.flags[MODULE_ID].demifeat = Boolean(source.demifeat);
   if (source?.isHomebrew != null) documentData.flags[MODULE_ID].isHomebrew = Boolean(source.isHomebrew);
+}
+
+function buildNetherscrollsPortableActiveEffects(source) {
+  if (!source || typeof source !== "object") return [];
+  const entries = [source.activeBonuses, source.activeEffects, source.effects]
+    .filter(Array.isArray)
+    .flat();
+  const seen = new Set();
+  const effects = [];
+  for (const entry of entries) {
+    const stat = toTrimmedStringOrNull(entry?.stat);
+    const bonus = toTrimmedStringOrNull(entry?.bonus);
+    if (!stat || bonus == null) continue;
+    const key = toTrimmedStringOrNull(entry?._id) ?? `${stat}:${bonus}:${entry?.source ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const changes = buildNetherscrollsPortableActiveEffectChanges(stat, bonus);
+    if (!changes.length) continue;
+    effects.push({
+      name: toTrimmedStringOrNull(entry?.source) ?? `Netherscrolls: ${stat}`,
+      disabled: entry?.active === false,
+      changes,
+      flags: {
+        [MODULE_ID]: {
+          effectKey: `active-bonus:${key}`,
+          portableActiveEffect: true,
+          sourceStat: stat,
+        },
+      },
+    });
+  }
+  return effects;
+}
+
+function buildNetherscrollsPortableActiveEffectChanges(stat, bonus) {
+  const isOverride = stat.endsWith(".totalOverride");
+  const target = isOverride ? stat.slice(0, -".totalOverride".length) : stat;
+  const mode = isOverride ? 5 : 2; // Foundry ActiveEffect OVERRIDE / ADD.
+  const change = (key) => ({ key, mode, value: bonus });
+
+  if (target === "proficiencyBonus") return [change("system.attributes.prof")];
+  if (target === "armorClass") return [change("system.attributes.ac.flat")];
+  if (/^abilities\.(str|dex|con|int|wis|cha)(?:\.score)?$/.test(target)) {
+    return [change(`system.${target.replace(/\.score$/, ".value")}`)];
+  }
+  if (/^savingThrows\.(str|dex|con|int|wis|cha)(?:\.(prof|misc|bonus))?$/.test(target)) {
+    const [, ability, part] = /^savingThrows\.(str|dex|con|int|wis|cha)(?:\.(prof|misc|bonus))?$/.exec(target);
+    return [change(part === "prof" ? `system.abilities.${ability}.proficient` : `system.abilities.${ability}.bonuses.save`)];
+  }
+  if (target === "savingThrows.all") {
+    return ABILITY_KEYS.map((ability) => change(`system.abilities.${ability}.bonuses.save`));
+  }
+  if (target.startsWith("skills.")) {
+    const [, sourceSkill, part] = /^skills\.([^.]+)(?:\.(prof|misc|bonus))?$/.exec(target) ?? [];
+    const skillKey = getNetherscrollsFoundrySkillKey(sourceSkill);
+    if (!skillKey) return [];
+    return [change(part === "prof" ? `system.skills.${skillKey}.value` : `system.skills.${skillKey}.bonuses.check`)];
+  }
+  if (/^hp\.(current|max|temp)$/.test(target)) return [change(`system.attributes.${target}`)];
+  if (/^currency\.(pp|gp|sp|cp)$/.test(target)) return [change(`system.${target}`)];
+  const slotMatch = /^spellSlots\.(current|max)\.lvl([1-9])$/.exec(target);
+  if (slotMatch) return [change(`system.spells.spell${slotMatch[2]}.${slotMatch[1] === "current" ? "value" : "max"}`)];
+  return [];
 }
 
 function mergeNetherscrollsDefaults(defaults, data) {

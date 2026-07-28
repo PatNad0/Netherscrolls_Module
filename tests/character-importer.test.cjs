@@ -176,6 +176,7 @@ function createHarness() {
 globalThis.__test = {
   NETHERSCROLLS_WORLD_IMPORT_PACKS,
   normalizeNetherscrollsCharacterActorCreationData,
+  buildNetherscrollsPortableActiveEffects,
   getNetherscrollsCharacterSourceId,
   collectNetherscrollsCharacterItemSources,
   normalizeNetherscrollsSpellData,
@@ -264,11 +265,13 @@ test("normalizes token, size, and complete structured armor class", () => {
     system: {
       traits: { size: "Medium" },
       attributes: { hp: { value: 0, max: 86 }, ac: { value: 12 } },
+      details: { xp: { value: 1 } },
     },
   };
 
   importer.normalizeNetherscrollsCharacterActorCreationData(actor, {
     armorClass: { value: 10, misc: 2, bonus: 1 },
+    xp: 17200,
   });
 
   assert.equal(actor.system.traits.size, "med");
@@ -277,6 +280,7 @@ test("normalizes token, size, and complete structured armor class", () => {
   assert.equal("value" in actor.system.attributes.ac, false);
   assert.equal(actor.system.attributes.hp.value, 86);
   assert.equal(actor.system.attributes.hp.max, 86);
+  assert.equal(actor.system.details.xp.value, 17200);
   assert.deepEqual(actor.prototypeToken, { disposition: 1 });
   assert.equal("token" in actor, false);
 });
@@ -308,6 +312,26 @@ test("imports skill training, expertise, abilities, and manual bonuses", () => {
   assert.equal(actor.system.skills.ani.ability, "wis");
   assert.equal(actor.system.skills.ani.value, 0.5);
   assert.equal(actor.system.skills.ani.bonuses.check, "");
+});
+
+test("converts portable active effects into D&D5e skill and save effects", () => {
+  const { importer } = createHarness();
+  const effects = importer.buildNetherscrollsPortableActiveEffects({
+    activeBonuses: [
+      { _id: "intimidation-4", active: true, stat: "skills.intimidation", bonus: "+4", source: "Character Effect" },
+      { _id: "save-1", active: true, stat: "savingThrows.all", bonus: "+1", source: "Aura" },
+      { _id: "inactive", active: false, stat: "skills.persuasion.misc", bonus: "+2", source: "Disabled" },
+    ],
+  });
+
+  assert.equal(effects.length, 3);
+  assert.equal(effects[0].changes[0].key, "system.skills.itm.bonuses.check");
+  assert.equal(effects[0].changes[0].mode, 2);
+  assert.equal(effects[0].changes[0].value, "+4");
+  assert.equal(effects[1].changes.length, 6);
+  assert.equal(effects[1].changes[0].key, "system.abilities.str.bonuses.save");
+  assert.equal(effects[2].disabled, true);
+  assert.equal(effects[2].changes[0].key, "system.skills.per.bonuses.check");
 });
 
 test("uses real website reference shapes without treating Foundry _id as identity", () => {
@@ -460,6 +484,7 @@ test("normalizes library spells for leveled Actor spellbook sections", () => {
   );
 
   assert.equal(repairedActorSpell.system.level, 3);
+  assert.equal(repairedActorSpell.sort, 300000);
   assert.equal(repairedActorSpell.system.method, "spell");
   assert.equal(repairedActorSpell.system.prepared, 1);
   assert.equal(repairedActorSpell.system.sourceItem, "");
