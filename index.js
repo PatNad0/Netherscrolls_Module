@@ -1949,6 +1949,31 @@ function normalizeNetherscrollsCharacterActorCreationData(actorPayload, characte
   actorPayload.system.attributes = actorPayload.system.attributes && typeof actorPayload.system.attributes === "object"
     ? actorPayload.system.attributes
     : {};
+
+  // Character exports keep skill training separately from the Foundry Actor
+  // payload.  D&D5e expects training/expertise in `value` and a manual skill
+  // modifier in `bonuses.check`; without this conversion every skill renders
+  // as untrained after import.
+  normalizeNetherscrollsCharacterSkills(actorPayload, character);
+
+  // A Foundry character can otherwise be created with the correct maximum HP
+  // but a zero current value. Character imports intentionally begin at full
+  // health, including re-imports of an existing Actor.
+  const actorHp = actorPayload.system.attributes.hp;
+  const hpMaximum = getNetherscrollsCharacterHitPointMaximum(actorHp, character);
+  if (hpMaximum > 0) {
+    actorPayload.system.attributes.hp = {
+      ...(actorHp && typeof actorHp === "object" ? actorHp : {}),
+      value: hpMaximum,
+      max: hpMaximum,
+    };
+  }
+  debugNetherscrollsCharacterImport("Normalized D&D5e actor hit points.", {
+    exportedHp: actorHp,
+    maximum: hpMaximum || null,
+    importedAtFullHealth: hpMaximum > 0,
+  });
+
   const actorAc = actorPayload.system.attributes.ac;
   const characterAc =
     character?.armorClass ??
@@ -1990,6 +2015,68 @@ function normalizeNetherscrollsCharacterActorCreationData(actorPayload, characte
   delete actorPayload.token;
 }
 
+function normalizeNetherscrollsCharacterSkills(actorPayload, character = null) {
+  const sourceSkills = character?.skills;
+  if (!sourceSkills || typeof sourceSkills !== "object") return;
+
+  actorPayload.system = actorPayload.system && typeof actorPayload.system === "object"
+    ? actorPayload.system
+    : {};
+  actorPayload.system.skills = actorPayload.system.skills && typeof actorPayload.system.skills === "object"
+    ? actorPayload.system.skills
+    : {};
+
+  for (const [sourceKey, sourceSkill] of Object.entries(sourceSkills)) {
+    if (!sourceSkill || typeof sourceSkill !== "object") continue;
+    const skillKey = getNetherscrollsFoundrySkillKey(sourceKey, sourceSkill);
+    if (!skillKey) continue;
+
+    const existing = actorPayload.system.skills[skillKey];
+    const skill = existing && typeof existing === "object" ? existing : {};
+    const existingBonuses = skill.bonuses && typeof skill.bonuses === "object" ? skill.bonuses : {};
+    const ability = normalizeNetherscrollsSaveAbility(sourceSkill.ability);
+    const manualBonus = getNetherscrollsCharacterSkillManualBonus(sourceSkill);
+
+    actorPayload.system.skills[skillKey] = {
+      ...skill,
+      ...(ability ? { ability } : {}),
+      value: getNetherscrollsCharacterSkillProficiency(sourceSkill),
+      bonuses: {
+        ...existingBonuses,
+        check: manualBonus ? String(manualBonus) : "",
+      },
+    };
+  }
+}
+
+function getNetherscrollsFoundrySkillKey(sourceKey, sourceSkill = null) {
+  const candidates = [sourceKey, sourceSkill?.key, sourceSkill?.id, sourceSkill?.name];
+  for (const candidate of candidates) {
+    const raw = toTrimmedStringOrNull(candidate)?.toLowerCase();
+    if (!raw) continue;
+    if (SKILL_KEY_TO_NAME[raw]) return raw;
+    const normalized = raw.replace(/[^a-z]/g, "");
+    if (NETHERSCROLLS_SKILL_LABELS[normalized]) return NETHERSCROLLS_SKILL_LABELS[normalized];
+  }
+  return null;
+}
+
+function getNetherscrollsCharacterSkillProficiency(sourceSkill) {
+  if (sourceSkill?.expertise === true || sourceSkill?.isExpertise === true) return 2;
+  const raw = sourceSkill?.prof ?? sourceSkill?.proficiency ?? sourceSkill?.value ?? 0;
+  const normalized = toTrimmedStringOrNull(raw)?.toLowerCase();
+  if (normalized === "expertise" || normalized === "double") return 2;
+  if (normalized === "proficient" || normalized === "trained") return 1;
+  if (normalized === "half" || normalized === "halfproficiency") return 0.5;
+  return Math.max(0, Math.min(2, toNumber(raw, 0)));
+}
+
+function getNetherscrollsCharacterSkillManualBonus(sourceSkill) {
+  return toNumber(sourceSkill?.misc, 0) +
+    toNumber(sourceSkill?.bonus, 0) +
+    toNumber(sourceSkill?.bonuses?.check, 0);
+}
+
 function getNetherscrollsCharacterArmorClassTotal(value) {
   if (!value || typeof value !== "object") return toNumber(value, 0);
   const explicitTotal = value.total ?? value.flat;
@@ -2004,6 +2091,29 @@ function getNetherscrollsCharacterArmorClassTotal(value) {
 function getNetherscrollsFoundryArmorClassTotal(value) {
   if (!value || typeof value !== "object") return toNumber(value, 0);
   return toNumber(value.flat ?? value.total ?? value.value, 0);
+}
+
+function getNetherscrollsCharacterHitPointMaximum(actorHp, character = null) {
+  const characterHp =
+    character?.hp ??
+    character?.hitPoints ??
+    character?.hitpoints ??
+    character?.attributes?.hp ??
+    null;
+  const candidates = [
+    actorHp?.max,
+    actorHp?.maximum,
+    characterHp?.max,
+    characterHp?.maximum,
+    characterHp?.total,
+    actorHp?.value,
+    typeof characterHp === "number" ? characterHp : null,
+  ];
+  for (const candidate of candidates) {
+    const maximum = Math.max(0, Math.trunc(toNumber(candidate, 0)));
+    if (maximum > 0) return maximum;
+  }
+  return 0;
 }
 
 function getWorldActors() {
@@ -2285,6 +2395,18 @@ function prepareNetherscrollsCharacterActorItemData(document, direct, source, ne
   delete data.parent;
   data.name = toTrimmedStringOrNull(data.name) ?? "Netherscrolls Item";
   data.type = toTrimmedStringOrNull(data.type) ?? "loot";
+  if (data.type === "spell") {
+    data.system = data.system && typeof data.system === "object" ? data.system : {};
+    data.system.level = getNetherscrollsSpellLevel(data);
+    data.system.method = normalizeNetherscrollsSpellMethod(sourceData, data);
+    data.system.prepared = getNetherscrollsSpellPreparedState(sourceData, data);
+    // `sourceItem` is an Actor-owned association. Never retain an inferred
+    // library class link such as `class:cleric`; allow D&D5e to associate a
+    // newly embedded spell with the Actor's actual spellcasting class.
+    data.system.sourceItem =
+      toTrimmedStringOrNull(sourceData?.system?.sourceItem ?? sourceData?.sourceItem) ?? "";
+    delete data.system.preparation;
+  }
   if (data.type === "class") {
     const classLevel = toNumber(
       source?.level ??
@@ -2302,6 +2424,20 @@ function prepareNetherscrollsCharacterActorItemData(document, direct, source, ne
     );
     data.system = data.system && typeof data.system === "object" ? data.system : {};
     data.system.levels = Math.max(1, Math.trunc(classLevel));
+    data.system.hd = data.system.hd && typeof data.system.hd === "object" ? data.system.hd : {};
+    data.system.hd.denomination = normalizeNetherscrollsClassHitDie({
+      ...source,
+      ...direct,
+      system: {
+        ...(source?.system ?? {}),
+        ...(direct?.system ?? {}),
+        hd: data.system.hd,
+      },
+    });
+    // Character imports start with every class hit die available, matching the
+    // full-HP import policy. D&D5e derives the visible current/max totals from
+    // this die denomination, class levels, and spent count.
+    data.system.hd.spent = 0;
   }
   data.flags = data.flags ?? {};
   data.flags[MODULE_ID] = {
@@ -2328,6 +2464,7 @@ function applyNetherscrollsCharacterItemState(target, source) {
     ["uses", "value"],
     ["uses", "spent"],
     ["uses", "autoDestroy"],
+    ["prepared"],
     ["preparation", "prepared"],
   ];
   for (const path of mutableSystemPaths) {
@@ -3716,6 +3853,12 @@ function normalizeNetherscrollsFoundryClassData(classSource, { featureUuidByKey 
   );
   source.system = mergeNetherscrollsDefaults(defaults, source.system ?? {});
   source.system.identifier = toTrimmedStringOrNull(source.system.identifier) ?? identifier;
+  source.system.hd = source.system.hd && typeof source.system.hd === "object" ? source.system.hd : {};
+  source.system.hd.denomination = normalizeNetherscrollsClassHitDie({
+    ...classSource,
+    system: source.system,
+  });
+  source.system.hd.spent = 0;
   applyNetherscrollsImportFlags(source, classSource, netherscrollsId);
   source.flags = source.flags ?? {};
   source.flags[MODULE_ID] = {
@@ -4449,11 +4592,17 @@ function getNetherscrollsClassAsiLevels(source) {
 }
 
 function normalizeNetherscrollsClassHitDie(source) {
-  const raw =
-    toTrimmedStringOrNull(source?.system?.hd?.denomination) ??
-    toTrimmedStringOrNull(source?.diceType) ??
-    toTrimmedStringOrNull(source?.hitPoints?.hitDice) ??
-    "d6";
+  const foundryItem = getNetherscrollsFoundryItemPayload(source);
+  const raw = [
+    source?.system?.hd?.denomination,
+    foundryItem?.system?.hd?.denomination,
+    source?.diceType,
+    source?.hitDice,
+    source?.hitDie,
+    source?.hd,
+    source?.hitPoints?.hitDice,
+    source?.hitPoints?.die,
+  ].map(toTrimmedStringOrNull).find(Boolean) ?? "d6";
   const match = /d(4|6|8|10|12|20|100)\b/i.exec(raw);
   return match ? `d${match[1]}` : "d6";
 }
@@ -6312,12 +6461,9 @@ function normalizeNetherscrollsSpellData(spell) {
     (netherscrollsId ? `netherscrolls-${netherscrollsId}` : slugifyNetherscrollsIdentifier(itemData.name));
   itemData.system.actionType = toTrimmedStringOrNull(source?.system?.actionType ?? source?.actionType) ?? "";
   const sourceItem = toTrimmedStringOrNull(source?.system?.sourceItem ?? source?.sourceItem);
-  const sourceClass = getNetherscrollsPrimarySpellClass(source);
   if (sourceItem) itemData.system.sourceItem = sourceItem;
-  else if (sourceClass) itemData.system.sourceItem = `class:${sourceClass}`;
-  itemData.system.method =
-    toTrimmedStringOrNull(source?.system?.method ?? source?.method) ?? "spell";
-  itemData.system.prepared = toNumber(source?.system?.prepared ?? source?.prepared, 0);
+  itemData.system.method = normalizeNetherscrollsSpellMethod(source);
+  itemData.system.prepared = getNetherscrollsSpellPreparedState(source);
 
   itemData.system.source = buildNetherscrollsSpellSource(sourceName, source);
 
@@ -6333,15 +6479,16 @@ function normalizeNetherscrollsFoundrySpellData(spell) {
   source.type = toTrimmedStringOrNull(source.type) ?? "spell";
   source.img = normalizeNetherscrollsImportImagePath(source.img, source.image);
   source.system = source.system ?? {};
-  source.system.level = getNetherscrollsSpellLevel(source);
+  source.system.level = getNetherscrollsSpellLevel(spell);
   source.system.identifier ??=
     netherscrollsId ? `netherscrolls-${netherscrollsId}` : slugifyNetherscrollsIdentifier(source.name);
   const schoolKey = getNetherscrollsSpellSchoolSystemKey(getNetherscrollsSpellSchool(source));
   if (schoolKey) source.system.school = schoolKey;
   source.system.ability ??= normalizeNetherscrollsSaveAbility(spell?.system?.ability ?? spell?.ability) ?? "";
   source.system.actionType ??= toTrimmedStringOrNull(spell?.system?.actionType ?? spell?.actionType) ?? "";
-  source.system.method ??= "spell";
-  source.system.prepared ??= 0;
+  source.system.method = normalizeNetherscrollsSpellMethod(spell, source);
+  source.system.prepared = getNetherscrollsSpellPreparedState(spell, source);
+  delete source.system.preparation;
   source.system.uses ??= normalizeNetherscrollsItemUses(spell);
   const inferred = inferNetherscrollsSpellFields(
     spell,
@@ -6364,9 +6511,7 @@ function normalizeNetherscrollsFoundrySpellData(spell) {
     source.system.activities = sanitizeNetherscrollsActivityTargets(source.system.activities);
   }
   const sourceItem = toTrimmedStringOrNull(spell?.system?.sourceItem ?? spell?.sourceItem);
-  const sourceClass = getNetherscrollsPrimarySpellClass(spell);
-  if (sourceItem) source.system.sourceItem ??= sourceItem;
-  else if (sourceClass) source.system.sourceItem ??= `class:${sourceClass}`;
+  if (sourceItem) source.system.sourceItem = sourceItem;
   if (source.system.sourceClass) delete source.system.sourceClass;
   const sourceName = toTrimmedStringOrNull(spell?.source ?? source?.system?.source?.book);
   source.system.source = buildNetherscrollsSpellSource(
@@ -7119,12 +7264,6 @@ function getNetherscrollsMetadataLine(text, label) {
   return toTrimmedStringOrNull(regex.exec(String(text ?? ""))?.[1]);
 }
 
-function getNetherscrollsPrimarySpellClass(source) {
-  const classes = source?.classes ?? source?.system?.classes;
-  const first = Array.isArray(classes) ? classes[0] : classes;
-  return toTrimmedStringOrNull(first)?.toLowerCase() ?? null;
-}
-
 function toNetherscrollsNumber(value) {
   const normalized = toTrimmedStringOrNull(value)?.toLowerCase();
   if (!normalized) return null;
@@ -7529,14 +7668,68 @@ function getNetherscrollsSpellLevelFolder(level) {
 }
 
 function getNetherscrollsSpellLevel(spellData) {
+  const foundryItem = getNetherscrollsFoundryItemPayload(spellData);
   const value =
     spellData?.system?.level ??
     spellData?.level ??
     spellData?.spellLevel ??
-    spellData?.data?.level;
+    spellData?.data?.level ??
+    foundryItem?.system?.level ??
+    foundryItem?.level;
   const level = Number(value);
   if (!Number.isFinite(level)) return 0;
   return Math.max(0, Math.min(NETHERSCROLLS_MAX_SPELL_LEVEL, Math.trunc(level)));
+}
+
+function normalizeNetherscrollsSpellMethod(source, fallbackSource = null) {
+  const candidates = [
+    source?.system?.method,
+    source?.method,
+    source?.system?.preparation?.mode,
+    source?.preparation?.mode,
+    fallbackSource?.system?.method,
+    fallbackSource?.method,
+    fallbackSource?.system?.preparation?.mode,
+    fallbackSource?.preparation?.mode,
+  ];
+  const raw = candidates.map(toTrimmedStringOrNull).find(Boolean)?.toLowerCase();
+  if (!raw) return "spell";
+
+  const normalized = raw.replace(/[\s_-]+/g, "");
+  if (["spell", "prepared", "always", "alwaysprepared"].includes(normalized)) return "spell";
+  if (["pact", "pactmagic"].includes(normalized)) return "pact";
+  if (["atwill", "innate", "ritual"].includes(normalized)) return normalized;
+  // D&D5e groups unknown or blank methods under Innate Spellcasting. Invalid
+  // service values must therefore fall back to ordinary leveled spellcasting.
+  return "spell";
+}
+
+function getNetherscrollsSpellPreparedState(source, fallbackSource = null) {
+  const method = [
+    source?.system?.preparation?.mode,
+    source?.preparation?.mode,
+    fallbackSource?.system?.preparation?.mode,
+    fallbackSource?.preparation?.mode,
+  ].map(toTrimmedStringOrNull).find(Boolean)?.toLowerCase();
+  if (method === "always") return 2;
+
+  const candidates = [
+    source?.system?.prepared,
+    source?.prepared,
+    source?.system?.preparation?.prepared,
+    source?.preparation?.prepared,
+    fallbackSource?.system?.prepared,
+    fallbackSource?.prepared,
+    fallbackSource?.system?.preparation?.prepared,
+    fallbackSource?.preparation?.prepared,
+  ];
+  for (const value of candidates) {
+    if (value === undefined || value === null || value === "") continue;
+    if (typeof value === "boolean") return Number(value);
+    const prepared = Number(value);
+    if (Number.isFinite(prepared)) return Math.max(0, Math.min(2, Math.trunc(prepared)));
+  }
+  return 0;
 }
 
 function getNetherscrollsSpellSchool(spellData) {

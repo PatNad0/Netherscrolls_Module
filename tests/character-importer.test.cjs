@@ -178,6 +178,7 @@ globalThis.__test = {
   normalizeNetherscrollsCharacterActorCreationData,
   getNetherscrollsCharacterSourceId,
   collectNetherscrollsCharacterItemSources,
+  normalizeNetherscrollsSpellData,
   prepareNetherscrollsCharacterActorItemData,
   resolveNetherscrollsCharacterItemSources,
   resolveNetherscrollsCharacterItemSource,
@@ -262,7 +263,7 @@ test("normalizes token, size, and complete structured armor class", () => {
     token: { disposition: 1 },
     system: {
       traits: { size: "Medium" },
-      attributes: { ac: { value: 12 } },
+      attributes: { hp: { value: 0, max: 86 }, ac: { value: 12 } },
     },
   };
 
@@ -274,8 +275,39 @@ test("normalizes token, size, and complete structured armor class", () => {
   assert.equal(actor.system.attributes.ac.flat, 13);
   assert.equal(actor.system.attributes.ac.calc, "flat");
   assert.equal("value" in actor.system.attributes.ac, false);
+  assert.equal(actor.system.attributes.hp.value, 86);
+  assert.equal(actor.system.attributes.hp.max, 86);
   assert.deepEqual(actor.prototypeToken, { disposition: 1 });
   assert.equal("token" in actor, false);
+});
+
+test("imports skill training, expertise, abilities, and manual bonuses", () => {
+  const { importer } = createHarness();
+  const actor = {
+    name: "Hero",
+    system: {
+      traits: { size: "med" },
+      attributes: {},
+    },
+  };
+
+  importer.normalizeNetherscrollsCharacterActorCreationData(actor, {
+    skills: {
+      intimidation: { ability: "cha", prof: 1, misc: 2, bonus: 1 },
+      stealth: { ability: "dex", expertise: true, misc: 0 },
+      "animal handling": { ability: "wis", prof: "half" },
+    },
+  });
+
+  assert.equal(actor.system.skills.itm.ability, "cha");
+  assert.equal(actor.system.skills.itm.value, 1);
+  assert.equal(actor.system.skills.itm.bonuses.check, "3");
+  assert.equal(actor.system.skills.ste.ability, "dex");
+  assert.equal(actor.system.skills.ste.value, 2);
+  assert.equal(actor.system.skills.ste.bonuses.check, "");
+  assert.equal(actor.system.skills.ani.ability, "wis");
+  assert.equal(actor.system.skills.ani.value, 0.5);
+  assert.equal(actor.system.skills.ani.bonuses.check, "");
 });
 
 test("uses real website reference shapes without treating Foundry _id as identity", () => {
@@ -345,6 +377,7 @@ test("keeps compendium data canonical while preserving mutable character state",
       advancement: { canonical: true },
       equipped: false,
       uses: { spent: 0, max: 3 },
+      hd: { denomination: "", spent: 4 },
     },
     flags: { [MODULE_ID]: { netherscrollsId: "class-1" } },
   });
@@ -355,11 +388,13 @@ test("keeps compendium data canonical while preserving mutable character state",
       name: "Stale Fighter",
       type: "class",
       sort: 42,
+      diceType: "d10",
       system: {
         levels: 3,
         description: { value: "stale" },
         equipped: true,
         uses: { spent: 2, max: 99 },
+        hd: { denomination: "", spent: 3 },
       },
     },
     { classId: "class-1", level: 7 },
@@ -373,7 +408,111 @@ test("keeps compendium data canonical while preserving mutable character state",
   assert.equal(prepared.system.equipped, true);
   assert.equal(prepared.system.uses.spent, 2);
   assert.equal(prepared.system.uses.max, 3);
+  assert.equal(prepared.system.hd.denomination, "d10");
+  assert.equal(prepared.system.hd.spent, 0);
   assert.equal(prepared.sort, 42);
+});
+
+test("normalizes library spells for leveled Actor spellbook sections", () => {
+  const { importer } = createHarness();
+  const normalized = importer.normalizeNetherscrollsSpellData({
+    id: "spell-1",
+    name: "Counterspell",
+    level: 3,
+    method: "",
+    classes: ["Rogue", "Sorcerer", "Warlock", "Wizard"],
+    foundryItem: {
+      name: "Counterspell",
+      type: "spell",
+      system: {
+        level: 0,
+        method: "",
+        prepared: 0,
+        sourceItem: "",
+      },
+    },
+  });
+
+  assert.equal(normalized.system.level, 3);
+  assert.equal(normalized.system.method, "spell");
+  assert.equal(normalized.system.sourceItem, "");
+
+  const repairedActorSpell = importer.prepareNetherscrollsCharacterActorItemData(
+    makeDocument({
+      _id: "foundry-spell",
+      name: "Counterspell",
+      type: "spell",
+      system: {
+        level: 3,
+        method: "",
+        prepared: 0,
+        sourceItem: "class:rogue",
+      },
+      flags: { [MODULE_ID]: { netherscrollsId: "spell-1" } },
+    }),
+    {
+      name: "Counterspell",
+      type: "spell",
+      system: { prepared: 1 },
+    },
+    { id: "spell-1", name: "Counterspell" },
+    "spell-1"
+  );
+
+  assert.equal(repairedActorSpell.system.level, 3);
+  assert.equal(repairedActorSpell.system.method, "spell");
+  assert.equal(repairedActorSpell.system.prepared, 1);
+  assert.equal(repairedActorSpell.system.sourceItem, "");
+});
+
+test("repairs stale spell methods and levels during an idempotent library update", async () => {
+  const { context, importer } = createHarness();
+  const spellPack = makePack("world.netherscrolls-spells", [
+    makeDocument({
+      _id: "foundry-spell",
+      name: "Counterspell",
+      type: "spell",
+      system: {
+        level: 0,
+        method: "",
+        prepared: 0,
+        sourceItem: "class:rogue",
+      },
+      flags: { [MODULE_ID]: { netherscrollsId: "spell-1" } },
+    }),
+  ]);
+  context.game.packs.set(spellPack.collection, spellPack);
+
+  const result = await importer.applyNetherscrollsImportResponse(
+    {
+      data: [{
+        id: "spell-1",
+        name: "Counterspell",
+        level: 3,
+        method: "",
+        classes: ["Rogue", "Sorcerer", "Warlock", "Wizard"],
+        foundryItem: {
+          name: "Counterspell",
+          type: "spell",
+          system: {
+            level: 0,
+            method: "",
+            prepared: 0,
+            sourceItem: "",
+          },
+        },
+      }],
+      meta: { dataKey: "spells", count: 1 },
+    },
+    "spells"
+  );
+
+  assert.equal(result.spells.created, 0);
+  assert.equal(result.spells.updated, 1);
+  assert.equal(spellPack.documents.length, 1);
+  assert.equal(spellPack.documents[0].system.level, 3);
+  assert.equal(spellPack.documents[0].system.method, "spell");
+  assert.equal(spellPack.documents[0].system.sourceItem, "");
 });
 
 test("reuses compendium indexes and one broad API response per dataset", async () => {
@@ -551,6 +690,7 @@ test("imports classes, subclasses, and features into separate idempotent packs",
   const classSource = {
     _id: "class-1",
     name: "Fighter",
+    diceType: "d10",
     classFeatures: [{
       _id: "feature-1",
       name: "Second Wind",
@@ -575,6 +715,7 @@ test("imports classes, subclasses, and features into separate idempotent packs",
   assert.equal(first.classes.subclasses.created, 1);
   assert.equal(first.classes.subclasses.migrated, 1);
   assert.deepEqual(classPack.documents.map((entry) => entry.type), ["class"]);
+  assert.equal(classPack.documents[0].system.hd.denomination, "d10");
   assert.deepEqual(subclassPack.documents.map((entry) => entry.type), ["subclass"]);
   assert.equal(featurePack.documents.length, 2);
   assert.equal(
@@ -831,7 +972,7 @@ test("creates then updates one Actor with both identity flags and progress feedb
   assert.equal(actor.folder, "ns-character-folder");
   assert.equal(actor.flags[MODULE_ID].characterId, "character-1");
   assert.equal(actor.flags.netherscrolls.characterId, "character-1");
-  assert.equal(actor.system.attributes.hp.value, 9);
+  assert.equal(actor.system.attributes.hp.value, 20);
   assert.equal(actor.system.attributes.ac.flat, 13);
   assert.equal(progress.includes("repairing class features..."), true);
   assert.equal(progress.includes("complete."), true);
