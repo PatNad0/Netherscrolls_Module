@@ -20,12 +20,19 @@ const merge = (base, override) => {
 function makeDocument(data) {
   const raw = clone(data);
   const id = raw._id ?? raw.id;
-  return {
+  const document = {
     ...raw,
     id,
     getFlag: (scope, key) => raw.flags?.[scope]?.[key],
+    async setFlag(scope, key, value) {
+      raw.flags ??= {};
+      raw.flags[scope] ??= {};
+      raw.flags[scope][key] = value;
+      this.flags = raw.flags;
+    },
     toObject: () => clone(raw),
   };
+  return document;
 }
 
 function makePack(collection, documents = []) {
@@ -103,6 +110,7 @@ function createHarness() {
       actors: [],
       folders: [],
       packs: new Map(),
+      system: { version: "5.3.3" },
       user: { id: "gm", isGM: true },
       ready: false,
     },
@@ -177,20 +185,26 @@ globalThis.__test = {
   NETHERSCROLLS_WORLD_IMPORT_PACKS,
   normalizeNetherscrollsCharacterActorCreationData,
   buildNetherscrollsPortableActiveEffects,
+  buildNetherscrollsSourceImportRequest,
   getNetherscrollsCharacterSourceId,
   collectNetherscrollsCharacterItemSources,
   normalizeNetherscrollsSpellData,
   prepareNetherscrollsCharacterActorItemData,
   resolveNetherscrollsCharacterItemSources,
   resolveNetherscrollsCharacterItemSource,
-  syncNetherscrollsCharacterActorItems,
-  syncNetherscrollsCharacterActorEffects,
+  reconcileNetherscrollsCharacterActorItems,
+  reconcileNetherscrollsCharacterActorEffects,
   getNetherscrollsCompendiumDocumentsById,
   applyNetherscrollsImportResponse,
   repairNetherscrollsActorClassFeatures,
   importNetherscrollsCampaignCharacter,
-  hydrateNetherscrollsExportedCharacter,
-  findNetherscrollsActorByCharacterId
+  hydrateNetherscrollsImportedCharacter,
+  findNetherscrollsActorByCharacterId,
+  buildFoundryExportPayload,
+  applyFoundryExportCanonicalIds,
+  exportNetherscrollsCampaignActors,
+  importMissingNetherscrollsCharacterDocuments,
+  pollNetherscrollsImportQueues
 };`, context, { filename: "index.js" });
 
   return { context, importer: context.__test, logs };
@@ -209,6 +223,19 @@ function makeActor(context, payload = {}) {
     items: [],
     effects: [],
     documentName: "Actor",
+    toObject() {
+      return clone({
+        _id: this.id,
+        name: this.name,
+        type: this.type,
+        folder: this.folder,
+        system: this.system,
+        flags: this.flags,
+        prototypeToken: this.prototypeToken,
+        items: this.items.map((item) => item.toObject?.() ?? clone(item)),
+        effects: this.effects.map((effect) => effect.toObject?.() ?? clone(effect)),
+      });
+    },
     getFlag(scope, key) {
       return this.flags?.[scope]?.[key];
     },
@@ -257,11 +284,11 @@ function makeActor(context, payload = {}) {
   return actor;
 }
 
-test("normalizes token, size, and complete structured armor class", () => {
+test("normalizes schema-v2 Actor data without legacy token fallback", () => {
   const { importer } = createHarness();
   const actor = {
     name: "Hero",
-    token: { disposition: 1 },
+    prototypeToken: { disposition: 1 },
     system: {
       traits: { size: "Medium" },
       attributes: { hp: { value: 0, max: 86 }, ac: { value: 12 } },
@@ -352,7 +379,7 @@ test("uses real website reference shapes without treating Foundry _id as identit
         name: "Canonical Item",
         type: "loot",
         system: { quantity: 3 },
-        flags: { [MODULE_ID]: { netherscrollsId: "item-1" } },
+        flags: { netherscrolls: { id: "item-1" } },
       }],
     },
     character: {
@@ -403,7 +430,7 @@ test("keeps compendium data canonical while preserving mutable character state",
       uses: { spent: 0, max: 3 },
       hd: { denomination: "", spent: 4 },
     },
-    flags: { [MODULE_ID]: { netherscrollsId: "class-1" } },
+    flags: { netherscrolls: { id: "class-1" } },
   });
 
   const prepared = importer.prepareNetherscrollsCharacterActorItemData(
@@ -472,7 +499,7 @@ test("normalizes library spells for leveled Actor spellbook sections", () => {
         prepared: 0,
         sourceItem: "class:rogue",
       },
-      flags: { [MODULE_ID]: { netherscrollsId: "spell-1" } },
+      flags: { netherscrolls: { id: "spell-1" } },
     }),
     {
       name: "Counterspell",
@@ -503,7 +530,7 @@ test("repairs stale spell methods and levels during an idempotent library update
         prepared: 0,
         sourceItem: "class:rogue",
       },
-      flags: { [MODULE_ID]: { netherscrollsId: "spell-1" } },
+      flags: { netherscrolls: { id: "spell-1" } },
     }),
   ]);
   context.game.packs.set(spellPack.collection, spellPack);
@@ -540,12 +567,12 @@ test("repairs stale spell methods and levels during an idempotent library update
   assert.equal(spellPack.documents[0].system.sourceItem, "");
 });
 
-test("reuses compendium indexes and one broad API response per dataset", async () => {
+test("reuses compendium indexes and one targeted Foundry Import selection", async () => {
   const { context, importer } = createHarness();
   const cachePack = makePack("world.cache", [
     makeDocument({
       _id: "cache-doc",
-      flags: { [MODULE_ID]: { netherscrollsId: "cache-id" } },
+      flags: { netherscrolls: { id: "cache-id" } },
     }),
   ]);
   const first = await importer.getNetherscrollsCompendiumDocumentsById(cachePack);
@@ -556,19 +583,25 @@ test("reuses compendium indexes and one broad API response per dataset", async (
   const backgrounds = makePack("world.netherscrolls-backgrounds");
   context.game.packs.set(backgrounds.collection, backgrounds);
   let fetches = 0;
-  context.fetch = async () => {
+  const requests = [];
+  context.fetch = async (url, options) => {
     fetches += 1;
+    requests.push({ url, options });
     return {
       ok: true,
       status: 200,
       statusText: "OK",
       json: async () => ({
-        data: [
-          { _id: "bg-1", foundryItem: { name: "One", type: "background", system: {} } },
-          { _id: "bg-2", foundryItem: { name: "Two", type: "background", system: {} } },
-          { _id: "unrelated", foundryItem: { name: "Other", type: "background", system: {} } },
-        ],
-        meta: { dataKey: "backgrounds", count: 3 },
+        data: {
+          backgrounds: [
+            { _id: "bg-1", foundryItem: { name: "One", type: "background", system: {} } },
+            { _id: "bg-2", foundryItem: { name: "Two", type: "background", system: {} } },
+          ],
+        },
+        meta: {
+          requested: { backgrounds: 2 },
+          returned: { backgrounds: 2 },
+        },
       }),
     };
   };
@@ -589,8 +622,13 @@ test("reuses compendium indexes and one broad API response per dataset", async (
   ]);
 
   assert.equal(fetches, 1);
+  assert.equal(requests[0].url.endsWith("/api/foundry/import/selection"), true);
+  assert.equal(requests[0].options.method, "POST");
+  assert.deepEqual(JSON.parse(requests[0].options.body), {
+    backgrounds: ["bg-1", "bg-2"],
+  });
   assert.deepEqual(
-    backgrounds.documents.map((document) => document.getFlag(MODULE_ID, "netherscrollsId")).sort(),
+    backgrounds.documents.map((document) => document.getFlag("netherscrolls", "id")).sort(),
     ["bg-1", "bg-2"]
   );
   assert.deepEqual(Array.from(resolved.items, (item) => item.name).sort(), ["One", "Two"]);
@@ -618,11 +656,13 @@ test("reuses compendium indexes and one broad API response per dataset", async (
   );
   assert.equal(direct.item.name, "Direct");
   assert.equal(direct.item.type, "loot");
-  const skipped = await importer.resolveNetherscrollsCharacterItemSource(
-    { netherscrollsId: "missing-incomplete" },
-    "items"
+  await assert.rejects(
+    importer.resolveNetherscrollsCharacterItemSource(
+      { netherscrollsId: "missing-incomplete" },
+      "items"
+    ),
+    /Foundry Import selection/
   );
-  assert.equal(skipped.item, null);
 });
 
 test("deduplicates embedded items and effects on first import and re-import", async () => {
@@ -632,10 +672,10 @@ test("deduplicates embedded items and effects on first import and re-import", as
     name: "Potion",
     type: "consumable",
     system: { quantity: 1 },
-    flags: { [MODULE_ID]: { netherscrollsId: "potion-1" } },
+    flags: { netherscrolls: { id: "potion-1" } },
   };
 
-  const first = await importer.syncNetherscrollsCharacterActorItems(
+  const first = await importer.reconcileNetherscrollsCharacterActorItems(
     actor,
     [clone(item), clone(item)],
     "char-1"
@@ -645,7 +685,7 @@ test("deduplicates embedded items and effects on first import and re-import", as
 
   const changed = clone(item);
   changed.system.quantity = 4;
-  const second = await importer.syncNetherscrollsCharacterActorItems(
+  const second = await importer.reconcileNetherscrollsCharacterActorItems(
     actor,
     [changed],
     "char-1"
@@ -658,6 +698,7 @@ test("deduplicates embedded items and effects on first import and re-import", as
     ...clone(changed),
     _id: "duplicate-imported",
     flags: {
+      netherscrolls: clone(changed.flags.netherscrolls),
       [MODULE_ID]: {
         ...changed.flags[MODULE_ID],
         characterId: "char-1",
@@ -665,7 +706,7 @@ test("deduplicates embedded items and effects on first import and re-import", as
       },
     },
   }));
-  const cleanup = await importer.syncNetherscrollsCharacterActorItems(
+  const cleanup = await importer.reconcileNetherscrollsCharacterActorItems(
     actor,
     [changed],
     "char-1"
@@ -678,7 +719,7 @@ test("deduplicates embedded items and effects on first import and re-import", as
     name: "Blessed",
     changes: [{ key: "x", value: "1" }],
   };
-  const effectsFirst = await importer.syncNetherscrollsCharacterActorEffects(
+  const effectsFirst = await importer.reconcileNetherscrollsCharacterActorEffects(
     actor,
     [clone(effect), clone(effect)],
     "char-1"
@@ -687,7 +728,7 @@ test("deduplicates embedded items and effects on first import and re-import", as
   assert.equal(actor.effects.length, 1);
 
   effect.changes[0].value = "2";
-  const effectsSecond = await importer.syncNetherscrollsCharacterActorEffects(
+  const effectsSecond = await importer.reconcileNetherscrollsCharacterActorEffects(
     actor,
     [effect],
     "char-1"
@@ -703,7 +744,7 @@ test("imports classes, subclasses, and features into separate idempotent packs",
       _id: "legacy-subclass-doc",
       name: "Champion",
       type: "subclass",
-      flags: { [MODULE_ID]: { netherscrollsId: "subclass-1" } },
+      flags: { netherscrolls: { id: "subclass-1" } },
     }),
   ]);
   const subclassPack = makePack("world.netherscrolls-subclasses");
@@ -777,7 +818,10 @@ test("does not embed nested high-level or optional features before repair", asyn
       name: "Fighter",
       type: "class",
       system: { levels: 1, identifier: "fighter", advancement: {} },
-      flags: { [MODULE_ID]: { netherscrollsId: "class-1", identifier: "fighter" } },
+      flags: {
+        netherscrolls: { id: "class-1" },
+        [MODULE_ID]: { identifier: "fighter" },
+      },
     }),
   ]);
   const subclassPack = makePack("world.netherscrolls-subclasses", [
@@ -787,8 +831,8 @@ test("does not embed nested high-level or optional features before repair", asyn
       type: "subclass",
       system: { classIdentifier: "fighter" },
       flags: {
+        netherscrolls: { id: "subclass-1", classId: "class-1" },
         [MODULE_ID]: {
-          netherscrollsId: "subclass-1",
           parentClassIdentifier: "fighter",
         },
       },
@@ -799,21 +843,27 @@ test("does not embed nested high-level or optional features before repair", asyn
       _id: "feature-low",
       name: "Allowed",
       type: "feat",
-      flags: { [MODULE_ID]: { netherscrollsId: "feature-low", level: 1 } },
+      flags: {
+        netherscrolls: { id: "feature-low" },
+        [MODULE_ID]: { level: 1 },
+      },
     }),
     makeDocument({
       _id: "feature-high",
       name: "Too High",
       type: "feat",
-      flags: { [MODULE_ID]: { netherscrollsId: "feature-high", level: 8 } },
+      flags: {
+        netherscrolls: { id: "feature-high" },
+        [MODULE_ID]: { level: 8 },
+      },
     }),
     makeDocument({
       _id: "feature-optional",
       name: "Optional",
       type: "feat",
       flags: {
+        netherscrolls: { id: "feature-optional" },
         [MODULE_ID]: {
-          netherscrollsId: "feature-optional",
           level: 2,
           optional: true,
         },
@@ -843,7 +893,7 @@ test("does not embed nested high-level or optional features before repair", asyn
   assert.deepEqual(
     Array.from(
       resolved.items,
-      (item) => item.flags[MODULE_ID].netherscrollsId
+      (item) => item.flags.netherscrolls.id
     ).sort(),
     ["class-1", "subclass-1"]
   );
@@ -862,8 +912,8 @@ test("class feature repair filters level/optional/owned features and is idempote
       type: "feat",
       system: { type: { value: "class" } },
       flags: {
+        netherscrolls: { id },
         [MODULE_ID]: {
-          netherscrollsId: id,
           level,
           optional,
           featureScope: scope,
@@ -918,8 +968,8 @@ test("class feature repair filters level/optional/owned features and is idempote
       type: "feat",
       system: { type: { value: "class" } },
       flags: {
+        netherscrolls: { id: "feature-owned" },
         [MODULE_ID]: {
-          netherscrollsId: "feature-owned",
           featureScope: "class",
         },
       },
@@ -929,7 +979,7 @@ test("class feature repair filters level/optional/owned features and is idempote
   const first = await importer.repairNetherscrollsActorClassFeatures(actor);
   const second = await importer.repairNetherscrollsActorClassFeatures(actor);
   const ids = actor.items
-    .map((item) => item.getFlag?.(MODULE_ID, "netherscrollsId"))
+    .map((item) => item.getFlag?.("netherscrolls", "id"))
     .filter(Boolean);
   assert.equal(first.created, 2);
   assert.equal(second.created, 0);
@@ -940,7 +990,7 @@ test("class feature repair filters level/optional/owned features and is idempote
   assert.equal(ids.filter((id) => id === "feature-owned").length, 1);
 });
 
-test("creates then updates one Actor with both identity flags and progress feedback", async () => {
+test("creates then updates one Actor with canonical identity and progress feedback", async () => {
   const { context, importer, logs } = createHarness();
   context.Actor = {
     implementation: {
@@ -952,7 +1002,7 @@ test("creates then updates one Actor with both identity flags and progress feedb
     },
   };
   const progress = [];
-  const exported = {
+  const importedCharacter = {
     id: "character-1",
     name: "Hero",
     character: {
@@ -961,7 +1011,7 @@ test("creates then updates one Actor with both identity flags and progress feedb
     foundryActor: {
       name: "Hero",
       type: "npc",
-      token: { vision: true },
+      prototypeToken: { vision: true },
       flags: {},
       system: {
         traits: { size: "Medium" },
@@ -977,11 +1027,11 @@ test("creates then updates one Actor with both identity flags and progress feedb
   };
 
   const first = await importer.importNetherscrollsCampaignCharacter(
-    exported,
+    importedCharacter,
     { id: "ns-character-folder" },
     { onProgress: (stage) => progress.push(stage) }
   );
-  const changed = clone(exported);
+  const changed = clone(importedCharacter);
   changed.foundryActor.system.attributes.hp.value = 9;
   const second = await importer.importNetherscrollsCampaignCharacter(
     changed,
@@ -995,7 +1045,6 @@ test("creates then updates one Actor with both identity flags and progress feedb
   const actor = context.game.actors[0];
   assert.equal(actor.type, "character");
   assert.equal(actor.folder, "ns-character-folder");
-  assert.equal(actor.flags[MODULE_ID].characterId, "character-1");
   assert.equal(actor.flags.netherscrolls.characterId, "character-1");
   assert.equal(actor.system.attributes.hp.value, 20);
   assert.equal(actor.system.attributes.ac.flat, 13);
@@ -1003,24 +1052,24 @@ test("creates then updates one Actor with both identity flags and progress feedb
   assert.equal(progress.includes("complete."), true);
   assert.equal(logs.debug.length > 0, true);
   assert.equal(
-    logs.info.some((entry) => String(entry[0]).includes("Character import")),
+    logs.info.some((entry) => String(entry[0]).includes("Foundry Import")),
     true
   );
 
-  const legacyActor = makeActor(context, {
-    name: "Legacy",
-    flags: { netherscrolls: { characterId: "legacy-character" } },
+  const linkedActor = makeActor(context, {
+    name: "Linked",
+    flags: { netherscrolls: { characterId: "linked-character" } },
   });
-  context.game.actors.push(legacyActor);
+  context.game.actors.push(linkedActor);
   assert.equal(
-    importer.findNetherscrollsActorByCharacterId("legacy-character"),
-    legacyActor
+    importer.findNetherscrollsActorByCharacterId("linked-character"),
+    linkedActor
   );
 });
 
-test("fetches a character detail export at most once", async () => {
+test("fetches a detailed Foundry Import character at most once", async () => {
   const { context, importer } = createHarness();
-  const fullExport = {
+  const fullImport = {
     characterId: "character-1",
     character: { _id: "character-1", name: "Hero" },
     foundryActor: { name: "Hero", type: "character" },
@@ -1032,18 +1081,18 @@ test("fetches a character detail export at most once", async () => {
       ok: true,
       status: 200,
       statusText: "OK",
-      json: async () => ({ data: fullExport }),
+      json: async () => ({ data: fullImport }),
     };
   };
 
-  await importer.hydrateNetherscrollsExportedCharacter({
+  await importer.hydrateNetherscrollsImportedCharacter({
     id: "character-1",
     name: "Hero",
-    foundryActor: fullExport.foundryActor,
+    foundryActor: fullImport.foundryActor,
   }, "campaign-1");
   assert.equal(fetches, 0);
 
-  await importer.hydrateNetherscrollsExportedCharacter({
+  await importer.hydrateNetherscrollsImportedCharacter({
     id: "character-1",
     name: "Hero",
   }, "campaign-1");
@@ -1067,4 +1116,299 @@ test("declares every intended world compendium", () => {
       "subclasses",
     ]
   );
+});
+
+test("builds the exact unpruned schema-v2 Foundry Export envelope", () => {
+  const { context, importer } = createHarness();
+  const calls = [];
+  const sourceActor = {
+    _id: "foundry-actor",
+    name: "Hero",
+    type: "character",
+    flags: { netherscrolls: { characterId: "character-1" }, anotherModule: { keep: true } },
+    system: { attributes: { hp: { value: 8, max: 10 } } },
+    prototypeToken: { disposition: 1 },
+    effects: [{ _id: "effect-1" }],
+    items: [{ _id: "item-1", flags: { netherscrolls: { id: "canonical-item" } } }],
+  };
+  const transformedActor = {
+    ...clone(sourceActor),
+    system: { attributes: { hp: { value: 12, max: 12 } } },
+    prototypeToken: { disposition: 1, sight: { enabled: true } },
+  };
+  const actor = {
+    toObject(source = true) {
+      calls.push(source);
+      return clone(source === false ? transformedActor : sourceActor);
+    },
+  };
+
+  const payload = importer.buildFoundryExportPayload(actor);
+  assert.deepEqual(calls, [true, false]);
+  assert.equal(payload.schemaVersion, 2);
+  assert.equal(payload.systemVersion, context.game.system.version);
+  assert.deepEqual(payload.actor, sourceActor);
+  assert.deepEqual(clone(payload.preparedActor), {
+    system: transformedActor.system,
+    prototypeToken: transformedActor.prototypeToken,
+  });
+  assert.equal(payload.actor.flags.anotherModule.keep, true);
+  assert.equal(payload.actor.effects.length, 1);
+  assert.equal(payload.actor.items.length, 1);
+});
+
+test("writes canonical Actor, Item, and subclass ids from Foundry Export responses", async () => {
+  const { context, importer } = createHarness();
+  const actor = makeActor(context, {
+    name: "Hero",
+    type: "character",
+    flags: { netherscrolls: { characterId: "old-character" } },
+  });
+  await actor.createEmbeddedDocuments("Item", [
+    { _id: "class-local", name: "Fighter", type: "class", system: {}, flags: {} },
+    { _id: "subclass-local", name: "Champion", type: "subclass", system: {}, flags: {} },
+    { _id: "spell-local", name: "Shield", type: "spell", system: {}, flags: {} },
+  ]);
+
+  await importer.applyFoundryExportCanonicalIds(actor, {
+    data: { characterId: "character-1" },
+    linked: {
+      classes: [{
+        id: "class-1",
+        name: "Fighter",
+        subclass: { id: "subclass-1", name: "Champion" },
+      }],
+    },
+    resolved: {
+      spells: [{ id: "spell-1", name: "Shield", foundryId: "spell-local" }],
+      classes: [{
+        id: "class-1",
+        name: "Fighter",
+        foundryId: "class-local",
+        subclass: {
+          id: "subclass-1",
+          name: "Champion",
+          foundryId: "subclass-local",
+        },
+      }],
+    },
+  });
+
+  assert.equal(actor.getFlag("netherscrolls", "characterId"), "character-1");
+  assert.equal(actor.items[0].getFlag("netherscrolls", "id"), "class-1");
+  assert.equal(actor.items[1].getFlag("netherscrolls", "id"), "subclass-1");
+  assert.equal(actor.items[1].getFlag("netherscrolls", "classId"), "class-1");
+  assert.equal(actor.items[2].getFlag("netherscrolls", "id"), "spell-1");
+});
+
+test("retries only failed entries from a 207 campaign Foundry Export", async () => {
+  const { context, importer } = createHarness();
+  const firstActor = makeActor(context, {
+    name: "First",
+    type: "character",
+    flags: { netherscrolls: { characterId: "character-1" } },
+  });
+  const secondActor = makeActor(context, {
+    name: "Second",
+    type: "character",
+    flags: { netherscrolls: { characterId: "character-2" } },
+  });
+  const requestBodies = [];
+  let requestNumber = 0;
+  context.fetch = async (_url, options) => {
+    requestBodies.push(JSON.parse(options.body));
+    requestNumber += 1;
+    if (requestNumber === 1) {
+      return {
+        ok: true,
+        status: 207,
+        statusText: "Multi-Status",
+        json: async () => ({
+          data: [
+            { index: 0, ok: true, data: { characterId: "character-1" }, linked: {}, resolved: {} },
+            { index: 1, ok: false, error: { status: 500, code: "TEMPORARY", message: "Retry" } },
+          ],
+        }),
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({
+        data: [
+          { index: 0, ok: true, data: { characterId: "character-2" }, linked: {}, resolved: {} },
+        ],
+      }),
+    };
+  };
+
+  const result = await importer.exportNetherscrollsCampaignActors(
+    "campaign-1",
+    [firstActor, secondActor]
+  );
+  assert.equal(requestBodies.length, 2);
+  assert.equal(requestBodies[0].characters.length, 2);
+  assert.equal(requestBodies[1].characters.length, 1);
+  assert.equal(requestBodies[1].characters[0].actor.name, "Second");
+  assert.equal(result.succeeded.length, 2);
+  assert.equal(result.failed.length, 0);
+});
+
+test("acknowledges Foundry Import queue entries only after a complete apply", async () => {
+  const { context, importer } = createHarness();
+  const seedPack = makePack("world.netherscrolls-items", [
+    makeDocument({
+      _id: "seed-local",
+      name: "Seed",
+      type: "loot",
+      system: {},
+      flags: { netherscrolls: { id: "seed-1" } },
+    }),
+  ]);
+  context.game.packs.set(seedPack.collection, seedPack);
+  context.game.folders.push({ id: "ns-character-folder", name: "NS-Character", type: "Actor" });
+  context.Actor = {
+    implementation: {
+      async create(payload) {
+        const actor = makeActor(context, payload);
+        context.game.actors.push(actor);
+        return actor;
+      },
+    },
+  };
+
+  const methods = [];
+  context.fetch = async (url, options) => {
+    methods.push({ url, method: options.method });
+    if (url.endsWith("/campaigns")) {
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({ data: [{ _id: "campaign-1", name: "Campaign" }] }),
+      };
+    }
+    if (url.endsWith("/campaigns/campaign-1/imports") && options.method === "GET") {
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({
+          data: [{
+            character: { _id: "character-1", name: "Hero" },
+            foundryActor: {
+              name: "Hero",
+              type: "character",
+              flags: { netherscrolls: { characterId: "character-1" } },
+              system: { traits: { size: "med" }, attributes: {} },
+              prototypeToken: {},
+              items: [],
+              effects: [],
+            },
+            queue: { id: "queue-1" },
+          }],
+        }),
+      };
+    }
+    if (url.endsWith("/campaigns/campaign-1/imports/character-1") && options.method === "DELETE") {
+      return {
+        ok: true,
+        status: 204,
+        statusText: "No Content",
+        json: async () => null,
+      };
+    }
+    throw new Error(`Unexpected request: ${options.method} ${url}`);
+  };
+
+  const result = await importer.pollNetherscrollsImportQueues();
+  assert.deepEqual(clone(result), { imported: 1, failed: 0 });
+  assert.equal(
+    methods.some((entry) => entry.method === "DELETE" && entry.url.endsWith("/imports/character-1")),
+    true
+  );
+  assert.equal(context.game.actors[0].getFlag("netherscrolls", "characterId"), "character-1");
+});
+
+test("leaves a Foundry Import queued when a required library document is unavailable", async () => {
+  const { context, importer } = createHarness();
+  const seedPack = makePack("world.netherscrolls-items", [
+    makeDocument({
+      _id: "seed-local",
+      name: "Seed",
+      type: "loot",
+      system: {},
+      flags: { netherscrolls: { id: "seed-1" } },
+    }),
+  ]);
+  context.game.packs.set(seedPack.collection, seedPack);
+  context.game.folders.push({ id: "ns-character-folder", name: "NS-Character", type: "Actor" });
+  context.Actor = {
+    implementation: {
+      async create(payload) {
+        const actor = makeActor(context, payload);
+        context.game.actors.push(actor);
+        return actor;
+      },
+    },
+  };
+
+  let acknowledged = false;
+  context.fetch = async (url, options) => {
+    if (url.endsWith("/campaigns")) {
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({ data: [{ _id: "campaign-1", name: "Campaign" }] }),
+      };
+    }
+    if (url.endsWith("/campaigns/campaign-1/imports") && options.method === "GET") {
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({
+          data: [{
+            character: {
+              _id: "character-1",
+              name: "Hero",
+              items: [{ id: "missing-item", name: "Unavailable" }],
+            },
+            foundryActor: {
+              name: "Hero",
+              type: "character",
+              flags: { netherscrolls: { characterId: "character-1" } },
+              system: { traits: { size: "med" }, attributes: {} },
+              prototypeToken: {},
+              items: [],
+              effects: [],
+            },
+            queue: { id: "queue-1" },
+          }],
+        }),
+      };
+    }
+    if (url.endsWith("/import/selection") && options.method === "POST") {
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({
+          data: { items: [] },
+          meta: { requested: { items: 1 }, returned: { items: 0 } },
+        }),
+      };
+    }
+    if (options.method === "DELETE") {
+      acknowledged = true;
+      return { ok: true, status: 204, statusText: "No Content", json: async () => null };
+    }
+    throw new Error(`Unexpected request: ${options.method} ${url}`);
+  };
+
+  const result = await importer.pollNetherscrollsImportQueues();
+  assert.deepEqual(clone(result), { imported: 0, failed: 1 });
+  assert.equal(acknowledged, false);
 });

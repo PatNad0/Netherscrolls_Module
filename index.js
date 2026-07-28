@@ -126,10 +126,12 @@ const NETHERSCROLLS_IMPORT_SIDEBAR_FOLDER = {
   sort: 0,
 };
 const NETHERSCROLLS_API_BASE = "https://api.netherscrolls.ca/api/foundry";
-const SYNC_ENDPOINT = `${NETHERSCROLLS_API_BASE}/sync`;
-const NETHERSCROLLS_SOURCES_ENDPOINT = `${NETHERSCROLLS_API_BASE}/sources`;
+const NETHERSCROLLS_EXPORT_ENDPOINT = `${NETHERSCROLLS_API_BASE}/export`;
+const NETHERSCROLLS_IMPORT_SELECTION_ENDPOINT = `${NETHERSCROLLS_API_BASE}/import/selection`;
+const NETHERSCROLLS_SOURCES_ENDPOINT = `${NETHERSCROLLS_API_BASE}/import/sources`;
 const NETHERSCROLLS_CAMPAIGNS_ENDPOINT = `${NETHERSCROLLS_API_BASE}/campaigns`;
 const NETHERSCROLLS_SOURCE_IMPORT_ENDPOINT = `${NETHERSCROLLS_API_BASE}/import/source`;
+const NETHERSCROLLS_IMPORT_QUEUE_POLL_INTERVAL_MS = 60_000;
 const NETHERSCROLLS_EXCLUDED_IMPORT_SOURCE_IDS = new Set(["6a4b21868f309c84b6cb7908"]);
 const NETHERSCROLLS_IMPORT_ENDPOINTS = {
   classes: `${NETHERSCROLLS_API_BASE}/import/classes`,
@@ -167,6 +169,7 @@ const NETHERSCROLLS_VALID_IMAGE_EXTENSIONS = new Set([
   "webp",
 ]);
 const netherscrollsCharacterImportState = new WeakMap();
+const netherscrollsCharacterImportLocks = new Map();
 const NETHERSCROLLS_MAX_SPELL_LEVEL = 15;
 const NETHERSCROLLS_ITEM_FOLDERS = [
   { type: "weapon", label: "Weapons", sort: 1000 },
@@ -860,7 +863,8 @@ const SETTINGS = {
   npcDeathSave: "npcDeathSaveEachTurn",
   apiKey: "nsApiKey",
   importFromNetherscroll: "importFromNetherscroll",
-  syncButton: "showSyncButton",
+  exportButton: "showFoundryExportButton",
+  importQueuePolling: "pollFoundryImportQueue",
   debug: "debugMode",
   devEnhancedDamage: "devEnhancedDamage",
 };
@@ -888,7 +892,7 @@ Hooks.once("init", () => {
 
   game.settings.register(MODULE_ID, SETTINGS.apiKey, {
     name: "Netherscrolls API Key",
-    hint: "Paste your API key here.",
+    hint: "Use a user-generated key with apikey.import and apikey.export; campaign actions require a campaign DM or administrator key.",
     scope: "world",
     config: true,
     restricted: true,
@@ -897,17 +901,17 @@ Hooks.once("init", () => {
   });
 
   game.settings.registerMenu(MODULE_ID, SETTINGS.importFromNetherscroll, {
-    name: "Netherscrolls Importer",
-    label: "Open Importer",
-    hint: "Import Netherscrolls compendium content and campaign characters.",
+    name: "Foundry Import",
+    label: "Open Foundry Import",
+    hint: "Run Foundry Import for Netherscrolls library content and campaign characters.",
     icon: "fa-solid fa-cloud-arrow-down",
     type: NetherscrollsImportSettings,
     restricted: true,
   });
 
-  game.settings.register(MODULE_ID, SETTINGS.syncButton, {
-    name: "Sync button",
-    hint: "Show the sync button on actor sheets.",
+  game.settings.register(MODULE_ID, SETTINGS.exportButton, {
+    name: "Foundry Export button",
+    hint: "Show the Foundry Export button on linked character sheets.",
     scope: "client",
     config: true,
     type: Boolean,
@@ -915,9 +919,20 @@ Hooks.once("init", () => {
     onChange: () => rerenderActorSheets(),
   });
 
+  game.settings.register(MODULE_ID, SETTINGS.importQueuePolling, {
+    name: "Poll the Foundry Import queue",
+    hint: "Periodically apply queued campaign characters using the DM or administrator API key.",
+    scope: "world",
+    config: true,
+    restricted: true,
+    type: Boolean,
+    default: true,
+    onChange: (value) => toggleNetherscrollsImportQueuePolling(Boolean(value)),
+  });
+
   game.settings.register(MODULE_ID, SETTINGS.debug, {
     name: "Debug mode",
-    hint: "Show sync request/response payloads in chat.",
+    hint: "Show Foundry Import and Foundry Export request/response payloads in chat.",
     scope: "client",
     config: true,
     type: Boolean,
@@ -949,7 +964,7 @@ function createNetherscrollsImportSettingsClass() {
         id: "netherscrolls-import-settings",
         classes: ["netherscrolls-import-window"],
         window: {
-          title: "Netherscrolls Importer",
+          title: "Foundry Import",
         },
         position: {
           width: 900,
@@ -984,7 +999,7 @@ function createNetherscrollsImportSettingsClass() {
         id: "netherscrolls-import-settings",
         classes: ["netherscrolls-import-window"],
         window: {
-          title: "Netherscrolls Importer",
+          title: "Foundry Import",
         },
         position: {
           width: 900,
@@ -1028,7 +1043,7 @@ function createNetherscrollsImportSettingsClass() {
     static get defaultOptions() {
       const options = {
         id: "netherscrolls-import-settings",
-        title: "Netherscrolls Importer",
+        title: "Foundry Import",
         template: `modules/${MODULE_ID}/templates/import-from-netherscroll.hbs`,
         classes: ["netherscrolls-import-window"],
         width: 900,
@@ -1244,7 +1259,7 @@ async function handleNetherscrollsImportSettingsSubmitEvent(event) {
     }
   } catch (err) {
     console.error(`${MODULE_ID} | Netherscrolls import form submit failed.`, err);
-    ui?.notifications?.error?.(`Netherscrolls import failed: ${err?.message ?? err}`);
+    ui?.notifications?.error?.(`Foundry Import failed: ${err?.message ?? err}`);
   } finally {
     if (submitButton) {
       submitButton.disabled = false;
@@ -1266,7 +1281,7 @@ async function submitNetherscrollsImportSettings(formData) {
     isImportTypeSelected(formData, type.key)
   );
   if (!selectedTypes.length) {
-    ui?.notifications?.warn?.("Select at least one Netherscroll import type.");
+    ui?.notifications?.warn?.("Select at least one Foundry Import content type.");
     return { importedAny: false };
   }
 
@@ -1284,7 +1299,7 @@ async function submitNetherscrollsImportSettings(formData) {
   }
 
   const selectedSources = getSelectedNetherscrollsSourceValues(formData);
-  const requests = buildNetherscrollsImportRequests({
+  const requests = await buildNetherscrollsImportRequests({
     apiKey,
     selectedTypes,
     sinceDate: since,
@@ -1303,7 +1318,7 @@ async function submitNetherscrollsImportSettings(formData) {
   );
   if (unsupportedTypes.length) {
     const labels = unsupportedTypes.map((type) => type.label.toLowerCase()).join(", ");
-    ui?.notifications?.warn?.(`Import endpoint not configured yet for: ${labels}.`);
+    ui?.notifications?.warn?.(`Foundry Import endpoint not configured for: ${labels}.`);
   }
 
   let importedAny = false;
@@ -1313,7 +1328,7 @@ async function submitNetherscrollsImportSettings(formData) {
       const result = await applyNetherscrollsImportResponse(response, request.typeKey, request.typeKeys);
       importedAny = true;
       ui?.notifications?.info?.(
-        request.typeKey === "source"
+        request.sourceFiltered
           ? formatNetherscrollsSourceImportResult(result, request.typeKeys)
           : formatNetherscrollsImportResult(request.typeKey, result)
       );
@@ -1345,11 +1360,11 @@ async function getNetherscrollsCompendiumReadiness() {
 
     try {
       const index = await pack.getIndex?.({
-        fields: [`flags.${MODULE_ID}.netherscrollsId`, "flags.netherscrolls.id"],
+        fields: ["flags.netherscrolls.id"],
       });
       const entries = index?.contents ?? (index ? Array.from(index) : []);
       const imported = entries.filter((entry) =>
-        Boolean(entry?.flags?.[MODULE_ID]?.netherscrollsId ?? entry?.flags?.netherscrolls?.id)
+        Boolean(entry?.flags?.netherscrolls?.id)
       );
       documentCount += imported.length;
     } catch (err) {
@@ -1388,26 +1403,59 @@ function activateNetherscrollsCharacterImportListeners(root) {
       .map((id) => state.charactersById.get(id))
       .filter(Boolean);
     if (!selected.length) {
-      ui?.notifications?.warn?.("Select at least one Netherscrolls character to import.");
+      ui?.notifications?.warn?.("Select at least one Netherscrolls character for Foundry Import.");
       return;
     }
 
     const button = event.currentTarget;
     const originalHtml = button.innerHTML;
     button.disabled = true;
-    button.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Importing characters…';
+    button.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Running Foundry Import…';
     try {
       await importNetherscrollsSelectedCampaignCharacters(root, selected);
     } catch (err) {
       console.error(`${MODULE_ID} | Character import failed.`, err);
-      ui?.notifications?.error?.(`Character import failed: ${err?.message ?? err}`);
+      ui?.notifications?.error?.(`Foundry Import failed: ${err?.message ?? err}`);
+    } finally {
+      button.disabled = false;
+      button.innerHTML = originalHtml;
+    }
+  });
+  root?.querySelector?.('[data-ns-character-action="export-selected"]')?.addEventListener("click", async (event) => {
+    const campaignId = normalizeNetherscrollsReferenceValue(campaignSelect?.value);
+    const selectedIds = Array.from(panel.querySelectorAll('[name="characterIds"]:checked')).map((input) => input.value);
+    if (!campaignId) {
+      ui?.notifications?.warn?.("Select a campaign before running Foundry Export.");
+      return;
+    }
+    const actors = selectedIds
+      .map((characterId) => findNetherscrollsActorByCharacterId(characterId))
+      .filter(Boolean);
+    if (!actors.length) {
+      ui?.notifications?.warn?.("Select at least one character that already exists in Foundry.");
+      return;
+    }
+
+    const button = event.currentTarget;
+    const originalHtml = button.innerHTML;
+    button.disabled = true;
+    button.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Exporting characters…';
+    try {
+      const result = await exportNetherscrollsCampaignActors(campaignId, actors);
+      const message = `Foundry Export: ${result.succeeded.length} succeeded, ${result.failed.length} failed.`;
+      setNetherscrollsCharacterImportMessage(root, message, { error: Boolean(result.failed.length) });
+      if (result.failed.length) ui?.notifications?.warn?.(message);
+      else ui?.notifications?.info?.(message);
+    } catch (err) {
+      console.error(`${MODULE_ID} | Campaign Foundry Export failed.`, err);
+      ui?.notifications?.error?.(`Campaign Foundry Export failed: ${err?.message ?? err}`);
     } finally {
       button.disabled = false;
       button.innerHTML = originalHtml;
     }
   });
 
-  if (!panel.disabled && getNetherscrollsApiKey()) {
+  if (getNetherscrollsApiKey()) {
     loadNetherscrollsCampaignsIntoForm(root);
   }
 }
@@ -1428,10 +1476,6 @@ async function refreshNetherscrollsCharacterImportAvailability(root) {
   if (!panel) return;
   const state = await getNetherscrollsCompendiumReadiness();
   const enabled = state.ready;
-  panel.disabled = !enabled;
-  panel.querySelectorAll("button, select, input").forEach((control) => {
-    control.disabled = !enabled;
-  });
 
   const status = root.querySelector("[data-ns-compendium-status]");
   status?.classList.toggle("is-ready", enabled);
@@ -1439,23 +1483,23 @@ async function refreshNetherscrollsCharacterImportAvailability(root) {
   if (status) {
     status.replaceChildren();
     const icon = document.createElement("i");
-    icon.className = enabled ? "fa-solid fa-boxes-stacked" : "fa-solid fa-lock";
+    icon.className = enabled ? "fa-solid fa-boxes-stacked" : "fa-solid fa-cloud-arrow-down";
     const text = document.createElement("span");
     text.textContent = enabled
       ? `Netherscrolls library ready (${state.documentCount} documents)`
-      : "Import the Netherscrolls library to unlock characters";
+      : "Library empty; Foundry Import will fetch required linked records";
     status.append(icon, text);
   }
 
   const prerequisite = panel.querySelector("[data-ns-character-prerequisite]");
-  prerequisite?.classList.toggle("is-ready", enabled);
-  prerequisite?.classList.toggle("is-blocked", !enabled);
+  prerequisite?.classList.add("is-ready");
+  prerequisite?.classList.remove("is-blocked");
   if (prerequisite) {
     prerequisite.textContent = enabled
       ? "Select a campaign, then choose the Netherscrolls characters to create or update in Foundry."
-      : "Import Netherscrolls compendium content first. Character import is locked until the library contains Netherscrolls documents.";
+      : "Select a campaign. Missing linked records will be fetched through targeted Foundry Import selection.";
   }
-  if (enabled) await loadNetherscrollsCampaignsIntoForm(root, { force: true });
+  await loadNetherscrollsCampaignsIntoForm(root, { force: true });
 }
 
 async function loadNetherscrollsCampaignsIntoForm(root, { force = false } = {}) {
@@ -1508,7 +1552,7 @@ async function fetchNetherscrollsCampaigns() {
   const apiKey = getNetherscrollsApiKey();
   if (!apiKey) throw new Error("Netherscrolls API Key is missing. Set it in Module Settings.");
   const data = await fetchNetherscrollsApiJson(NETHERSCROLLS_CAMPAIGNS_ENDPOINT, apiKey);
-  const rows = getNetherscrollsApiRows(data, ["campaigns"]);
+  const rows = getNetherscrollsApiRows(data);
   return rows
     .map((campaign) => {
       const id = normalizeNetherscrollsReferenceValue(
@@ -1521,6 +1565,105 @@ async function fetchNetherscrollsCampaigns() {
     })
     .filter(Boolean)
     .sort((a, b) => a.label.localeCompare(b.label));
+}
+
+function toggleNetherscrollsImportQueuePolling(enabled) {
+  if (netherscrollsImportQueuePollTimer) {
+    clearTimeout(netherscrollsImportQueuePollTimer);
+    netherscrollsImportQueuePollTimer = null;
+  }
+  if (!enabled || !game?.ready || !isPrimaryNetherscrollsQueuePoller()) return;
+
+  const run = async () => {
+    try {
+      await pollNetherscrollsImportQueues();
+    } catch (err) {
+      console.error(`${MODULE_ID} | Foundry Import queue poll failed.`, err);
+    } finally {
+      if (
+        game?.settings?.get(MODULE_ID, SETTINGS.importQueuePolling) === true &&
+        isPrimaryNetherscrollsQueuePoller()
+      ) {
+        netherscrollsImportQueuePollTimer = setTimeout(
+          run,
+          NETHERSCROLLS_IMPORT_QUEUE_POLL_INTERVAL_MS
+        );
+      }
+    }
+  };
+  run();
+}
+
+async function pollNetherscrollsImportQueues() {
+  if (netherscrollsImportQueuePollRunning || !isPrimaryNetherscrollsQueuePoller()) return {
+    imported: 0,
+    failed: 0,
+  };
+  const apiKey = getNetherscrollsApiKey();
+  if (!apiKey) return { imported: 0, failed: 0 };
+
+  netherscrollsImportQueuePollRunning = true;
+  let imported = 0;
+  let failed = 0;
+  try {
+    const campaigns = await fetchNetherscrollsCampaigns();
+    if (!campaigns.length) return { imported, failed };
+    const folder = await findOrCreateNetherscrollsCharacterFolder();
+    if (!folder?.id) throw new Error("Foundry could not create the NS-Character Actor folder.");
+
+    for (const campaign of campaigns) {
+      const queuedCharacters = await fetchNetherscrollsCampaignImports(campaign.id);
+      for (const importedCharacter of queuedCharacters) {
+        try {
+          await importNetherscrollsCampaignCharacter(importedCharacter, folder);
+          await acknowledgeNetherscrollsCampaignImport(campaign.id, importedCharacter.id);
+          imported += 1;
+        } catch (err) {
+          failed += 1;
+          console.error(
+            `${MODULE_ID} | Foundry Import queue entry remains queued after a failed apply.`,
+            {
+              campaignId: campaign.id,
+              characterId: importedCharacter.id,
+              error: err,
+            }
+          );
+        }
+      }
+    }
+    if (imported) {
+      ui?.notifications?.info?.(
+        `Foundry Import queue: ${imported} character${imported === 1 ? "" : "s"} applied.`
+      );
+    }
+    return { imported, failed };
+  } finally {
+    netherscrollsImportQueuePollRunning = false;
+  }
+}
+
+function isPrimaryNetherscrollsQueuePoller() {
+  if (!game?.user?.isGM) return false;
+  const activeGM = game?.users?.activeGM;
+  return !activeGM || activeGM.id === game.user.id;
+}
+
+async function fetchNetherscrollsCampaignImports(campaignId) {
+  const apiKey = getNetherscrollsApiKey();
+  const endpoint = `${NETHERSCROLLS_CAMPAIGNS_ENDPOINT}/${encodeURIComponent(campaignId)}/imports`;
+  const data = await fetchNetherscrollsApiJson(endpoint, apiKey);
+  return getNetherscrollsApiRows(data)
+    .map(normalizeNetherscrollsImportedCharacter)
+    .filter(Boolean);
+}
+
+async function acknowledgeNetherscrollsCampaignImport(campaignId, characterId) {
+  const endpoint = `${NETHERSCROLLS_CAMPAIGNS_ENDPOINT}/${encodeURIComponent(campaignId)}/imports/${encodeURIComponent(characterId)}`;
+  await requestNetherscrollsJson(endpoint, {
+    method: "DELETE",
+    apiKey: getNetherscrollsApiKey(),
+    operation: "Foundry Import acknowledgement",
+  });
 }
 
 async function loadNetherscrollsCampaignCharactersIntoForm(root, campaignId) {
@@ -1543,7 +1686,7 @@ async function loadNetherscrollsCampaignCharactersIntoForm(root, campaignId) {
     renderNetherscrollsCampaignCharacterList(list, characters);
     setNetherscrollsCharacterImportMessage(
       root,
-      characters.length ? "Choose one or more characters to import." : "This campaign has no exportable Netherscrolls characters."
+      characters.length ? "Choose one or more characters for Foundry Import." : "This campaign has no characters available for Foundry Import."
     );
   } catch (err) {
     console.error(`${MODULE_ID} | Unable to load Netherscrolls campaign characters.`, err);
@@ -1556,47 +1699,61 @@ async function fetchNetherscrollsCampaignCharacters(campaignId) {
   if (!apiKey) throw new Error("Netherscrolls API Key is missing. Set it in Module Settings.");
   const endpoint = `${NETHERSCROLLS_CAMPAIGNS_ENDPOINT}/${encodeURIComponent(campaignId)}/characters`;
   const data = await fetchNetherscrollsApiJson(endpoint, apiKey);
-  return getNetherscrollsApiRows(data, ["characters", "exports"])
-    .map(normalizeNetherscrollsExportedCharacter)
+  return getNetherscrollsApiRows(data)
+    .map(normalizeNetherscrollsImportedCharacter)
     .filter(Boolean);
 }
 
 async function fetchNetherscrollsApiJson(url, apiKey) {
+  return requestNetherscrollsJson(url, { method: "GET", apiKey });
+}
+
+async function requestNetherscrollsJson(
+  url,
+  {
+    method = "GET",
+    apiKey = getNetherscrollsApiKey(),
+    body = null,
+    operation = "Request",
+    includeStatus = false,
+  } = {}
+) {
   const response = await fetch(url, {
-    method: "GET",
+    method,
     headers: {
       Accept: "application/json",
+      ...(body == null ? {} : { "Content-Type": "application/json" }),
       "x-api-key": apiKey,
     },
+    ...(body == null ? {} : { body: JSON.stringify(body) }),
   });
   const data = await response.json().catch(() => null);
   if (!response.ok) {
-    const message = data?.error?.message ?? data?.message ?? `Request failed (${response.status} ${response.statusText}).`;
-    throw new Error(message);
+    const message =
+      data?.error?.message ??
+      data?.message ??
+      (typeof data?.error === "string" ? data.error : null) ??
+      `${operation} failed (${response.status} ${response.statusText}).`;
+    const error = new Error(message);
+    error.status = response.status;
+    error.code = data?.error?.code ?? data?.code ?? null;
+    error.data = data;
+    throw error;
   }
-  return data;
+  return includeStatus ? { data, status: response.status } : data;
 }
 
-function getNetherscrollsApiRows(data, keys = []) {
+function getNetherscrollsApiRows(data) {
   if (Array.isArray(data)) return data;
-  for (const container of [data?.data, data]) {
-    if (Array.isArray(container)) return container;
-    for (const key of keys) {
-      if (Array.isArray(container?.[key])) return container[key];
-    }
-  }
-  return [];
+  return Array.isArray(data?.data) ? data.data : [];
 }
 
-function normalizeNetherscrollsExportedCharacter(entry) {
-  const character = entry?.character ?? entry?.data?.character ?? entry;
-  const foundryActor = entry?.foundryActor ?? entry?.actor ?? entry?.data?.foundryActor ?? character?.foundryActor;
+function normalizeNetherscrollsImportedCharacter(entry) {
+  const character = entry?.character;
+  const foundryActor = entry?.foundryActor;
   const id = normalizeNetherscrollsReferenceValue(
-    entry?.characterId ??
-      character?.netherscrollsId ??
-      character?._id ??
+    character?._id ??
       character?.id ??
-      foundryActor?.flags?.[MODULE_ID]?.characterId ??
       foundryActor?.flags?.netherscrolls?.characterId
   );
   if (!id) return null;
@@ -1618,22 +1775,22 @@ function renderNetherscrollsCampaignCharacterList(root, characters) {
   }
   thead.appendChild(headerRow);
   const tbody = document.createElement("tbody");
-  for (const exported of characters) {
+  for (const importedCharacter of characters) {
     const row = document.createElement("tr");
     const selectCell = document.createElement("td");
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
     checkbox.name = "characterIds";
-    checkbox.value = exported.id;
-    checkbox.setAttribute("aria-label", `Import ${exported.name}`);
+    checkbox.value = importedCharacter.id;
+    checkbox.setAttribute("aria-label", `Foundry Import ${importedCharacter.name}`);
     selectCell.appendChild(checkbox);
 
     const nameCell = document.createElement("td");
-    nameCell.textContent = exported.name;
+    nameCell.textContent = importedCharacter.name;
     const detailsCell = document.createElement("td");
-    detailsCell.textContent = getNetherscrollsCharacterImportDetail(exported);
+    detailsCell.textContent = getNetherscrollsCharacterImportDetail(importedCharacter);
     const statusCell = document.createElement("td");
-    const existing = findNetherscrollsActorByCharacterId(exported.id);
+    const existing = findNetherscrollsActorByCharacterId(importedCharacter.id);
     statusCell.className = `ns-character-status ${existing ? "is-existing" : "is-new"}`;
     statusCell.textContent = existing ? "Will update" : "Will create";
     row.append(selectCell, nameCell, detailsCell, statusCell);
@@ -1643,8 +1800,8 @@ function renderNetherscrollsCampaignCharacterList(root, characters) {
   root.appendChild(table);
 }
 
-function getNetherscrollsCharacterImportDetail(exported) {
-  const source = exported?.character ?? {};
+function getNetherscrollsCharacterImportDetail(importedCharacter) {
+  const source = importedCharacter?.character ?? {};
   const parts = [
     toTrimmedStringOrNull(source?.race?.name ?? source?.raceName),
     toTrimmedStringOrNull(source?.class?.name ?? source?.className ?? source?.characterClass),
@@ -1689,35 +1846,35 @@ async function importNetherscrollsSelectedCampaignCharacters(root, selected) {
   for (const [index, selectedCharacter] of selected.entries()) {
     const progressLabel = `Character ${index + 1} of ${selected.length}: ${selectedCharacter?.name ?? "Unnamed Character"}`;
     try {
-      setNetherscrollsCharacterImportMessage(root, `${progressLabel} — loading export...`);
-      debugNetherscrollsCharacterImport("Hydrating selected character export.", {
+      setNetherscrollsCharacterImportMessage(root, `${progressLabel} — loading Foundry Import payload...`);
+      debugNetherscrollsCharacterImport("Hydrating selected Foundry Import character.", {
         campaignId,
         characterId: selectedCharacter?.id,
         name: selectedCharacter?.name,
         hasActorPayload: Boolean(selectedCharacter?.foundryActor),
       });
-      const exported = await hydrateNetherscrollsExportedCharacter(selectedCharacter, campaignId);
-      debugNetherscrollsCharacterImport("Character export hydrated.", {
-        characterId: exported.id,
-        name: exported.name,
-        actorPayloadKeys: Object.keys(exported.foundryActor ?? {}),
+      const importedCharacter = await hydrateNetherscrollsImportedCharacter(selectedCharacter, campaignId);
+      debugNetherscrollsCharacterImport("Foundry Import character hydrated.", {
+        characterId: importedCharacter.id,
+        name: importedCharacter.name,
+        actorPayloadKeys: Object.keys(importedCharacter.foundryActor ?? {}),
       });
-      const result = await importNetherscrollsCampaignCharacter(exported, folder, {
+      const result = await importNetherscrollsCampaignCharacter(importedCharacter, folder, {
         onProgress: (stage) => {
           setNetherscrollsCharacterImportMessage(root, `${progressLabel} — ${stage}`);
-          console.info(`${MODULE_ID} | Character import | ${progressLabel} — ${stage}`);
+          console.info(`${MODULE_ID} | Foundry Import | ${progressLabel} — ${stage}`);
         },
       });
       debugNetherscrollsCharacterImport("Character import completed.", {
-        characterId: exported.id,
-        name: exported.name,
+        characterId: importedCharacter.id,
+        name: importedCharacter.name,
         created: result.created,
         fetched: result.fetched,
         itemResult: result.items,
         effectResult: result.effects,
         repairedFeatures: result.repairedFeatures,
       });
-      results.push({ ...result, name: exported.name, ok: true });
+      results.push({ ...result, name: importedCharacter.name, ok: true });
     } catch (err) {
       setNetherscrollsCharacterImportMessage(root, `${progressLabel} — failed: ${err?.message ?? String(err)}`, { error: true });
       debugNetherscrollsCharacterImport("Character import failed.", {
@@ -1756,22 +1913,22 @@ async function importNetherscrollsSelectedCampaignCharacters(root, selected) {
   if (list) renderNetherscrollsCampaignCharacterList(list, Array.from(state.charactersById.values()));
 }
 
-async function hydrateNetherscrollsExportedCharacter(exported, campaignId) {
-  if (exported?.foundryActor && typeof exported.foundryActor === "object") {
+async function hydrateNetherscrollsImportedCharacter(importedCharacter, campaignId) {
+  if (importedCharacter?.foundryActor && typeof importedCharacter.foundryActor === "object") {
     debugNetherscrollsCharacterImport("Using Foundry Actor payload supplied by the campaign list.", {
-      characterId: exported.id,
+      characterId: importedCharacter.id,
     });
-    return exported;
+    return importedCharacter;
   }
   const apiKey = getNetherscrollsApiKey();
-  const endpoint = `${NETHERSCROLLS_CAMPAIGNS_ENDPOINT}/${encodeURIComponent(campaignId)}/characters/${encodeURIComponent(exported.id)}`;
-  debugNetherscrollsCharacterImport("Fetching full character export.", { campaignId, characterId: exported.id, endpoint });
+  const endpoint = `${NETHERSCROLLS_CAMPAIGNS_ENDPOINT}/${encodeURIComponent(campaignId)}/characters/${encodeURIComponent(importedCharacter.id)}`;
+  debugNetherscrollsCharacterImport("Fetching full Foundry Import character.", { campaignId, characterId: importedCharacter.id, endpoint });
   const data = await fetchNetherscrollsApiJson(endpoint, apiKey);
-  const direct = normalizeNetherscrollsExportedCharacter(data?.data ?? data);
+  const direct = normalizeNetherscrollsImportedCharacter(data?.data ?? data);
   if (!direct?.foundryActor) {
-    throw new Error("The campaign character export did not include a Foundry Actor payload.");
+    throw new Error("The Foundry Import response did not include a Foundry Actor payload.");
   }
-  debugNetherscrollsCharacterImport("Full character export contains a Foundry Actor payload.", {
+  debugNetherscrollsCharacterImport("Full Foundry Import character contains a Foundry Actor payload.", {
     characterId: direct.id,
     actorPayloadKeys: Object.keys(direct.foundryActor ?? {}),
   });
@@ -1795,29 +1952,46 @@ async function findOrCreateNetherscrollsCharacterFolder() {
   return FolderClass.create({ ...NETHERSCROLLS_CHARACTER_FOLDER });
 }
 
-async function importNetherscrollsCampaignCharacter(exported, folder, { onProgress = null } = {}) {
-  const characterId = normalizeNetherscrollsReferenceValue(exported?.id);
-  if (!characterId) throw new Error("The character export has no Netherscrolls character id.");
-  if (!exported?.foundryActor || typeof exported.foundryActor !== "object") {
-    throw new Error("The character export has no Foundry Actor payload.");
+async function importNetherscrollsCampaignCharacter(importedCharacter, folder, { onProgress = null } = {}) {
+  const characterId = normalizeNetherscrollsReferenceValue(importedCharacter?.id);
+  if (!characterId) throw new Error("The Foundry Import character has no Netherscrolls character id.");
+  const activeImport = netherscrollsCharacterImportLocks.get(characterId);
+  if (activeImport) return activeImport;
+
+  const importPromise = applyNetherscrollsCampaignCharacter(importedCharacter, folder, {
+    onProgress,
+  });
+  netherscrollsCharacterImportLocks.set(characterId, importPromise);
+  try {
+    return await importPromise;
+  } finally {
+    if (netherscrollsCharacterImportLocks.get(characterId) === importPromise) {
+      netherscrollsCharacterImportLocks.delete(characterId);
+    }
+  }
+}
+
+async function applyNetherscrollsCampaignCharacter(importedCharacter, folder, { onProgress = null } = {}) {
+  const characterId = normalizeNetherscrollsReferenceValue(importedCharacter?.id);
+  if (!importedCharacter?.foundryActor || typeof importedCharacter.foundryActor !== "object") {
+    throw new Error("The Foundry Import character has no Foundry Actor payload.");
   }
 
   onProgress?.("preparing actor data...");
-  const actorPayload = duplicateNetherscrollsData(exported.foundryActor);
+  const actorPayload = duplicateNetherscrollsData(importedCharacter.foundryActor);
   debugNetherscrollsCharacterImport("Preparing Foundry Actor payload.", {
     characterId,
-    name: exported.name,
+    name: importedCharacter.name,
     sourceSize: actorPayload?.system?.traits?.size,
-    hasLegacyToken: Boolean(actorPayload?.token),
     hasPrototypeToken: Boolean(actorPayload?.prototypeToken),
   });
-  normalizeNetherscrollsCharacterActorCreationData(actorPayload, exported.character);
-  const itemSources = collectNetherscrollsCharacterItemSources(exported);
+  normalizeNetherscrollsCharacterActorCreationData(actorPayload, importedCharacter.character);
+  const itemSources = collectNetherscrollsCharacterItemSources(importedCharacter);
   const classSourceCount = itemSources.filter((entry) => entry.dataset === "classes").length;
   const classFeatureSourceCount = itemSources.filter((entry) => entry.dataset === "classFeatures").length;
   const effectSources = [
     ...(Array.isArray(actorPayload.effects) ? actorPayload.effects : []),
-    ...buildNetherscrollsPortableActiveEffects(exported.character),
+    ...buildNetherscrollsPortableActiveEffects(importedCharacter.character),
   ];
   delete actorPayload.items;
   delete actorPayload.effects;
@@ -1826,12 +2000,8 @@ async function importNetherscrollsCampaignCharacter(exported, folder, { onProgre
   delete actorPayload.uuid;
   actorPayload.type = "character";
   actorPayload.folder = folder.id;
-  actorPayload.name = toTrimmedStringOrNull(actorPayload.name) ?? exported.name;
+  actorPayload.name = toTrimmedStringOrNull(actorPayload.name) ?? importedCharacter.name;
   actorPayload.flags = actorPayload.flags ?? {};
-  actorPayload.flags[MODULE_ID] = {
-    ...(actorPayload.flags[MODULE_ID] ?? {}),
-    characterId,
-  };
   actorPayload.flags.netherscrolls = {
     ...(actorPayload.flags.netherscrolls ?? {}),
     characterId,
@@ -1846,7 +2016,17 @@ async function importNetherscrollsCampaignCharacter(exported, folder, { onProgre
     classSourceCount,
     classFeatureSourceCount,
   });
-  console.info(`${MODULE_ID} | Character import | ${actorPayload.name}: ${classSourceCount} class/subclass source(s), ${classFeatureSourceCount} class feature source(s).`);
+  console.info(`${MODULE_ID} | Foundry Import | ${actorPayload.name}: ${classSourceCount} class/subclass source(s), ${classFeatureSourceCount} class feature source(s).`);
+
+  onProgress?.("resolving items, spells, and features...");
+  const content = await resolveNetherscrollsCharacterItemSources(itemSources, {
+    onProgress: (completed, total) => onProgress?.(`looking up imported library content (${completed}/${total})...`),
+  });
+  debugNetherscrollsCharacterImport("Resolved character item sources.", {
+    characterId,
+    resolvedItemCount: content.items.length,
+    fetched: content.fetched,
+  });
 
   let actor = findNetherscrollsActorByCharacterId(characterId);
   const created = !actor;
@@ -1868,27 +2048,18 @@ async function importNetherscrollsCampaignCharacter(exported, folder, { onProgre
   onProgress?.("linking actor to Netherscrolls...");
   await setActorCharacterId(actor, characterId);
 
-  onProgress?.("resolving items, spells, and features...");
-  const content = await resolveNetherscrollsCharacterItemSources(itemSources, {
-    onProgress: (completed, total) => onProgress?.(`looking up imported library content (${completed}/${total})...`),
-  });
-  debugNetherscrollsCharacterImport("Resolved character item sources.", {
-    characterId,
-    resolvedItemCount: content.items.length,
-    fetched: content.fetched,
-  });
   onProgress?.(`adding or updating ${content.items.length} item${content.items.length === 1 ? "" : "s"}...`);
-  const itemResult = await syncNetherscrollsCharacterActorItems(actor, content.items, characterId);
-  debugNetherscrollsCharacterImport("Synced character items.", { characterId, itemResult });
+  const itemResult = await reconcileNetherscrollsCharacterActorItems(actor, content.items, characterId);
+  debugNetherscrollsCharacterImport("Reconciled character items.", { characterId, itemResult });
   onProgress?.(`adding or updating ${effectSources.length} effect${effectSources.length === 1 ? "" : "s"}...`);
-  const effectResult = await syncNetherscrollsCharacterActorEffects(actor, effectSources, characterId);
-  debugNetherscrollsCharacterImport("Synced character effects.", { characterId, effectResult });
+  const effectResult = await reconcileNetherscrollsCharacterActorEffects(actor, effectSources, characterId);
+  debugNetherscrollsCharacterImport("Reconciled character effects.", { characterId, effectResult });
   let repairedFeatures = 0;
   try {
     onProgress?.("repairing class features...");
     const repair = await repairNetherscrollsActorClassFeatures(actor, { notify: false });
     repairedFeatures = repair.created ?? 0;
-    console.info(`${MODULE_ID} | Character import | ${actorPayload.name}: class feature repair result.`, repair);
+    console.info(`${MODULE_ID} | Foundry Import | ${actorPayload.name}: class feature repair result.`, repair);
     debugNetherscrollsCharacterImport("Repaired class features after import.", { characterId, repair });
   } catch (err) {
     debugNetherscrollsCharacterImport("Class-feature repair failed.", {
@@ -1896,7 +2067,8 @@ async function importNetherscrollsCampaignCharacter(exported, folder, { onProgre
       error: err?.message ?? String(err),
       stack: err?.stack,
     });
-    console.warn(`${MODULE_ID} | Unable to repair imported class features.`, err);
+    console.error(`${MODULE_ID} | Unable to repair imported class features.`, err);
+    throw err;
   }
 
   onProgress?.("complete.");
@@ -1915,7 +2087,7 @@ function normalizeNetherscrollsCharacterActorCreationData(actorPayload, characte
   if (!actorPayload || typeof actorPayload !== "object") return;
 
   // D&D5e calculates a new character's prototype-token dimensions from its
-  // trait size. Exports created with a display name (for example "Medium")
+  // trait size. Import payloads created with a display name (for example "Medium")
   // instead of a D&D5e size key cause that calculation to fail during Actor.create.
   actorPayload.system = actorPayload.system && typeof actorPayload.system === "object"
     ? actorPayload.system
@@ -1924,8 +2096,8 @@ function normalizeNetherscrollsCharacterActorCreationData(actorPayload, characte
     ? actorPayload.system.traits
     : {};
 
-  // XP belongs to the character record. Prefer it over a stale Foundry export
-  // so subsequent character imports keep the Actor's progression in sync.
+  // XP belongs to the character record. Prefer it over a retained Actor snapshot
+  // so subsequent Foundry Imports keep the Actor's progression current.
   const characterXp = toNumberOrNull(character?.xp ?? character?.experience);
   if (characterXp != null) {
     actorPayload.system.details = actorPayload.system.details && typeof actorPayload.system.details === "object"
@@ -1960,13 +2132,13 @@ function normalizeNetherscrollsCharacterActorCreationData(actorPayload, characte
     availableSizeKeys: Object.keys(sizes),
   });
 
-  // D&D5e derives `ac.value`; preserving an exported value requires a flat AC
+  // D&D5e derives `ac.value`; preserving an imported value requires a flat AC
   // calculation instead of assigning the derived field directly.
   actorPayload.system.attributes = actorPayload.system.attributes && typeof actorPayload.system.attributes === "object"
     ? actorPayload.system.attributes
     : {};
 
-  // Character exports keep skill training separately from the Foundry Actor
+  // Character Import responses keep skill training separately from the Foundry Actor
   // payload.  D&D5e expects training/expertise in `value` and a manual skill
   // modifier in `bonuses.check`; without this conversion every skill renders
   // as untrained after import.
@@ -1985,7 +2157,7 @@ function normalizeNetherscrollsCharacterActorCreationData(actorPayload, characte
     };
   }
   debugNetherscrollsCharacterImport("Normalized D&D5e actor hit points.", {
-    exportedHp: actorHp,
+    importedHp: actorHp,
     maximum: hpMaximum || null,
     importedAtFullHealth: hpMaximum > 0,
   });
@@ -1996,7 +2168,7 @@ function normalizeNetherscrollsCharacterActorCreationData(actorPayload, characte
     character?.armor_class ??
     character?.ac ??
     character?.attributes?.ac;
-  const exportedAc = characterAc ?? actorAc;
+  const importedAc = characterAc ?? actorAc;
   const armorClass = characterAc != null
     ? getNetherscrollsCharacterArmorClassTotal(characterAc)
     : getNetherscrollsFoundryArmorClassTotal(actorAc);
@@ -2012,20 +2184,14 @@ function normalizeNetherscrollsCharacterActorCreationData(actorPayload, characte
       calc: "flat",
     };
   }
-  console.info(`${MODULE_ID} | Character import | ${actorPayload.name ?? "Character"}: armor class ${armorClass > 0 ? armorClass : "not supplied"}.`);
+  console.info(`${MODULE_ID} | Foundry Import | ${actorPayload.name ?? "Character"}: armor class ${armorClass > 0 ? armorClass : "not supplied"}.`);
   debugNetherscrollsCharacterImport("Normalized D&D5e armor class.", {
-    exportedAc,
+    importedAc,
     armorClass: armorClass > 0 ? Math.trunc(armorClass) : null,
     acData: actorPayload.system.attributes.ac,
   });
 
-  // Older Netherscrolls exports used `token`; Foundry Actor creation expects
-  // the prototype token under `prototypeToken`.
-  if (!actorPayload.prototypeToken && actorPayload.token && typeof actorPayload.token === "object") {
-    actorPayload.prototypeToken = actorPayload.token;
-  }
   debugNetherscrollsCharacterImport("Normalized prototype token data.", {
-    usedLegacyToken: Boolean(actorPayload.token),
     hasPrototypeToken: Boolean(actorPayload.prototypeToken),
   });
   delete actorPayload.token;
@@ -2145,14 +2311,10 @@ function getWorldActors() {
 function findNetherscrollsActorByCharacterId(characterId) {
   const id = normalizeNetherscrollsReferenceValue(characterId);
   if (!id) return null;
-  return (
-    getWorldActors().find((actor) => String(getActorCharacterId(actor) ?? "") === id) ??
-    getWorldActors().find((actor) => String(actor?.flags?.netherscrolls?.characterId ?? "") === id) ??
-    null
-  );
+  return getWorldActors().find((actor) => String(getActorCharacterId(actor) ?? "") === id) ?? null;
 }
 
-function collectNetherscrollsCharacterItemSources(exported) {
+function collectNetherscrollsCharacterItemSources(importedCharacter) {
   const sources = [];
   const add = (
     value,
@@ -2172,8 +2334,8 @@ function collectNetherscrollsCharacterItemSources(exported) {
       });
     }
   };
-  const actor = exported?.foundryActor ?? {};
-  const character = exported?.character ?? {};
+  const actor = importedCharacter?.foundryActor ?? {};
+  const character = importedCharacter?.character ?? {};
   const addSubclassWithFeatures = (value) => {
     const subclasses = Array.isArray(value) ? value : value == null ? [] : [value];
     for (const subclassSource of subclasses) {
@@ -2275,8 +2437,7 @@ function getNetherscrollsCharacterItemDataset(source, fallback = null) {
 
 async function resolveNetherscrollsCharacterItemSources(sources, { onProgress = null } = {}) {
   const items = [];
-  let fetched = 0;
-  const responseCache = new Map();
+  const fetched = await importMissingNetherscrollsCharacterDocuments(sources);
   // Resolve non-embedded class-feature references first. A targeted feature
   // import can refresh its parent class/subclass feature UUIDs before those
   // class documents are copied into the Actor.
@@ -2291,11 +2452,10 @@ async function resolveNetherscrollsCharacterItemSources(sources, { onProgress = 
       descriptor.dataset,
       {
         netherscrollsId: descriptor.netherscrollsId,
-        responseCache,
+        required: descriptor.embed !== false,
       }
     );
     if (resolved?.item && descriptor.embed !== false) items.push(resolved.item);
-    fetched += resolved?.fetched ?? 0;
   }
   return { items, fetched };
 }
@@ -2303,7 +2463,7 @@ async function resolveNetherscrollsCharacterItemSources(sources, { onProgress = 
 async function resolveNetherscrollsCharacterItemSource(
   source,
   fallbackDataset = null,
-  { netherscrollsId: suppliedNetherscrollsId = null, responseCache = null } = {}
+  { netherscrollsId: suppliedNetherscrollsId = null, required = true } = {}
 ) {
   const dataset = getNetherscrollsCharacterItemDataset(source, fallbackDataset);
   const netherscrollsId =
@@ -2313,23 +2473,6 @@ async function resolveNetherscrollsCharacterItemSource(
   let document = netherscrollsId
     ? await findNetherscrollsCompendiumDocumentById(dataset, netherscrollsId)
     : null;
-  let fetched = 0;
-  if (!document && netherscrollsId) {
-    console.info(`${MODULE_ID} | Character import | ${dataset} ${netherscrollsId} is missing from the local library; fetching only that record.`);
-    try {
-      const imported = await fetchAndImportNetherscrollsCharacterContent(
-        dataset,
-        netherscrollsId,
-        { responseCache }
-      );
-      if (imported) {
-        fetched = 1;
-        document = await findNetherscrollsCompendiumDocumentById(dataset, netherscrollsId);
-      }
-    } catch (err) {
-      console.warn(`${MODULE_ID} | Unable to fetch missing ${dataset} ${netherscrollsId}.`, err);
-    }
-  }
   if (netherscrollsId) {
     debugNetherscrollsCharacterImport(
       document ? "Matched character content to an imported compendium document." : "No imported compendium document matched character content after targeted fetch.",
@@ -2337,14 +2480,65 @@ async function resolveNetherscrollsCharacterItemSource(
     );
   }
 
-  if (!document && (!direct || typeof direct !== "object" || !toTrimmedStringOrNull(direct?.type))) {
-    console.warn(
-      `${MODULE_ID} | Could not resolve Netherscrolls ${dataset} ${netherscrollsId ?? "reference"}; skipping that embedded document.`
-    );
-    return { item: null, fetched };
+  const hasCompleteFoundryItem =
+    direct &&
+    typeof direct === "object" &&
+    toTrimmedStringOrNull(direct?.type) &&
+    direct?.system &&
+    typeof direct.system === "object";
+  if (!document && !hasCompleteFoundryItem) {
+    const message = `Could not resolve required Netherscrolls ${dataset} ${netherscrollsId ?? "reference"} through Foundry Import selection.`;
+    if (required) throw new Error(message);
+    console.warn(`${MODULE_ID} | ${message}`);
+    return { item: null };
   }
   const item = prepareNetherscrollsCharacterActorItemData(document, direct, source, netherscrollsId);
-  return { item, fetched };
+  return { item };
+}
+
+async function importMissingNetherscrollsCharacterDocuments(sources) {
+  const supportedDatasets = new Set([
+    "items",
+    "feats",
+    "spells",
+    "classes",
+    "subclasses",
+    "backgrounds",
+    "races",
+  ]);
+  const missing = [];
+  for (const descriptor of sources) {
+    const dataset = descriptor?.dataset;
+    const id = normalizeNetherscrollsReferenceValue(descriptor?.netherscrollsId);
+    if (!id || !supportedDatasets.has(dataset)) continue;
+    const existing = await findNetherscrollsCompendiumDocumentById(dataset, id);
+    if (!existing) missing.push({ dataset, id });
+  }
+  if (!missing.length) return 0;
+
+  const unique = Array.from(
+    new Map(missing.map((entry) => [`${entry.dataset}:${entry.id}`, entry])).values()
+  );
+  let importedCount = 0;
+  for (let offset = 0; offset < unique.length; offset += 100) {
+    const chunk = unique.slice(offset, offset + 100);
+    const selection = {};
+    for (const { dataset, id } of chunk) {
+      selection[dataset] ??= [];
+      selection[dataset].push(id);
+    }
+    const response = await requestNetherscrollsJson(NETHERSCROLLS_IMPORT_SELECTION_ENDPOINT, {
+      method: "POST",
+      apiKey: getNetherscrollsApiKey(),
+      body: selection,
+      operation: "Foundry Import selection",
+    });
+    await applyNetherscrollsImportResponse(response, null, Object.keys(selection));
+    importedCount += Object.values(response?.data ?? {})
+      .filter(Array.isArray)
+      .reduce((count, rows) => count + rows.length, 0);
+  }
+  return importedCount;
 }
 
 function getNetherscrollsCharacterSourceId(
@@ -2354,9 +2548,7 @@ function getNetherscrollsCharacterSourceId(
   const foundryItem = getNetherscrollsFoundryItemPayload(source);
   const explicitId = normalizeNetherscrollsReferenceValue(
     source?.netherscrollsId ??
-      source?.flags?.[MODULE_ID]?.netherscrollsId ??
       source?.flags?.netherscrolls?.id ??
-      foundryItem?.flags?.[MODULE_ID]?.netherscrollsId ??
       foundryItem?.flags?.netherscrolls?.id
   );
   if (explicitId || !allowRecordId) return explicitId;
@@ -2460,12 +2652,33 @@ function prepareNetherscrollsCharacterActorItemData(document, direct, source, ne
     data.system.hd.spent = 0;
   }
   data.flags = data.flags ?? {};
+  data.flags.netherscrolls = {
+    ...(data.flags.netherscrolls ?? {}),
+    ...(netherscrollsId ? { id: netherscrollsId } : {}),
+  };
+  if (data.type === "subclass") {
+    const classId = getNetherscrollsSubclassClassId(source, direct, data);
+    if (classId) data.flags.netherscrolls.classId = classId;
+  }
   data.flags[MODULE_ID] = {
     ...(data.flags[MODULE_ID] ?? {}),
-    ...(netherscrollsId ? { netherscrollsId } : {}),
   };
   if (source?.lastRev) data.flags[MODULE_ID].lastRev = source.lastRev;
   return data;
+}
+
+function getNetherscrollsSubclassClassId(...sources) {
+  for (const source of sources) {
+    const classId = normalizeNetherscrollsReferenceValue(
+      source?.flags?.netherscrolls?.classId ??
+      source?.classId ??
+      source?.parentClassId ??
+      source?.parentClassNetherscrollsId ??
+      source?.flags?.[MODULE_ID]?.parentClassNetherscrollsId
+    );
+    if (classId) return classId;
+  }
+  return null;
 }
 
 function getNetherscrollsCharacterSpellSort(level) {
@@ -2515,7 +2728,7 @@ function copyNetherscrollsCharacterItemStatePath(target, source, path) {
   targetCursor[path[path.length - 1]] = duplicateNetherscrollsData(sourceCursor);
 }
 
-async function syncNetherscrollsCharacterActorItems(actor, itemData, characterId) {
+async function reconcileNetherscrollsCharacterActorItems(actor, itemData, characterId) {
   const existingById = new Map();
   const duplicateExistingIds = [];
   for (const item of getNetherscrollsActorItems(actor)) {
@@ -2590,7 +2803,7 @@ async function syncNetherscrollsCharacterActorItems(actor, itemData, characterId
   };
 }
 
-async function syncNetherscrollsCharacterActorEffects(actor, effectSources, characterId) {
+async function reconcileNetherscrollsCharacterActorEffects(actor, effectSources, characterId) {
   if (!Array.isArray(effectSources) || !effectSources.length) return { created: 0, updated: 0 };
   const existingByKey = new Map();
   const duplicateExistingIds = [];
@@ -2688,22 +2901,25 @@ Hooks.once("ready", () => {
   initEnhanceDialogInputHandlers();
   initChatNumberActionHandlers();
   placeExistingNetherscrollsImportPacksInSidebarFolder();
+  toggleNetherscrollsImportQueuePolling(
+    game.settings.get(MODULE_ID, SETTINGS.importQueuePolling) === true
+  );
 });
 
 Hooks.on("renderApplicationV1", (app, html) => {
-  injectSyncButtonV1(app, html);
+  injectFoundryExportButtonV1(app, html);
 });
 
 Hooks.on("renderApplicationV2", (app, element) => {
-  injectSyncButtonV2(app, element);
+  injectFoundryExportButtonV2(app, element);
 });
 
 Hooks.on("renderActorSheet", (app, html) => {
-  injectSyncButtonV1(app, html);
+  injectFoundryExportButtonV1(app, html);
 });
 
 Hooks.on("renderActorSheetV2", (app, html) => {
-  injectSyncButtonV2(app, html);
+  injectFoundryExportButtonV2(app, html);
 });
 
 Hooks.on("createItem", (item) => {
@@ -2713,6 +2929,12 @@ Hooks.on("createItem", (item) => {
 Hooks.on("updateItem", (item, changes) => {
   if (!isNetherscrollsClassRepairUpdate(changes)) return;
   queueNetherscrollsClassFeatureRepairForItem(item, { delay: 100 });
+});
+
+Hooks.on("updateUser", () => {
+  toggleNetherscrollsImportQueuePolling(
+    game?.settings?.get(MODULE_ID, SETTINGS.importQueuePolling) === true
+  );
 });
 
 Hooks.on("getChatLogEntryContext", (_html, options) => {
@@ -2732,6 +2954,8 @@ let enhanceDialogInputHandlersBound = false;
 let chatNumberActionHandlersBound = false;
 let chatNumberActionToolbar = null;
 const netherscrollsClassFeatureRepairTimers = new Map();
+let netherscrollsImportQueuePollTimer = null;
+let netherscrollsImportQueuePollRunning = false;
 
 function rerenderActorSheets() {
   const apps = Object.values(ui?.windows ?? {});
@@ -2742,8 +2966,8 @@ function rerenderActorSheets() {
   }
 }
 
-function isSyncButtonEnabled() {
-  return Boolean(game?.settings?.get(MODULE_ID, SETTINGS.syncButton));
+function isFoundryExportButtonEnabled() {
+  return Boolean(game?.settings?.get(MODULE_ID, SETTINGS.exportButton));
 }
 
 function isDebugEnabled() {
@@ -2752,7 +2976,7 @@ function isDebugEnabled() {
 
 function debugNetherscrollsCharacterImport(message, details = undefined) {
   if (!isDebugEnabled()) return;
-  const prefix = `${MODULE_ID} | Character import | ${message}`;
+  const prefix = `${MODULE_ID} | Foundry Import | ${message}`;
   if (details === undefined) console.debug(prefix);
   else console.debug(prefix, details);
 }
@@ -2801,7 +3025,7 @@ function getSelectedNetherscrollsSourceValues(formData) {
   );
 }
 
-function buildNetherscrollsImportRequests({ apiKey, selectedTypes, sinceDate, selectedSources = [] }) {
+async function buildNetherscrollsImportRequests({ apiKey, selectedTypes, sinceDate, selectedSources = [] }) {
   if (selectedSources.length) {
     return selectedTypes
       .filter((type) => NETHERSCROLLS_IMPORT_ENDPOINTS[type.key])
@@ -2988,7 +3212,9 @@ async function sendNetherscrollsImportRequest(importRequest) {
       data?.error?.message ??
       data?.message ??
       `Import failed (${response.status} ${response.statusText}).`;
-    throw new Error(message);
+    const error = new Error(message);
+    error.code = data?.error?.code ?? null;
+    throw error;
   }
 
   return data;
@@ -3007,6 +3233,14 @@ async function applyNetherscrollsImportResponse(data, requestTypeKey = null, all
     invalidateNetherscrollsCompendiumDocumentIdCache("classes");
     invalidateNetherscrollsCompendiumDocumentIdCache("subclasses");
     invalidateNetherscrollsCompendiumDocumentIdCache("classFeatures");
+  }
+
+  const subclasses = shouldImportType("subclasses")
+    ? getNetherscrollsResponseDataset(data, "subclasses", requestTypeKey)
+    : null;
+  if (Array.isArray(subclasses)) {
+    result.subclasses = await importNetherscrollsGenericFoundryItems(subclasses, "subclasses");
+    invalidateNetherscrollsCompendiumDocumentIdCache("subclasses");
   }
 
   const items = shouldImportType("items")
@@ -3449,11 +3683,20 @@ async function importNetherscrollsGenericFoundryItems(rows, typeKey) {
     delete source.id;
     delete source.folder;
     source.name = toTrimmedStringOrNull(source.name) ?? toTrimmedStringOrNull(row?.name) ?? "Netherscrolls Content";
-    source.type = toTrimmedStringOrNull(source.type) ?? (typeKey === "races" ? "race" : "background");
+    const fallbackTypes = {
+      backgrounds: "background",
+      races: "race",
+      subclasses: "subclass",
+    };
+    source.type = toTrimmedStringOrNull(source.type) ?? fallbackTypes[typeKey] ?? "loot";
     source.img = normalizeNetherscrollsImportImagePath(source.img, row?.img, row?.image);
     source.system ??= {};
     source.effects ??= [];
     applyNetherscrollsImportFlags(source, row, netherscrollsId);
+    if (source.type === "subclass") {
+      const classId = getNetherscrollsSubclassClassId(row, foundryItem);
+      if (classId) source.flags.netherscrolls.classId = classId;
+    }
     if (netherscrollsId && existingByNetherId.has(String(netherscrollsId))) {
       source._id = existingByNetherId.get(String(netherscrollsId)).id;
     }
@@ -3503,69 +3746,6 @@ function invalidateNetherscrollsCompendiumDocumentIdCache(typeKey) {
   });
 }
 
-async function fetchAndImportNetherscrollsCharacterContent(
-  dataset,
-  netherscrollsId,
-  { responseCache = null } = {}
-) {
-  const importDataset = dataset === "classFeatures" || dataset === "subclasses"
-    ? "classes"
-    : dataset;
-  const endpoint = NETHERSCROLLS_IMPORT_ENDPOINTS[importDataset];
-  const apiKey = getNetherscrollsApiKey();
-  if (!endpoint || !apiKey) return false;
-
-  let rows = responseCache?.get(importDataset) ?? null;
-  if (!rows) {
-    const url = new URL(endpoint);
-    url.searchParams.set("id", netherscrollsId);
-    const response = await fetchNetherscrollsApiJson(url.toString(), apiKey);
-    rows = getNetherscrollsResponseDataset(response, importDataset, importDataset) ?? [];
-    const responseCount = toNumber(response?.meta?.count, rows.length);
-    if (responseCache && (responseCount > 1 || rows.length > 1)) {
-      // Older API deployments ignore `?id=` and return the complete dataset.
-      // Reuse that response for the rest of this character import so each
-      // dataset is downloaded at most once, while still importing only matches.
-      responseCache.set(importDataset, rows);
-      console.warn(
-        `${MODULE_ID} | Character import | ${importDataset} targeted lookup returned ${rows.length} rows; reusing the response for this character import.`
-      );
-    }
-  }
-  const matches = rows.filter((row) => isNetherscrollsCharacterContentMatch(row, importDataset, netherscrollsId));
-  if (!matches.length) return false;
-
-  await importNetherscrollsCharacterContentRows(matches, dataset);
-  if (importDataset === "classes") {
-    invalidateNetherscrollsCompendiumDocumentIdCache("classes");
-    invalidateNetherscrollsCompendiumDocumentIdCache("subclasses");
-    invalidateNetherscrollsCompendiumDocumentIdCache("classFeatures");
-  } else {
-    invalidateNetherscrollsCompendiumDocumentIdCache(importDataset);
-  }
-  return true;
-}
-
-function isNetherscrollsCharacterContentMatch(row, dataset, netherscrollsId) {
-  const id = String(netherscrollsId);
-  if (String(getNetherscrollsSourceId(row) ?? "") === id) return true;
-  if (dataset !== "classes") return false;
-  if (getNetherscrollsSubclasses(row).some((subclass) => String(getNetherscrollsSourceId(subclass) ?? "") === id)) return true;
-  return getNetherscrollsClassFeatureItemDescriptors([row]).some(
-    (feature) => String(feature?.netherscrollsId ?? "") === id
-  );
-}
-
-async function importNetherscrollsCharacterContentRows(rows, dataset) {
-  if (dataset === "classes" || dataset === "subclasses" || dataset === "classFeatures") {
-    return importNetherscrollsClasses(rows);
-  }
-  if (dataset === "items") return importNetherscrollsItems(rows);
-  if (dataset === "feats") return importNetherscrollsFeats(rows);
-  if (dataset === "spells") return importNetherscrollsSpells(rows);
-  return importNetherscrollsGenericFoundryItems(rows, dataset);
-}
-
 async function getNetherscrollsCompendiumDocumentsById(pack) {
   if (!pack) return new Map();
   const cacheKey = pack.collection ?? pack.metadata?.id ?? pack.id;
@@ -3587,7 +3767,7 @@ async function getNetherscrollsCompendiumDocumentsById(pack) {
     if (netherscrollsId) documentsById.set(String(netherscrollsId), document);
   }
   if (cacheKey) netherscrollsCompendiumDocumentIdCache.set(cacheKey, { indexSize, documentsById });
-  console.info(`${MODULE_ID} | Character import | Indexed ${documentsById.size} Netherscrolls ids in ${cacheKey ?? "compendium"}.`);
+  console.info(`${MODULE_ID} | Foundry Import | Indexed ${documentsById.size} Netherscrolls ids in ${cacheKey ?? "compendium"}.`);
   return documentsById;
 }
 
@@ -3623,9 +3803,7 @@ function getNetherscrollsSourceId(data) {
   const foundryItem = getNetherscrollsFoundryItemPayload(data);
   return normalizeNetherscrollsReferenceValue(
     data?.netherscrollsId ??
-      data?.flags?.[MODULE_ID]?.netherscrollsId ??
       data?.flags?.netherscrolls?.id ??
-      foundryItem?.flags?.[MODULE_ID]?.netherscrollsId ??
       foundryItem?.flags?.netherscrolls?.id ??
       data?._id ??
       data?.id
@@ -3834,6 +4012,13 @@ function normalizeNetherscrollsClassData(classSource, { featureUuidByKey }) {
 
   applyNetherscrollsImportFlags(itemData, source, netherscrollsId);
   itemData.flags = itemData.flags ?? {};
+  const parentClassId = getNetherscrollsSourceId(classSource);
+  if (parentClassId) {
+    itemData.flags.netherscrolls = {
+      ...(itemData.flags.netherscrolls ?? {}),
+      classId: parentClassId,
+    };
+  }
   itemData.flags[MODULE_ID] = {
     ...(itemData.flags[MODULE_ID] ?? {}),
     identifier,
@@ -3972,6 +4157,13 @@ function normalizeNetherscrollsFoundrySubclassData(subclassSource, classSource, 
   source.system.classIdentifier = toTrimmedStringOrNull(source.system.classIdentifier) ?? classIdentifier;
   applyNetherscrollsImportFlags(source, subclassSource, netherscrollsId);
   source.flags = source.flags ?? {};
+  const parentClassId = getNetherscrollsSourceId(classSource);
+  if (parentClassId) {
+    source.flags.netherscrolls = {
+      ...(source.flags.netherscrolls ?? {}),
+      classId: parentClassId,
+    };
+  }
   source.flags[MODULE_ID] = {
     ...(source.flags[MODULE_ID] ?? {}),
     identifier,
@@ -6418,9 +6610,12 @@ function applyNetherscrollsImportFlags(documentData, source, netherscrollsId) {
 
   if (!netherscrollsId) return;
   documentData.flags = documentData.flags ?? {};
+  documentData.flags.netherscrolls = {
+    ...(documentData.flags.netherscrolls ?? {}),
+    id: netherscrollsId,
+  };
   documentData.flags[MODULE_ID] = {
     ...(documentData.flags[MODULE_ID] ?? {}),
-    netherscrollsId,
   };
 
   const lastRev = normalizeNetherscrollsReferenceValue(source?.lastRev);
@@ -8356,7 +8551,7 @@ async function postEnhanceDebugMessage(message, title, data) {
       ? ChatMessage.getSpeaker({ actor })
       : message?.speaker ?? ChatMessage.getSpeaker();
     const safeTitle = escapeHtml(String(title ?? "Enhance Debug"));
-    const content = `<p><strong>${safeTitle}</strong></p>${renderSyncPayload(data)}`;
+    const content = `<p><strong>${safeTitle}</strong></p>${renderFoundryTransferPayload(data)}`;
     await ChatMessage.create({ speaker, content });
   } catch (err) {
     console.warn(`${MODULE_ID} | Failed to post enhance debug message.`, err);
@@ -9507,8 +9702,8 @@ function getActorFromApp(app) {
   return null;
 }
 
-function injectSyncButtonV1(app, html) {
-  if (!isSyncButtonEnabled()) return;
+function injectFoundryExportButtonV1(app, html) {
+  if (!isFoundryExportButtonEnabled()) return;
   if (!isActorSheetApp(app)) return;
   if (!html?.closest) return;
 
@@ -9516,19 +9711,21 @@ function injectSyncButtonV1(app, html) {
   if (!appElement?.find) return;
 
   const actor = getActorFromApp(app);
-  if (!actor) return;
+  if (!actor || actor.type !== "character") return;
 
   const header = appElement.find(".window-header");
   if (!header.length) return;
-  if (header.find(".netherscrolls-sync-button").length) return;
+  if (header.find(".netherscrolls-export-button").length) return;
 
   const button = $(
-    `<a class="header-button netherscrolls-sync-button" title="sync">
-      <i class="fas fa-cloud-upload-alt"></i>sync
+    `<a class="header-button netherscrolls-export-button" title="Foundry Export">
+      <i class="fas fa-cloud-upload-alt"></i>Foundry Export
     </a>`
   );
 
-  button.on("click", () => postActorSyncMessage(actor));
+  button.on("click", () => {
+    exportActorToNetherscrolls(actor).catch(() => {});
+  });
 
   const modeSlider = header.find(".mode-slider");
   const title = header.find(".window-title");
@@ -9541,25 +9738,28 @@ function injectSyncButtonV1(app, html) {
   }
 }
 
-function injectSyncButtonV2(app, element) {
-  if (!isSyncButtonEnabled()) return;
+function injectFoundryExportButtonV2(app, element) {
+  if (!isFoundryExportButtonEnabled()) return;
   if (!isActorSheetApp(app)) return;
   if (!element?.querySelector) return;
 
   const actor = getActorFromApp(app);
-  if (!actor) return;
+  if (!actor || actor.type !== "character") return;
 
   const header =
     element.querySelector("header.window-header") ||
     element.querySelector(".window-header");
   if (!header) return;
-  if (header.querySelector(".netherscrolls-sync-button")) return;
+  if (header.querySelector(".netherscrolls-export-button")) return;
 
   const button = document.createElement("button");
   button.type = "button";
-  button.classList.add("header-control", "netherscrolls-sync-button");
-  button.innerHTML = '<i class="fas fa-cloud-upload-alt"></i><span>sync</span>';
-  button.addEventListener("click", () => postActorSyncMessage(actor));
+  button.classList.add("header-control", "netherscrolls-export-button");
+  button.title = "Foundry Export";
+  button.innerHTML = '<i class="fas fa-cloud-upload-alt"></i><span>Foundry Export</span>';
+  button.addEventListener("click", () => {
+    exportActorToNetherscrolls(actor).catch(() => {});
+  });
 
   const modeSlider = header.querySelector(".mode-slider");
   const title = header.querySelector(".window-title");
@@ -9572,7 +9772,7 @@ function injectSyncButtonV2(app, element) {
   }
 }
 
-async function postActorSyncMessage(actor) {
+async function exportActorToNetherscrolls(actor) {
   if (!actor) return;
   try {
     const repairResult = await repairNetherscrollsActorClassFeatures(actor, { notify: false });
@@ -9580,18 +9780,18 @@ async function postActorSyncMessage(actor) {
       ui?.notifications?.info?.(`Netherscrolls added ${repairResult.created} missing class feature${repairResult.created === 1 ? "" : "s"}.`);
     }
   } catch (err) {
-    console.warn(`${MODULE_ID} | Unable to repair class features before sync.`, err);
+    console.warn(`${MODULE_ID} | Unable to repair class features before Foundry Export.`, err);
   }
 
-  const payload = buildActorSyncPayload(actor);
+  const payload = buildFoundryExportPayload(actor);
   if (isDebugEnabled()) {
-    const content = renderSyncPayload(payload);
+    const content = renderFoundryTransferPayload(payload);
     ChatMessage.create({
       speaker: ChatMessage.getSpeaker({ actor }),
       content,
     });
   }
-  syncActorToApi(actor, payload);
+  return sendFoundryActorExport(actor, payload);
 }
 
 function queueNetherscrollsClassFeatureRepairForItem(item, { delay = 150 } = {}) {
@@ -9922,416 +10122,44 @@ function duplicateNetherscrollsDocumentData(document) {
 
 function getNetherscrollsDocumentFlag(document, key) {
   try {
-    const value = document?.getFlag?.(MODULE_ID, key) ?? document?.flags?.[MODULE_ID]?.[key] ?? null;
-    if (value != null || key !== "netherscrollsId") return value;
-    return document?.getFlag?.("netherscrolls", "id") ?? document?.flags?.netherscrolls?.id ?? null;
+    if (key === "netherscrollsId") {
+      return document?.getFlag?.("netherscrolls", "id") ?? document?.flags?.netherscrolls?.id ?? null;
+    }
+    return document?.getFlag?.(MODULE_ID, key) ?? document?.flags?.[MODULE_ID]?.[key] ?? null;
   } catch {
-    const value = document?.flags?.[MODULE_ID]?.[key] ?? null;
-    if (value != null || key !== "netherscrollsId") return value;
-    return document?.flags?.netherscrolls?.id ?? null;
+    if (key === "netherscrollsId") return document?.flags?.netherscrolls?.id ?? null;
+    return document?.flags?.[MODULE_ID]?.[key] ?? null;
   }
 }
 
-function renderSyncPayload(payload) {
+function renderFoundryTransferPayload(payload) {
   const json = JSON.stringify(payload, null, 2);
   const escaped = escapeHtml(json);
-  return `<pre class="ns-sync-data">${escaped}</pre>`;
+  return `<pre class="ns-foundry-transfer-data">${escaped}</pre>`;
 }
 
-function buildActorSyncPayload(actor) {
-  const system = actor?.system ?? {};
-  const attributes = system.attributes ?? {};
-  const abilities = system.abilities ?? {};
-  const currency = system.currency ?? {};
-  const { items, spells, feats } = splitActorItems(actor);
-  const characterId = getActorCharacterId(actor);
-  const payload = {
-    characterName: actor?.name ?? "",
-    proficiencyBonus: toNumber(attributes.prof),
-    initiative: getInitiativeValue(attributes, abilities),
-    armorClass: getArmorClassValue(attributes),
-    hp: {
-      current: toNumber(attributes.hp?.value),
-      max: toNumber(attributes.hp?.max),
-      temp: toNumber(attributes.hp?.temp),
+function buildFoundryExportPayload(actor) {
+  if (!actor || typeof actor.toObject !== "function") {
+    throw new Error("A Foundry Actor document is required for Foundry Export.");
+  }
+
+  const sourceActor = actor.toObject();
+  const preparedActor = actor.toObject(false);
+  return {
+    schemaVersion: 2,
+    systemVersion: String(game?.system?.version ?? ""),
+    actor: sourceActor,
+    preparedActor: {
+      system: preparedActor?.system ?? {},
+      prototypeToken: preparedActor?.prototypeToken ?? {},
     },
-    hitDice: buildHitDice(actor),
-    spellSlots: buildSpellSlots(system.spells),
-    currency: {
-      pp: toNumber(currency.pp),
-      gp: toNumber(currency.gp),
-      sp: toNumber(currency.sp),
-      cp: toNumber(currency.cp),
-    },
-    exhaustion: toNumber(attributes.exhaustion),
-    abilities: buildAbilities(abilities),
-    savingThrows: buildSavingThrows(abilities, attributes.prof),
-    skills: buildSkills(actor, system.skills, abilities, system.bonuses, attributes.prof),
-    items,
-    spells,
-    feats,
   };
-  if (characterId) payload.characterId = characterId;
-  return payload;
-}
-
-function buildAbilities(abilities) {
-  const result = {};
-  for (const key of ABILITY_KEYS) {
-    result[key] = toNumber(abilities?.[key]?.value);
-  }
-  return result;
-}
-
-function buildSavingThrows(abilities, profBonus) {
-  const result = {};
-  for (const key of ABILITY_KEYS) {
-    const data = abilities?.[key] ?? {};
-    const proficient = toNumber(data?.proficient ?? data?.prof);
-    let bonus =
-      data?.save ??
-      data?.save?.value ??
-      data?.save?.total ??
-      data?.saveBonus;
-    const misc = toNumber(data?.bonuses?.save);
-    if (bonus == null) {
-      const mod = getAbilityMod(data);
-      bonus = mod + toNumber(profBonus) * proficient + misc;
-    }
-    const entry = {
-      proficient,
-      bonus: toNumber(bonus),
-    };
-    if (misc) entry.misc = misc;
-    result[key] = entry;
-  }
-  return result;
-}
-
-function buildSkills(actor, skills, abilities, bonuses, profBonus) {
-  const result = {};
-  if (!skills || typeof skills !== "object") return result;
-
-  const pb = toNumber(profBonus);
-  const rollData = typeof actor?.getRollData === "function" ? actor.getRollData() : null;
-  const global = bonuses?.abilities ?? {};
-
-  for (const [key, skill] of Object.entries(skills)) {
-    if (!skill || typeof skill !== "object") continue;
-
-    const outKey = SKILL_KEY_TO_NAME[key] ?? key;
-    const abilityKey = skill?.ability ?? null;
-    const prof = toNumber(skill?.value ?? skill?.proficient ?? skill?.prof);
-    const ability = abilityKey ? abilities?.[abilityKey] ?? {} : {};
-
-    const abilityMod = getAbilityMod(ability);
-    const base = abilityMod + getProficiencyContribution(pb, prof);
-    const total = getSkillTotalBonus(skill, base, rollData, {
-      skillCheck: skill?.bonuses?.check,
-      abilityCheck: ability?.bonuses?.check,
-      globalAbilityCheck: global?.check,
-      globalSkill: global?.skill,
-    });
-
-    result[outKey] = {
-      ability: abilityKey,
-      prof,
-      misc: toNumber(total - base),
-    };
-  }
-
-  return result;
-}
-
-function getProficiencyContribution(proficiencyBonus, prof) {
-  const pb = toNumber(proficiencyBonus);
-  const p = toNumber(prof);
-  if (!pb || !p) return 0;
-  // Match 5e / dnd5e rounding rules for half-proficiency.
-  return Math.floor(pb * p);
-}
-
-function getSkillTotalBonus(skill, base, rollData, bonusFormulas) {
-  const direct =
-    toNumberOrNull(skill?.total) ??
-    toNumberOrNull(skill?.mod) ??
-    toNumberOrNull(skill?.bonus) ??
-    toNumberOrNull(skill?.check?.total) ??
-    toNumberOrNull(skill?.check?.bonus);
-  if (direct != null) return direct;
-
-  const misc =
-    evalDeterministicFormula(bonusFormulas?.skillCheck, rollData) +
-    evalDeterministicFormula(bonusFormulas?.abilityCheck, rollData) +
-    evalDeterministicFormula(bonusFormulas?.globalAbilityCheck, rollData) +
-    evalDeterministicFormula(bonusFormulas?.globalSkill, rollData);
-  return base + misc;
-}
-
-function buildSpellSlots(spells) {
-  const current = {};
-  const max = {};
-  if (!spells) return { current, max };
-
-  for (let level = 1; level <= 9; level += 1) {
-    const slot = spells[`spell${level}`];
-    if (!slot) continue;
-    const cur = toNumber(slot.value);
-    const mx = toNumber(slot.max ?? slot.override);
-    if (cur <= 0 && mx <= 0) continue;
-    current[`lvl${level}`] = cur;
-    max[`lvl${level}`] = mx;
-  }
-
-  return { current, max };
-}
-
-function buildHitDice(actor) {
-  const current = {};
-  const max = {};
-  const classes = actor?.items?.filter((item) => item?.type === "class") ?? [];
-
-  if (classes.length) {
-    for (const cls of classes) {
-      const data = cls?.system ?? {};
-      const die = normalizeHitDie(
-        data?.hd?.denomination ??
-          data?.hitDice ??
-          data?.hitDie ??
-          data?.hd?.value ??
-          data?.hd?.faces
-      );
-      if (!die) continue;
-      const levels = toNumber(data?.levels);
-      if (levels <= 0) continue;
-      const spent = toNumber(data?.hd?.spent ?? data?.hitDiceUsed ?? data?.hitDiceSpent);
-      const available = Math.max(0, levels - spent);
-      current[die] = (current[die] ?? 0) + available;
-      max[die] = (max[die] ?? 0) + levels;
-    }
-    return { current, max };
-  }
-
-  const hd = actor?.system?.attributes?.hd;
-  const die = normalizeHitDie(hd?.denomination ?? hd?.hitDice ?? hd?.value ?? hd);
-  if (!die) return { current, max };
-
-  const cur = toNumber(hd?.value ?? hd?.current ?? hd?.spent);
-  const mx = toNumber(hd?.max ?? hd?.value ?? hd?.current);
-  current[die] = cur;
-  max[die] = mx;
-  return { current, max };
-}
-
-function normalizeHitDie(hitDice) {
-  if (!hitDice) return null;
-  if (typeof hitDice === "string") {
-    return hitDice.startsWith("d") ? hitDice : `d${hitDice}`;
-  }
-  if (typeof hitDice === "number") {
-    return `d${hitDice}`;
-  }
-  const denom = hitDice?.denomination ?? hitDice?.faces ?? hitDice?.value;
-  if (!denom) return null;
-  return `d${denom}`;
-}
-
-function splitActorItems(actor) {
-  const items = [];
-  const spells = [];
-  const feats = [];
-  const ignoreTypes = new Set(["spell", "feat", "class", "subclass", "background", "race"]);
-
-  for (const item of actor?.items ?? []) {
-    if (!item?.name) continue;
-    if (item.type === "spell") {
-      spells.push(buildSpellExport(item));
-    } else if (item.type === "feat") {
-      const featType = item?.system?.type?.value ?? item?.system?.type;
-      if (featType === "feat") {
-        feats.push(buildFeatExport(item));
-      }
-    } else if (!ignoreTypes.has(item.type)) {
-      items.push(buildItemExport(item));
-    }
-  }
-
-  return { items, spells, feats };
-}
-
-function buildFeatExport(item) {
-  const name = normalizeNetherscrollsName(item?.name);
-  const description = getDescription(item);
-  const source = getSource(item);
-  const requirements =
-    item?.system?.requirements ??
-    item?.system?.requirement ??
-    item?.system?.prerequisites ??
-    null;
-  const ability = getFeatAbilities(item);
-  const netherscrollsId = getItemNetherId(item);
-
-  if (netherscrollsId) {
-    return { netherscrollsId, name };
-  }
-
-  return compactObject({
-    name,
-    description,
-    requirement: requirements || null,
-    source,
-    demifeat: null,
-    ability,
-    netherscrollsId: netherscrollsId || null,
-  });
-}
-
-function buildSpellExport(item) {
-  const system = item?.system ?? {};
-  const name = normalizeNetherscrollsName(item?.name);
-  const description = getDescription(item);
-  const source = getSource(item);
-  const components = system.components ?? {};
-  const material = system.materials?.value ?? system.material ?? null;
-  const netherscrollsId = getItemNetherId(item);
-  const damageParts = Array.isArray(system.damage?.parts)
-    ? system.damage.parts
-    : [];
-  const damage = damageParts.length
-    ? damageParts.map((part) => String(part?.[0] ?? "")).filter(Boolean).join(" + ")
-    : null;
-  const damageTypes = damageParts.length
-    ? damageParts.map((part) => part?.[1]).filter(Boolean)
-    : null;
-  const saveAbilities = Array.isArray(system.save?.ability)
-    ? system.save.ability
-    : system.save?.ability
-    ? [system.save.ability]
-    : null;
-  const componentTypes = Object.entries(components)
-    .filter(([, value]) => value)
-    .map(([key]) => key.toUpperCase());
-
-  if (netherscrollsId) {
-    return { netherscrollsId, name };
-  }
-
-  return compactObject({
-    name,
-    level: system.level ?? null,
-    school: system.school ?? null,
-    description,
-    source,
-    classes: null,
-    castingTime: formatActivation(system.activation),
-    range: formatRange(system.range),
-    duration: formatDuration(system.duration),
-    concentration: system.duration?.concentration ?? null,
-    ritual: system.ritual ?? null,
-    actionType: system.actionType ?? null,
-    damage,
-    summary: null,
-    componentTypes: componentTypes.length ? componentTypes : null,
-    componentMaterial: material ?? null,
-    saveAbilities,
-    damageTypes,
-    netherscrollsId: netherscrollsId || null,
-  });
-}
-
-function buildItemExport(item) {
-  const system = item?.system ?? {};
-  const name = normalizeNetherscrollsName(item?.name);
-  const description = getDescription(item);
-  const source = getSource(item);
-  const netherscrollsId = getItemNetherId(item);
-  const priceValue = system.price?.value ?? system.price ?? null;
-  const weightValue = system.weight?.value ?? system.weight ?? null;
-  const properties = Array.isArray(system.properties)
-    ? system.properties
-    : system.properties
-    ? Object.keys(system.properties).filter((key) => system.properties[key])
-    : [];
-  const isHomebrew =
-    typeof system.source?.custom === "string" && system.source.custom ? true : null;
-
-  if (netherscrollsId) {
-    return { netherscrollsId, name };
-  }
-
-  return compactObject({
-    name,
-    description,
-    type: item?.type ?? null,
-    rarity: system.rarity ?? null,
-    attunement: system.attunement ?? null,
-    price: priceValue != null ? { gp: priceValue } : null,
-    weight: weightValue != null ? { lb: weightValue } : null,
-    source,
-    properties: properties.length ? properties : null,
-    armor: system.armor ?? {},
-    tags: null,
-    isHomebrew,
-    netherscrollsId: netherscrollsId || null,
-  });
-}
-
-function getFeatAbilities(item) {
-  const advances = item?.system?.advancement;
-  if (!Array.isArray(advances)) return null;
-  const abilities = [];
-  for (const adv of advances) {
-    if (adv?.type !== "AbilityScoreImprovement") continue;
-    const value = adv?.value ?? {};
-    const chosen = Object.keys(value).filter((key) => value[key]);
-    abilities.push(...chosen);
-  }
-  return abilities.length ? abilities : null;
-}
-
-function getSource(item) {
-  const source = item?.system?.source ?? {};
-  const value = source.custom || source.book || source.rules || null;
-  return value || "Foundry";
-}
-
-function getDescription(item) {
-  const value = item?.system?.description?.value ?? "";
-  if (foundry?.utils?.stripHTML) {
-    return foundry.utils.stripHTML(value);
-  }
-  return String(value).replace(/<[^>]*>/g, "").trim();
 }
 
 function toTrimmedStringOrNull(value) {
   if (value == null) return null;
   const str = String(value).trim();
   return str ? str : null;
-}
-
-function evalDeterministicFormula(formula, rollData) {
-  const raw = toTrimmedStringOrNull(formula);
-  if (!raw) return 0;
-
-  // Avoid randomness; these should be flat numeric bonuses (sometimes with @data references).
-  if (/\d+d\d+/i.test(raw)) return 0;
-
-  // Roll formulas like "+1" are not always valid standalone; prefix with 0.
-  const expr = /^[+-]/.test(raw) ? `0 ${raw}` : raw;
-
-  try {
-    if (typeof Roll === "function") {
-      const roll = new Roll(expr, rollData ?? {});
-      const evaluated = roll.evaluate?.({ async: false });
-      const total = Number((evaluated ?? roll)?.total);
-      return Number.isFinite(total) ? total : 0;
-    }
-  } catch {
-    // Fall back to a plain numeric parse.
-  }
-
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 function normalizeNetherscrollsName(name) {
@@ -10342,89 +10170,46 @@ function normalizeNetherscrollsName(name) {
     .trim();
 }
 
-function formatActivation(activation) {
-  if (!activation) return null;
-  const type = activation.type ?? "";
-  const value = activation.value ?? "";
-  if (!type && value === "") return null;
-  if (value === "" || value == null) return type || null;
-  return `${value} ${type}`.trim();
-}
-
-function formatRange(range) {
-  if (!range) return null;
-  const value = range.value ?? range.distance ?? "";
-  const units = range.units ?? range.unit ?? "";
-  if (!value && !units) return null;
-  return `${value} ${units}`.trim();
-}
-
-function formatDuration(duration) {
-  if (!duration) return null;
-  const value = duration.value ?? "";
-  const units = duration.units ?? "";
-  if (!value && !units) return null;
-  return `${value} ${units}`.trim();
-}
-
-function compactObject(value) {
-  if (!value || typeof value !== "object") return value;
-  const entries = Object.entries(value).filter(([, val]) => val !== null);
-  return Object.fromEntries(entries);
-}
-
 function getItemNetherId(item) {
   try {
-    const flaggedId =
-      item?.getFlag?.(MODULE_ID, "netherscrollsId") ??
-      item?.getFlag?.("netherscrolls", "id");
     return normalizeNetherscrollsReferenceValue(
-      flaggedId ??
-      item?.flags?.[MODULE_ID]?.netherscrollsId ??
+      item?.getFlag?.("netherscrolls", "id") ??
       item?.flags?.netherscrolls?.id
     );
   } catch (err) {
-    console.warn(`${MODULE_ID} | Unable to read item netherscrollsId flag.`, err);
+    console.warn(`${MODULE_ID} | Unable to read item flags.netherscrolls.id.`, err);
     return null;
   }
 }
 
 async function setItemNetherId(item, id) {
+  return setNetherscrollsItemIdentifiers(item, { id });
+}
+
+async function setNetherscrollsItemIdentifiers(item, { id = null, classId = null } = {}) {
   try {
-    if (!item?.setFlag || !id) return;
-    const current = item?.getFlag?.(MODULE_ID, "netherscrollsId") ?? null;
-    if (current === id) return;
-    await item.setFlag(MODULE_ID, "netherscrollsId", id);
+    if (!item?.setFlag) return;
+    const canonicalId = normalizeNetherscrollsReferenceValue(id);
+    const canonicalClassId = normalizeNetherscrollsReferenceValue(classId);
+    if (canonicalId) {
+      const current = normalizeNetherscrollsReferenceValue(
+        item?.getFlag?.("netherscrolls", "id") ?? item?.flags?.netherscrolls?.id
+      );
+      if (current !== canonicalId) await item.setFlag("netherscrolls", "id", canonicalId);
+    }
+    if (canonicalClassId && item?.type === "subclass") {
+      const currentClassId = normalizeNetherscrollsReferenceValue(
+        item?.getFlag?.("netherscrolls", "classId") ??
+        item?.flags?.netherscrolls?.classId
+      );
+      if (currentClassId !== canonicalClassId) {
+        await item.setFlag("netherscrolls", "classId", canonicalClassId);
+      }
+    }
   } catch (err) {
-    console.warn(`${MODULE_ID} | Unable to set item netherscrollsId flag.`, err);
+    console.warn(`${MODULE_ID} | Unable to write canonical Netherscrolls Item flags.`, err);
+    throw err;
   }
-}
-
-function getInitiativeValue(attributes, abilities) {
-  const init = attributes?.init ?? {};
-  if (init.total != null) return toNumber(init.total);
-  if (init.value != null) return toNumber(init.value);
-  if (init.mod != null) return toNumber(init.mod);
-  const bonus = toNumber(init.bonus);
-  const mod = getAbilityMod(abilities?.dex ?? {});
-  return mod + bonus;
-}
-
-function getArmorClassValue(attributes) {
-  const ac = attributes?.ac ?? {};
-  if (ac.value != null) return toNumber(ac.value);
-  if (ac.total != null) return toNumber(ac.total);
-  if (ac.flat != null) return toNumber(ac.flat);
-  if (typeof ac === "number" || typeof ac === "string") return toNumber(ac);
-  return 0;
-}
-
-function getAbilityMod(ability) {
-  const mod = ability?.mod;
-  if (Number.isFinite(Number(mod))) return Number(mod);
-  const value = Number(ability?.value);
-  if (Number.isFinite(value)) return Math.floor((value - 10) / 2);
-  return 0;
 }
 
 function escapeHtml(value) {
@@ -10451,9 +10236,12 @@ function toNumberOrNull(value) {
 
 function getActorCharacterId(actor) {
   try {
-    return actor?.getFlag?.(MODULE_ID, "characterId") ?? null;
+    return normalizeNetherscrollsReferenceValue(
+      actor?.getFlag?.("netherscrolls", "characterId") ??
+      actor?.flags?.netherscrolls?.characterId
+    );
   } catch (err) {
-    console.warn(`${MODULE_ID} | Unable to read actor characterId flag.`, err);
+    console.warn(`${MODULE_ID} | Unable to read actor flags.netherscrolls.characterId.`, err);
     return null;
   }
 }
@@ -10461,69 +10249,119 @@ function getActorCharacterId(actor) {
 async function setActorCharacterId(actor, characterId) {
   try {
     if (!actor?.setFlag || !characterId) return;
-    const current = actor?.getFlag?.(MODULE_ID, "characterId") ?? null;
+    const current =
+      actor?.getFlag?.("netherscrolls", "characterId") ??
+      actor?.flags?.netherscrolls?.characterId ??
+      null;
     if (current === characterId) return;
-    await actor.setFlag(MODULE_ID, "characterId", characterId);
+    await actor.setFlag("netherscrolls", "characterId", characterId);
   } catch (err) {
-    console.warn(`${MODULE_ID} | Unable to set actor characterId flag.`, err);
+    console.warn(`${MODULE_ID} | Unable to set actor flags.netherscrolls.characterId.`, err);
+    throw err;
   }
 }
 
-async function syncActorToApi(actor, payload) {
-  const apiKey = String(game?.settings?.get(MODULE_ID, SETTINGS.apiKey) ?? "").trim();
+async function sendFoundryActorExport(actor, payload = buildFoundryExportPayload(actor)) {
+  const apiKey = getNetherscrollsApiKey();
   if (!apiKey) {
     ui?.notifications?.warn?.(
       "Netherscrolls API Key is missing. Set it in Module Settings."
     );
-    return;
+    throw new Error("Netherscrolls API Key is missing.");
   }
 
   try {
-    const response = await fetch(SYNC_ENDPOINT, {
+    const data = await requestNetherscrollsJson(NETHERSCROLLS_EXPORT_ENDPOINT, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-      },
-      body: JSON.stringify(payload),
+      apiKey,
+      body: payload,
+      operation: "Foundry Export",
     });
 
-    const data = await response.json().catch(() => null);
-    if (!response.ok) {
-      const message =
-        data?.error?.message ??
-        data?.message ??
-        (typeof data?.error === "string" ? data.error : null) ??
-        `Sync failed (${response.status} ${response.statusText}).`;
-      ui?.notifications?.warn?.(`Sync failed: ${message}`);
-      if (data && isDebugEnabled()) {
-        const errorContent = renderSyncPayload(data);
-        ChatMessage.create({
-          speaker: ChatMessage.getSpeaker({ actor }),
-          content: errorContent,
-        });
-      }
-      return;
-    }
-
     if (data && isDebugEnabled()) {
-      const responseContent = renderSyncPayload(data);
+      const responseContent = renderFoundryTransferPayload(data);
       ChatMessage.create({
         speaker: ChatMessage.getSpeaker({ actor }),
         content: responseContent,
       });
     }
-    const characterId = data?.data?.characterId;
-    if (characterId) {
-      await setActorCharacterId(actor, characterId);
-    }
-    await applyLinkedIds(actor, data?.linked);
-    const name = data?.data?.name ?? payload?.characterName ?? actor?.name ?? "actor";
-    ui?.notifications?.info?.(`Sync success: ${name}`);
+    await applyFoundryExportCanonicalIds(actor, data);
+    const name = data?.data?.name ?? actor?.name ?? "actor";
+    ui?.notifications?.info?.(`Foundry Export succeeded: ${name}`);
+    return data;
   } catch (err) {
-    console.error("Netherscrolls sync failed.", err);
-    ui?.notifications?.error?.("Sync failed. Check console for details.");
+    console.error(`${MODULE_ID} | Foundry Export failed.`, err);
+    ui?.notifications?.error?.(`Foundry Export failed: ${err?.message ?? err}`);
+    throw err;
   }
+}
+
+async function exportNetherscrollsCampaignActors(campaignId, actors, { retryFailedOnce = true } = {}) {
+  const canonicalCampaignId = normalizeNetherscrollsReferenceValue(campaignId);
+  if (!canonicalCampaignId) throw new Error("A Netherscrolls campaign id is required for batch Foundry Export.");
+  const apiKey = getNetherscrollsApiKey();
+  if (!apiKey) throw new Error("Netherscrolls API Key is missing. Set it in Module Settings.");
+
+  let pending = Array.from(actors ?? [])
+    .filter((actor) => actor?.type === "character")
+    .map((actor, originalIndex) => ({ actor, originalIndex }));
+  if (!pending.length) throw new Error("No Foundry character Actors were selected for Export.");
+  if (pending.length > 100) throw new Error("Foundry Export supports at most 100 characters per campaign batch.");
+
+  const succeeded = [];
+  let failed = [];
+  const maximumAttempts = retryFailedOnce ? 2 : 1;
+  for (let attempt = 1; attempt <= maximumAttempts && pending.length; attempt += 1) {
+    const endpoint = `${NETHERSCROLLS_CAMPAIGNS_ENDPOINT}/${encodeURIComponent(canonicalCampaignId)}/characters/export`;
+    const requestPayload = {
+      characters: pending.map(({ actor }) => buildFoundryExportPayload(actor)),
+    };
+    const { data: responseBody, status } = await requestNetherscrollsJson(endpoint, {
+      method: "POST",
+      apiKey,
+      body: requestPayload,
+      operation: "Campaign Foundry Export",
+      includeStatus: true,
+    });
+    if (status !== 200 && status !== 207) {
+      throw new Error(`Campaign Foundry Export returned unexpected HTTP ${status}.`);
+    }
+
+    const entries = Array.isArray(responseBody?.data) ? responseBody.data : [];
+    const resultsByIndex = new Map(entries.map((entry) => [Number(entry?.index), entry]));
+    failed = [];
+    for (const [requestIndex, pendingEntry] of pending.entries()) {
+      const result = resultsByIndex.get(requestIndex);
+      const ok = status === 200 ? result?.ok !== false : result?.ok === true;
+      if (!result || !ok) {
+        failed.push({
+          ...pendingEntry,
+          error: result?.error ?? {
+            status,
+            code: "FOUNDRY_EXPORT_RESULT_MISSING",
+            message: "The API did not return a successful result for this entry.",
+          },
+        });
+        continue;
+      }
+      await applyFoundryExportCanonicalIds(pendingEntry.actor, result);
+      succeeded.push({
+        actor: pendingEntry.actor,
+        originalIndex: pendingEntry.originalIndex,
+        result,
+      });
+    }
+
+    if (status === 200 && failed.length) {
+      throw new Error("A 200 campaign Foundry Export response contained a failed or missing entry.");
+    }
+    pending = failed.map(({ actor, originalIndex }) => ({ actor, originalIndex }));
+  }
+
+  return {
+    succeeded,
+    failed,
+  };
 }
 
 function toggleRerollInitHook(enabled) {
@@ -10667,43 +10505,79 @@ async function rollNpcDeathSave(actor) {
   });
 }
 
-async function applyLinkedIds(actor, linked) {
-  if (!actor || !linked) return;
-  const itemLinks = Array.isArray(linked.items) ? linked.items : [];
-  const spellLinks = Array.isArray(linked.spells) ? linked.spells : [];
-  const featLinks = Array.isArray(linked.feats) ? linked.feats : [];
+async function applyFoundryExportCanonicalIds(actor, response) {
+  if (!actor || !response) return;
+  const characterId = normalizeNetherscrollsReferenceValue(response?.data?.characterId);
+  if (characterId) await setActorCharacterId(actor, characterId);
 
-  if (!itemLinks.length && !spellLinks.length && !featLinks.length) return;
-
-  const byName = new Map();
-  for (const item of actor.items ?? []) {
-    if (!item?.name) continue;
-    const key = `${item.type}:${normalizeNetherscrollsName(item.name).toLowerCase()}`;
-    const bucket = byName.get(key);
-    if (bucket) bucket.push(item);
-    else byName.set(key, [item]);
+  const repairs = [
+    ...collectFoundryExportItemRepairs(response?.linked),
+    ...collectFoundryExportItemRepairs(response?.resolved),
+  ];
+  const appliedKeys = new Set();
+  for (const repair of repairs) {
+    const canonicalId = normalizeNetherscrollsReferenceValue(repair.id);
+    if (!canonicalId) continue;
+    const item = findFoundryExportRepairItem(actor, repair);
+    if (!item) {
+      console.warn(`${MODULE_ID} | Foundry Export returned an id that could not be matched to an embedded Item.`, repair);
+      continue;
+    }
+    const repairKey = `${item.id ?? item._id}:${canonicalId}:${repair.classId ?? ""}`;
+    if (appliedKeys.has(repairKey)) continue;
+    appliedKeys.add(repairKey);
+    await setNetherscrollsItemIdentifiers(item, {
+      id: canonicalId,
+      classId: repair.classId,
+    });
   }
+}
 
-  const apply = async (links, type) => {
-    for (const link of links) {
-      const id = link?.id;
-      const name = link?.name;
-      if (!id || !name) continue;
-      const key = `${type}:${normalizeNetherscrollsName(name).toLowerCase()}`;
-      const items = byName.get(key);
-      if (!items) continue;
-      for (const item of items) {
-        await setItemNetherId(item, id);
-      }
+function collectFoundryExportItemRepairs(container) {
+  if (!container || typeof container !== "object") return [];
+  const repairs = [];
+  const append = (value, type = null, classId = null) => {
+    for (const row of Array.isArray(value) ? value : value ? [value] : []) {
+      if (!row || typeof row !== "object") continue;
+      repairs.push({
+        id: row.id ?? row.netherscrollsId,
+        foundryId: row.foundryId,
+        name: row.name,
+        type: row.type ?? row.foundryType ?? type,
+        classId: row.classId ?? classId,
+      });
     }
   };
 
-  await apply(itemLinks, "weapon");
-  await apply(itemLinks, "equipment");
-  await apply(itemLinks, "consumable");
-  await apply(itemLinks, "tool");
-  await apply(itemLinks, "container");
-  await apply(itemLinks, "loot");
-  await apply(spellLinks, "spell");
-  await apply(featLinks, "feat");
+  append(container.race, "race");
+  append(container.background, "background");
+  append(container.items);
+  append(container.spells, "spell");
+  append(container.feats, "feat");
+  append(container.subclasses, "subclass");
+  for (const classLink of Array.isArray(container.classes) ? container.classes : []) {
+    append(classLink, "class");
+    append(classLink?.subclass, "subclass", classLink?.id ?? classLink?.netherscrollsId);
+    append(classLink?.subclasses, "subclass", classLink?.id ?? classLink?.netherscrollsId);
+  }
+  return repairs;
+}
+
+function findFoundryExportRepairItem(actor, repair) {
+  const actorItems = Array.from(actor?.items ?? []);
+  const foundryId = toTrimmedStringOrNull(repair?.foundryId);
+  if (foundryId) {
+    const exact = actor?.items?.get?.(foundryId) ??
+      actorItems.find((item) => String(item?.id ?? item?._id ?? "") === foundryId);
+    if (exact) return exact;
+  }
+
+  const type = toTrimmedStringOrNull(repair?.type)?.toLowerCase() ?? null;
+  const name = normalizeNetherscrollsName(repair?.name).toLowerCase();
+  const candidates = actorItems.filter((item) => {
+    if (type && String(item?.type ?? "").toLowerCase() !== type) return false;
+    if (name && normalizeNetherscrollsName(item?.name).toLowerCase() !== name) return false;
+    return Boolean(type || name);
+  });
+  return candidates.length === 1 ? candidates[0] : null;
 }
