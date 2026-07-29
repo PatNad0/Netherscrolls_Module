@@ -16,6 +16,15 @@ const merge = (base, override) => {
   }
   return result;
 };
+const setPath = (target, path, value) => {
+  const parts = String(path).split(".");
+  let cursor = target;
+  for (const part of parts.slice(0, -1)) {
+    cursor[part] ??= {};
+    cursor = cursor[part];
+  }
+  cursor[parts.at(-1)] = clone(value);
+};
 
 function makeDocument(data) {
   const raw = clone(data);
@@ -229,6 +238,7 @@ function makeActor(context, payload = {}) {
     id: state._id ?? `actor-${context.game.actors.length + 1}`,
     name: state.name,
     type: state.type,
+    img: state.img,
     folder: state.folder,
     system: state.system ?? {},
     flags: state.flags ?? {},
@@ -241,6 +251,7 @@ function makeActor(context, payload = {}) {
         _id: this.id,
         name: this.name,
         type: this.type,
+        img: this.img,
         folder: this.folder,
         system: this.system,
         flags: this.flags,
@@ -259,14 +270,19 @@ function makeActor(context, payload = {}) {
       this.flags[scope][key] = value;
     },
     async update(changes) {
+      const expandedChanges = {};
+      for (const [key, value] of Object.entries(changes)) {
+        setPath(expandedChanges, key, value);
+      }
       const updated = merge({
         name: this.name,
         type: this.type,
+        img: this.img,
         folder: this.folder,
         system: this.system,
         flags: this.flags,
         prototypeToken: this.prototypeToken,
-      }, changes);
+      }, expandedChanges);
       Object.assign(this, updated);
     },
     async createEmbeddedDocuments(type, rows) {
@@ -698,8 +714,24 @@ test("resolves targeted Import selections without using an invalid Foundry flag 
       json: async () => ({
         data: {
           backgrounds: [
-            { _id: "bg-1", foundryItem: { name: "One", type: "background", system: {} } },
-            { _id: "bg-2", foundryItem: { name: "Two", type: "background", system: {} } },
+            {
+              _id: "bg-1",
+              foundryItem: {
+                name: "One",
+                type: "background",
+                img: "https://assets.example.com/image/bg-1.webp",
+                system: {},
+              },
+            },
+            {
+              _id: "bg-2",
+              foundryItem: {
+                name: "Two",
+                type: "background",
+                img: "https://assets.example.com/image/bg-2.webp",
+                system: {},
+              },
+            },
           ],
         },
         meta: {
@@ -786,6 +818,7 @@ test("deduplicates embedded items and effects on first import and re-import", as
   );
   assert.equal(first.created, 1);
   assert.equal(actor.items.length, 1);
+  assert.equal(first.embeddedIds["potion-1"], actor.items[0].id);
 
   const changed = clone(item);
   changed.system.quantity = 4;
@@ -841,6 +874,94 @@ test("deduplicates embedded items and effects on first import and re-import", as
   assert.equal(actor.effects.length, 1);
 });
 
+test("refreshes stale linked library images before embedding character content", async () => {
+  const { context, importer } = createHarness();
+  const spells = makePack("world.netherscrolls-spells", [
+    makeDocument({
+      _id: "stale-spell",
+      name: "Heal",
+      type: "spell",
+      img: "https://i.postimg.cc/wBj0LZyj/image.png",
+      system: { level: 6, method: "spell" },
+      flags: { netherscrolls: { id: "spell-1" } },
+    }),
+  ]);
+  context.game.packs.set(spells.collection, spells);
+  let fetches = 0;
+  context.fetch = async () => {
+    fetches += 1;
+    return {
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({
+        data: {
+          spells: [{
+            _id: "spell-1",
+            name: "Heal",
+            level: 6,
+            foundryItem: {
+              name: "Heal",
+              type: "spell",
+              img: "https://assets.example.com/image/heal.webp",
+              system: { level: 6, method: "spell" },
+            },
+          }],
+        },
+      }),
+    };
+  };
+
+  const resolved = await importer.resolveNetherscrollsCharacterItemSources([{
+    source: { spellId: "spell-1" },
+    dataset: "spells",
+    netherscrollsId: "spell-1",
+    embed: true,
+  }]);
+
+  assert.equal(fetches, 1);
+  assert.equal(resolved.items[0].img, "https://assets.example.com/image/heal.webp");
+  assert.equal(spells.documents[0].img, "https://assets.example.com/image/heal.webp");
+});
+
+test("replaces a stale embedded background whose Foundry Item type is wrong", async () => {
+  const { context, importer } = createHarness();
+  const actor = makeActor(context, { name: "Hero", system: { details: {} } });
+  actor.items.push(makeDocument({
+    _id: "stale-embedded-background",
+    name: "Acolyte",
+    type: "feat",
+    img: "https://i.postimg.cc/wBj0LZyj/image.png",
+    system: {},
+    flags: {
+      netherscrolls: { id: "background-1" },
+      [MODULE_ID]: {
+        characterId: "character-1",
+        importedCharacterItem: true,
+      },
+    },
+  }));
+
+  const result = await importer.reconcileNetherscrollsCharacterActorItems(
+    actor,
+    [{
+      name: "Acolyte",
+      type: "background",
+      img: "https://assets.example.com/image/acolyte.webp",
+      system: {},
+      flags: { netherscrolls: { id: "background-1" } },
+    }],
+    "character-1"
+  );
+
+  assert.equal(result.created, 1);
+  assert.equal(result.replacedWrongType, 1);
+  assert.equal(actor.items.length, 1);
+  assert.equal(actor.items[0].type, "background");
+  assert.equal(actor.items[0].img, "https://assets.example.com/image/acolyte.webp");
+  assert.equal(result.embeddedIds["background-1"], actor.items[0].id);
+});
+
 test("repairs D&D5e background, race, and original-class embedded Item links", async () => {
   const { context, importer } = createHarness();
   const actor = makeActor(context, {
@@ -888,6 +1009,15 @@ test("repairs D&D5e background, race, and original-class embedded Item links", a
   };
   assert.deepEqual(clone(changes), expected);
   assert.deepEqual(clone(repaired), expected);
+
+  await assert.rejects(
+    importer.repairNetherscrollsCharacterActorDocumentLinks(
+      actor,
+      { backgroundId: "missing-background" },
+      {}
+    ),
+    /Could not link the imported background/
+  );
 });
 
 test("imports classes, subclasses, and features into separate idempotent packs", async () => {
@@ -1220,6 +1350,90 @@ test("creates then updates one Actor with canonical identity and progress feedba
     importer.findNetherscrollsActorByCharacterId("linked-character"),
     linkedActor
   );
+});
+
+test("imports a public portrait, background link, and linked document images end to end", async () => {
+  const { context, importer } = createHarness();
+  const backgrounds = makePack("world.netherscrolls-backgrounds");
+  const spells = makePack("world.netherscrolls-spells");
+  context.game.packs.set(backgrounds.collection, backgrounds);
+  context.game.packs.set(spells.collection, spells);
+  context.Actor = {
+    implementation: {
+      async create(payload) {
+        const actor = makeActor(context, payload);
+        context.game.actors.push(actor);
+        return actor;
+      },
+    },
+  };
+  context.fetch = async (_url, options) => {
+    const selection = JSON.parse(options.body);
+    assert.deepEqual(selection, {
+      backgrounds: ["background-1"],
+      spells: ["spell-1"],
+    });
+    return {
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({
+        data: {
+          backgrounds: [{
+            _id: "background-1",
+            foundryItem: {
+              name: "Acolyte",
+              type: "background",
+              img: "https://assets.example.com/image/acolyte.webp",
+              system: {},
+            },
+          }],
+          spells: [{
+            _id: "spell-1",
+            name: "Heal",
+            level: 6,
+            foundryItem: {
+              name: "Heal",
+              type: "spell",
+              img: "https://assets.example.com/image/heal.webp",
+              system: { level: 6, method: "spell" },
+            },
+          }],
+        },
+      }),
+    };
+  };
+
+  const result = await importer.importNetherscrollsCampaignCharacter(
+    {
+      id: "character-1",
+      name: "Séléné",
+      character: {
+        backgroundId: "background-1",
+        spells: [{ spellId: "spell-1" }],
+      },
+      foundryActor: {
+        name: "Séléné",
+        type: "character",
+        img: "https://assets.example.com/image/selene.webp",
+        system: {
+          traits: { size: "Medium" },
+          attributes: { hp: { value: 95, max: 95 }, ac: { value: 16 } },
+          details: {},
+        },
+        items: [],
+        effects: [],
+      },
+    },
+    { id: "ns-character-folder" }
+  );
+
+  const background = result.actor.items.find((item) => item.type === "background");
+  const spell = result.actor.items.find((item) => item.type === "spell");
+  assert.equal(result.actor.img, "https://assets.example.com/image/selene.webp");
+  assert.equal(background.img, "https://assets.example.com/image/acolyte.webp");
+  assert.equal(spell.img, "https://assets.example.com/image/heal.webp");
+  assert.equal(result.actor.system.details.background, background.id);
 });
 
 test("fetches a detailed Foundry Import character at most once", async () => {

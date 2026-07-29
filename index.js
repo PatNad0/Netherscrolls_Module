@@ -2056,7 +2056,8 @@ async function applyNetherscrollsCampaignCharacter(importedCharacter, folder, { 
   onProgress?.("linking background, race, and original class...");
   const documentLinks = await repairNetherscrollsCharacterActorDocumentLinks(
     actor,
-    importedCharacter.character
+    importedCharacter.character,
+    itemResult.embeddedIds
   );
   debugNetherscrollsCharacterImport("Repaired Actor embedded-document links.", {
     characterId,
@@ -2539,7 +2540,9 @@ async function importMissingNetherscrollsCharacterDocuments(sources) {
     const id = normalizeNetherscrollsReferenceValue(descriptor?.netherscrollsId);
     if (!id || !supportedDatasets.has(dataset)) continue;
     const existing = await findNetherscrollsCompendiumDocumentById(dataset, id);
-    if (!existing) missing.push({ dataset, id });
+    if (!existing || isStaleNetherscrollsCharacterLibraryDocument(existing, dataset)) {
+      missing.push({ dataset, id });
+    }
   }
   if (!missing.length) return 0;
 
@@ -2566,6 +2569,20 @@ async function importMissingNetherscrollsCharacterDocuments(sources) {
       .reduce((count, rows) => count + rows.length, 0);
   }
   return importedCount;
+}
+
+function isStaleNetherscrollsCharacterLibraryDocument(document, dataset) {
+  const expectedType = {
+    backgrounds: "background",
+    races: "race",
+    classes: "class",
+    subclasses: "subclass",
+    spells: "spell",
+    feats: "feat",
+  }[dataset];
+  if (expectedType && toTrimmedStringOrNull(document?.type) !== expectedType) return true;
+  const img = toTrimmedStringOrNull(document?.img);
+  return isNetherscrollsUnresolvedImageKey(img) || img === NETHERSCROLLS_IMPORT_IMAGE;
 }
 
 function getNetherscrollsCharacterSourceId(
@@ -2819,6 +2836,7 @@ async function reconcileNetherscrollsCharacterActorItems(actor, itemData, charac
 
   const creates = [];
   const updates = [];
+  const replacedExistingIds = [];
   for (const data of uniqueItemData) {
     const netherscrollsId = getNetherscrollsSourceId(data);
     data.flags = data.flags ?? {};
@@ -2829,28 +2847,60 @@ async function reconcileNetherscrollsCharacterActorItems(actor, itemData, charac
     };
     const existing = netherscrollsId ? existingById.get(String(netherscrollsId)) : null;
     if (existing?.id) {
-      updates.push({ ...data, _id: existing.id });
+      if (
+        toTrimmedStringOrNull(existing.type) &&
+        toTrimmedStringOrNull(data.type) &&
+        existing.type !== data.type
+      ) {
+        replacedExistingIds.push(existing.id);
+        creates.push(data);
+      } else {
+        updates.push({ ...data, _id: existing.id });
+      }
     } else {
       creates.push(data);
     }
   }
-  if (duplicateExistingIds.length && actor?.deleteEmbeddedDocuments) {
-    await actor.deleteEmbeddedDocuments("Item", duplicateExistingIds);
+  const deleteIds = Array.from(new Set([
+    ...duplicateExistingIds,
+    ...replacedExistingIds,
+  ]));
+  if (deleteIds.length && actor?.deleteEmbeddedDocuments) {
+    await actor.deleteEmbeddedDocuments("Item", deleteIds);
   }
   if (updates.length) await actor.updateEmbeddedDocuments("Item", updates);
-  if (creates.length) await actor.createEmbeddedDocuments("Item", creates, { renderSheet: false });
+  const createdDocuments = creates.length
+    ? await actor.createEmbeddedDocuments("Item", creates, { renderSheet: false })
+    : [];
+  const embeddedIds = {};
+  for (const update of updates) {
+    const id = getNetherscrollsSourceId(update);
+    if (id && update._id) embeddedIds[String(id)] = update._id;
+  }
+  for (const [index, data] of creates.entries()) {
+    const id = getNetherscrollsSourceId(data);
+    const embeddedId = createdDocuments?.[index]?.id ?? createdDocuments?.[index]?._id;
+    if (id && embeddedId) embeddedIds[String(id)] = embeddedId;
+  }
   return {
     created: creates.length,
     updated: updates.length,
     deletedDuplicates: duplicateExistingIds.length,
+    replacedWrongType: replacedExistingIds.length,
+    embeddedIds,
   };
 }
 
-async function repairNetherscrollsCharacterActorDocumentLinks(actor, character = null) {
+async function repairNetherscrollsCharacterActorDocumentLinks(
+  actor,
+  character = null,
+  embeddedIds = {}
+) {
   if (!actor?.update) return {};
   const references = [
     {
       path: "system.details.background",
+      label: "background",
       types: new Set(["background"]),
       netherscrollsId: normalizeNetherscrollsReferenceValue(
         character?.backgroundId ?? character?.background?.backgroundId ?? character?.background?.id
@@ -2858,6 +2908,7 @@ async function repairNetherscrollsCharacterActorDocumentLinks(actor, character =
     },
     {
       path: "system.details.race",
+      label: "race",
       types: new Set(["race", "species"]),
       netherscrollsId: normalizeNetherscrollsReferenceValue(
         character?.raceId ??
@@ -2870,6 +2921,7 @@ async function repairNetherscrollsCharacterActorDocumentLinks(actor, character =
     },
     {
       path: "system.details.originalClass",
+      label: "original class",
       types: new Set(["class"]),
       netherscrollsId: getNetherscrollsCharacterOriginalClassId(character),
     },
@@ -2880,13 +2932,24 @@ async function repairNetherscrollsCharacterActorDocumentLinks(actor, character =
 
   for (const reference of references) {
     if (!reference.netherscrollsId) continue;
-    const item = items.find((candidate) => (
-      reference.types.has(candidate?.type) &&
-      String(getItemNetherId(candidate) ?? "") === reference.netherscrollsId
-    ));
-    if (!item?.id) continue;
-    updates[reference.path] = item.id;
-    repaired[reference.path] = item.id;
+    const reconciledId = normalizeNetherscrollsReferenceValue(
+      embeddedIds?.[reference.netherscrollsId]
+    );
+    const item = reconciledId
+      ? items.find((candidate) => candidate?.id === reconciledId)
+      : items.find((candidate) => (
+          reference.types.has(candidate?.type) &&
+          String(getItemNetherId(candidate) ?? "") === reference.netherscrollsId
+        ));
+    const itemId = reconciledId ?? normalizeNetherscrollsReferenceValue(item?.id);
+    if (!itemId || (item && !reference.types.has(item.type))) {
+      throw new Error(
+        `Could not link the imported ${reference.label} ` +
+        `(${reference.netherscrollsId}) to an embedded Foundry Item.`
+      );
+    }
+    updates[reference.path] = itemId;
+    repaired[reference.path] = itemId;
   }
 
   if (Object.keys(updates).length) await actor.update(updates);
