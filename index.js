@@ -1881,7 +1881,7 @@ async function importNetherscrollsSelectedCampaignCharacters(root, selected) {
   const fetched = results.reduce((total, result) => total + (result.fetched ?? 0), 0);
   const message = [
     `Netherscrolls characters: ${created} created, ${updated} updated`,
-    fetched ? `${fetched} missing content record${fetched === 1 ? "" : "s"} fetched` : null,
+    fetched ? `${fetched} linked content record${fetched === 1 ? "" : "s"} refreshed` : null,
     failed.length ? `${failed.length} failed` : null,
   ]
     .filter(Boolean)
@@ -2609,20 +2609,20 @@ async function importMissingNetherscrollsCharacterDocuments(sources) {
     "backgrounds",
     "races",
   ]);
-  const missing = [];
+  const refresh = [];
   for (const descriptor of sources) {
     const dataset = descriptor?.dataset;
     const id = normalizeNetherscrollsReferenceValue(descriptor?.netherscrollsId);
     if (!id || !supportedDatasets.has(dataset)) continue;
-    const existing = await findNetherscrollsCompendiumDocumentById(dataset, id);
-    if (!existing || isStaleNetherscrollsCharacterLibraryDocument(existing, dataset)) {
-      missing.push({ dataset, id });
-    }
+    // Character imports must not embed an old local compendium version. Refresh
+    // every linked record from the API, even when its Netherscrolls id already
+    // exists in Foundry, so imported effects and configuration are authoritative.
+    refresh.push({ dataset, id });
   }
-  if (!missing.length) return 0;
+  if (!refresh.length) return 0;
 
   const unique = Array.from(
-    new Map(missing.map((entry) => [`${entry.dataset}:${entry.id}`, entry])).values()
+    new Map(refresh.map((entry) => [`${entry.dataset}:${entry.id}`, entry])).values()
   );
   let importedCount = 0;
   for (let offset = 0; offset < unique.length; offset += 100) {
@@ -2885,10 +2885,14 @@ async function reconcileNetherscrollsCharacterActorItems(actor, itemData, charac
       "importedCharacterItem",
       characterId
     );
-    if (existingImported && itemImported && item?.id) {
-      duplicateExistingIds.push(item.id);
-    } else if (!existingImported && itemImported) {
+    // A Netherscrolls id identifies one canonical embedded Item. Older module
+    // versions may have created unmarked duplicates, whose transferred effects
+    // would otherwise stack every time the character is re-imported.
+    if (!existingImported && itemImported) {
+      if (existing?.id) duplicateExistingIds.push(existing.id);
       existingById.set(key, item);
+    } else if (item?.id) {
+      duplicateExistingIds.push(item.id);
     }
   }
 

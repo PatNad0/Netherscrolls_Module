@@ -827,7 +827,7 @@ test("resolves targeted Import selections without using an invalid Foundry flag 
       embed: true,
     },
   ]);
-  assert.equal(fetches, 1);
+  assert.equal(fetches, 2);
 
   const items = makePack("world.netherscrolls-items");
   context.game.packs.set(items.collection, items);
@@ -901,6 +901,19 @@ test("deduplicates embedded items and effects on first import and re-import", as
   assert.equal(cleanup.deletedDuplicates, 1);
   assert.equal(actor.items.length, 1);
 
+  actor.items.push(makeDocument({
+    ...clone(changed),
+    _id: "duplicate-legacy",
+    effects: [{ name: "Obsolete Bonus", changes: [{ key: "system.abilities.cha.value", value: "+6" }] }],
+  }));
+  const legacyCleanup = await importer.reconcileNetherscrollsCharacterActorItems(
+    actor,
+    [changed],
+    "char-1"
+  );
+  assert.equal(legacyCleanup.deletedDuplicates, 1);
+  assert.equal(actor.items.length, 1);
+
   const effect = {
     netherscrollsId: "effect-1",
     name: "Blessed",
@@ -933,6 +946,7 @@ test("refreshes stale linked library images before embedding character content",
       type: "spell",
       img: "https://i.postimg.cc/wBj0LZyj/image.png",
       system: { level: 6, method: "spell" },
+      effects: [{ name: "Obsolete Charisma", changes: [{ key: "system.abilities.cha.value", value: "+6" }] }],
       flags: { netherscrolls: { id: "spell-1" } },
     }),
   ]);
@@ -971,6 +985,7 @@ test("refreshes stale linked library images before embedding character content",
 
   assert.equal(fetches, 1);
   assert.equal(resolved.items[0].img, "https://assets.example.com/image/heal.webp");
+  assert.deepEqual(clone(resolved.items[0].effects), []);
   assert.equal(spells.documents[0].img, "https://assets.example.com/image/heal.webp");
 });
 
@@ -1221,6 +1236,26 @@ test("does not embed nested high-level or optional features before repair", asyn
       }],
     },
   });
+  context.fetch = async (_url, options) => {
+    const selection = JSON.parse(options.body);
+    return {
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({
+        data: {
+          classes: (selection.classes ?? []).map(() => ({
+            _id: "class-1",
+            foundryItem: classPack.documents[0].toObject(),
+          })),
+          subclasses: (selection.subclasses ?? []).map(() => ({
+            _id: "subclass-1",
+            foundryItem: subclassPack.documents[0].toObject(),
+          })),
+        },
+      }),
+    };
+  };
   const resolved = await importer.resolveNetherscrollsCharacterItemSources(sources);
 
   assert.deepEqual(
@@ -1230,9 +1265,9 @@ test("does not embed nested high-level or optional features before repair", asyn
     ).sort(),
     ["class-1", "subclass-1"]
   );
-  assert.equal(classPack.documentLoads, 1);
-  assert.equal(subclassPack.documentLoads, 1);
-  assert.equal(featurePack.documentLoads, 1);
+  assert.equal(classPack.documentLoads, 2);
+  assert.equal(subclassPack.documentLoads, 3);
+  assert.equal(featurePack.documentLoads, 3);
 });
 
 test("class feature repair filters level/optional/owned features and is idempotent", async () => {
