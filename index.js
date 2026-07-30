@@ -2844,6 +2844,42 @@ function applyNetherscrollsCharacterItemState(target, source) {
   }
 }
 
+function getNetherscrollsEmbeddedEffectSources(value) {
+  const effects = value?.effects;
+  const entries = Array.isArray(effects)
+    ? effects
+    : Array.isArray(effects?.contents)
+      ? effects.contents
+      : effects?.values
+        ? Array.from(effects.values())
+        : [];
+  return entries
+    .map((effect) => effect?.toObject?.() ?? effect)
+    .filter((effect) => effect && typeof effect === "object");
+}
+
+function getNetherscrollsEmbeddedEffectSignatures(value) {
+  return getNetherscrollsEmbeddedEffectSources(value)
+    .map((effect) => JSON.stringify({
+      name: toTrimmedStringOrNull(effect.name) ?? "",
+      disabled: Boolean(effect.disabled),
+      transfer: Boolean(effect.transfer),
+      changes: (Array.isArray(effect.changes) ? effect.changes : []).map((change) => ({
+        key: toTrimmedStringOrNull(change?.key) ?? "",
+        mode: change?.mode ?? null,
+        value: String(change?.value ?? ""),
+      })),
+    }))
+    .sort();
+}
+
+function haveSameNetherscrollsEmbeddedEffects(left, right) {
+  const leftSignatures = getNetherscrollsEmbeddedEffectSignatures(left);
+  const rightSignatures = getNetherscrollsEmbeddedEffectSignatures(right);
+  return leftSignatures.length === rightSignatures.length &&
+    leftSignatures.every((signature, index) => signature === rightSignatures[index]);
+}
+
 function copyNetherscrollsCharacterItemStatePath(target, source, path) {
   if (!target || !source || !Array.isArray(path) || !path.length) return;
   let sourceCursor = source;
@@ -2915,7 +2951,8 @@ async function reconcileNetherscrollsCharacterActorItems(actor, itemData, charac
 
   const creates = [];
   const updates = [];
-  const replacedExistingIds = [];
+  const replacedWrongTypeIds = [];
+  const replacedEffectIds = [];
   for (const data of uniqueItemData) {
     const netherscrollsId = getNetherscrollsSourceId(data);
     data.flags = data.flags ?? {};
@@ -2926,15 +2963,22 @@ async function reconcileNetherscrollsCharacterActorItems(actor, itemData, charac
     };
     const existing = netherscrollsId ? existingById.get(String(netherscrollsId)) : null;
     if (existing?.id) {
-      if (
+      const effectsDiffer = !haveSameNetherscrollsEmbeddedEffects(existing, data);
+      const typeMismatch = Boolean(
         toTrimmedStringOrNull(existing.type) &&
         toTrimmedStringOrNull(data.type) &&
         existing.type !== data.type
-      ) {
-        replacedExistingIds.push(existing.id);
+      );
+      if (typeMismatch || effectsDiffer) {
+        (typeMismatch ? replacedWrongTypeIds : replacedEffectIds).push(existing.id);
         creates.push(data);
       } else {
-        updates.push({ ...data, _id: existing.id });
+        const update = { ...data, _id: existing.id };
+        // Foundry treats embedded effects as separate documents. Leaving an
+        // unchanged effect array out of the Item update prevents it from
+        // appending another copy on each character import.
+        delete update.effects;
+        updates.push(update);
       }
     } else {
       creates.push(data);
@@ -2942,7 +2986,8 @@ async function reconcileNetherscrollsCharacterActorItems(actor, itemData, charac
   }
   const deleteIds = Array.from(new Set([
     ...duplicateExistingIds,
-    ...replacedExistingIds,
+    ...replacedWrongTypeIds,
+    ...replacedEffectIds,
   ]));
   if (deleteIds.length && actor?.deleteEmbeddedDocuments) {
     await actor.deleteEmbeddedDocuments("Item", deleteIds);
@@ -2965,7 +3010,8 @@ async function reconcileNetherscrollsCharacterActorItems(actor, itemData, charac
     created: creates.length,
     updated: updates.length,
     deletedDuplicates: duplicateExistingIds.length,
-    replacedWrongType: replacedExistingIds.length,
+    replacedWrongType: replacedWrongTypeIds.length,
+    replacedEffects: replacedEffectIds.length,
     embeddedIds,
   };
 }
@@ -4020,8 +4066,14 @@ async function importNetherscrollsGenericFoundryItems(rows, typeKey) {
         toTrimmedStringOrNull(existing?.type) !== source.type
       ) {
         if (existing?.id) deleteIds.push(existing.id);
+      } else if (!haveSameNetherscrollsEmbeddedEffects(existing, source)) {
+        // Recreate the canonical library Item when its effect set changed.
+        // Updating nested ActiveEffects can append them rather than remove old
+        // entries, which makes racial bonuses stack after repeated imports.
+        if (existing?.id) deleteIds.push(existing.id);
       } else {
         source._id = existing.id;
+        delete source.effects;
       }
     }
     itemData.push(source);

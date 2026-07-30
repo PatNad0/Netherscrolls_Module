@@ -914,6 +914,16 @@ test("deduplicates embedded items and effects on first import and re-import", as
   assert.equal(legacyCleanup.deletedDuplicates, 1);
   assert.equal(actor.items.length, 1);
 
+  actor.items[0].effects = [{ name: "Obsolete Bonus", changes: [{ key: "system.abilities.cha.value", value: "+6" }] }];
+  const effectCleanup = await importer.reconcileNetherscrollsCharacterActorItems(
+    actor,
+    [changed],
+    "char-1"
+  );
+  assert.equal(effectCleanup.replacedEffects, 1);
+  assert.equal(actor.items.length, 1);
+  assert.equal(Object.keys(actor.items[0].effects ?? {}).length, 0);
+
   const effect = {
     netherscrollsId: "effect-1",
     name: "Blessed",
