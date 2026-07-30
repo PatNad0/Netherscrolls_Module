@@ -2051,7 +2051,9 @@ async function applyNetherscrollsCampaignCharacter(importedCharacter, folder, { 
   await setActorCharacterId(actor, characterId);
 
   onProgress?.(`adding or updating ${content.items.length} item${content.items.length === 1 ? "" : "s"}...`);
-  const itemResult = await reconcileNetherscrollsCharacterActorItems(actor, content.items, characterId);
+  const itemResult = await reconcileNetherscrollsCharacterActorItems(actor, content.items, characterId, {
+    replaceAll: true,
+  });
   debugNetherscrollsCharacterImport("Reconciled character items.", { characterId, itemResult });
   onProgress?.("linking background, race, and original class...");
   const documentLinks = await repairNetherscrollsCharacterActorDocumentLinks(
@@ -2638,12 +2640,43 @@ async function importMissingNetherscrollsCharacterDocuments(sources) {
       body: selection,
       operation: "Foundry Import selection",
     });
+    // The API response is authoritative for character import. Delete the local
+    // canonical records first so Foundry cannot preserve old nested ActiveEffect
+    // documents while updating the outer Item.
+    await clearNetherscrollsCharacterLibraryDocuments(chunk);
     await applyNetherscrollsImportResponse(response, null, Object.keys(selection));
     importedCount += Object.values(response?.data ?? {})
       .filter(Array.isArray)
       .reduce((count, rows) => count + rows.length, 0);
   }
   return importedCount;
+}
+
+async function clearNetherscrollsCharacterLibraryDocuments(entries) {
+  const idsByDataset = new Map();
+  for (const entry of entries) {
+    const dataset = toTrimmedStringOrNull(entry?.dataset);
+    const id = normalizeNetherscrollsReferenceValue(entry?.id);
+    if (!dataset || !id) continue;
+    const ids = idsByDataset.get(dataset) ?? new Set();
+    ids.add(id);
+    idsByDataset.set(dataset, ids);
+  }
+
+  const ItemClass = Item?.implementation ?? Item;
+  if (typeof ItemClass?.deleteDocuments !== "function") return;
+  for (const [dataset, netherscrollsIds] of idsByDataset) {
+    const pack = await getNetherscrollsImportPack(dataset);
+    if (!pack) continue;
+    const documentsById = await getNetherscrollsCompendiumDocumentsById(pack);
+    const documentIds = Array.from(netherscrollsIds)
+      .map((id) => documentsById.get(String(id))?.id)
+      .filter(Boolean);
+    if (documentIds.length) {
+      await ItemClass.deleteDocuments(documentIds, { pack: pack.collection });
+    }
+    invalidateNetherscrollsCompendiumDocumentIdCache(dataset);
+  }
 }
 
 function isStaleNetherscrollsCharacterLibraryDocument(document, dataset) {
@@ -2899,12 +2932,53 @@ function copyNetherscrollsCharacterItemStatePath(target, source, path) {
   targetCursor[path[path.length - 1]] = duplicateNetherscrollsData(sourceCursor);
 }
 
-async function reconcileNetherscrollsCharacterActorItems(actor, itemData, characterId) {
+async function reconcileNetherscrollsCharacterActorItems(
+  actor,
+  itemData,
+  characterId,
+  { replaceLinked = false, replaceAll = false } = {}
+) {
   const existingById = new Map();
   const duplicateExistingIds = [];
+  const shouldReplaceExisting = replaceLinked || replaceAll;
+  const existingItems = replaceAll
+    ? getNetherscrollsActorItems(actor)
+    : replaceLinked
+    ? getNetherscrollsActorItems(actor).filter((item) => getItemNetherId(item))
+    : [];
+  const existingItemIds = new Set(
+    existingItems.map((item) => String(item.id ?? item._id ?? "")).filter(Boolean)
+  );
+  const raceEffectNames = new Set(
+    (Array.isArray(itemData) ? itemData : [])
+      .filter((item) => item?.type === "race" || item?.type === "species")
+      .map((item) => toTrimmedStringOrNull(item?.name))
+      .filter(Boolean)
+      .map((name) => `Race: ${name}`)
+  );
+  const staleEffectIds = shouldReplaceExisting
+    ? getNetherscrollsActorEffects(actor)
+      .filter((effect) => replaceAll || isNetherscrollsStaleCharacterEffect(
+          effect,
+          existingItemIds,
+          raceEffectNames,
+          characterId
+        ))
+      .map((effect) => effect.id ?? effect._id)
+      .filter(Boolean)
+    : [];
+
+  if (staleEffectIds.length && actor?.deleteEmbeddedDocuments) {
+    await actor.deleteEmbeddedDocuments("ActiveEffect", staleEffectIds);
+  }
+  if (existingItemIds.size && actor?.deleteEmbeddedDocuments) {
+    await actor.deleteEmbeddedDocuments("Item", Array.from(existingItemIds));
+  }
+
   for (const item of getNetherscrollsActorItems(actor)) {
     const id = getItemNetherId(item);
     if (!id) continue;
+    if (shouldReplaceExisting) continue;
     const key = String(id);
     const existing = existingById.get(key);
     if (!existing) {
@@ -3012,8 +3086,27 @@ async function reconcileNetherscrollsCharacterActorItems(actor, itemData, charac
     deletedDuplicates: duplicateExistingIds.length,
     replacedWrongType: replacedWrongTypeIds.length,
     replacedEffects: replacedEffectIds.length,
+    deletedLinked: existingItemIds.size,
+    deletedEffects: staleEffectIds.length,
     embeddedIds,
   };
+}
+
+function getNetherscrollsActorEffects(actor) {
+  const effects = actor?.effects;
+  if (Array.isArray(effects)) return effects;
+  if (Array.isArray(effects?.contents)) return effects.contents;
+  if (effects?.values) return Array.from(effects.values());
+  if (effects?.[Symbol.iterator]) return Array.from(effects);
+  return [];
+}
+
+function isNetherscrollsStaleCharacterEffect(effect, linkedItemIds, raceEffectNames, characterId) {
+  if (isNetherscrollsImportedCharacterDocument(effect, "importedCharacterEffect", characterId)) return true;
+  if (raceEffectNames.has(toTrimmedStringOrNull(effect?.name))) return true;
+  const origin = toTrimmedStringOrNull(effect?.origin ?? effect?._source?.origin) ?? "";
+  const match = /(?:^|\.)Item\.([A-Za-z0-9_-]+)/.exec(origin);
+  return Boolean(match?.[1] && linkedItemIds.has(match[1]));
 }
 
 async function repairNetherscrollsCharacterActorDocumentLinks(
@@ -3702,6 +3795,12 @@ async function importNetherscrollsClasses(classes) {
     const preparedClass = normalizeNetherscrollsClassData(classSource, {
       featureUuidByKey: featureResult.uuidByKey,
     });
+    // A Foundry Export payload includes the source compendium document's
+    // local `_id`. It must not be retained after a character refresh has
+    // deliberately removed that document; otherwise Foundry treats a new
+    // canonical class as an update to a document that no longer exists.
+    delete preparedClass._id;
+    delete preparedClass.id;
     if (classNetherscrollsId && existingClassesByNetherId.has(String(classNetherscrollsId))) {
       preparedClass._id = existingClassesByNetherId.get(String(classNetherscrollsId)).id;
     }
@@ -3732,6 +3831,10 @@ async function importNetherscrollsClasses(classes) {
       const preparedSubclass = normalizeNetherscrollsSubclassData(subclassSource, classSource, {
         featureUuidByKey: featureResult.uuidByKey,
       });
+      // See the corresponding class cleanup above. A nested Foundry subclass
+      // can carry an obsolete local compendium `_id` as well.
+      delete preparedSubclass._id;
+      delete preparedSubclass.id;
       if (subclassNetherscrollsId && existingSubclassesByNetherId.has(String(subclassNetherscrollsId))) {
         preparedSubclass._id = existingSubclassesByNetherId.get(String(subclassNetherscrollsId)).id;
       }

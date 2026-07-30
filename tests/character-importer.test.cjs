@@ -947,6 +947,57 @@ test("deduplicates embedded items and effects on first import and re-import", as
   assert.equal(actor.effects.length, 1);
 });
 
+test("fully replaces all character Items and Active Effects during character import", async () => {
+  const { context, importer } = createHarness();
+  const actor = makeActor(context, { name: "Hero" });
+  actor.items.push(
+    makeDocument({
+      _id: "old-race",
+      name: "Variant Aasimar",
+      type: "race",
+      effects: [{ name: "Race: Variant Aasimar", changes: [{ key: "system.abilities.cha.value", value: "+2" }] }],
+      flags: { netherscrolls: { id: "race-1" } },
+    }),
+    makeDocument({
+      _id: "old-item",
+      name: "Old Linked Item",
+      type: "loot",
+      flags: { netherscrolls: { id: "item-1" } },
+    }),
+    makeDocument({
+      _id: "old-unlinked-item",
+      name: "Old Manual Item",
+      type: "loot",
+    })
+  );
+  actor.effects.push(
+    makeDocument({ _id: "old-race-effect", name: "Race: Variant Aasimar", origin: "Actor.actor-1.Item.old-race.ActiveEffect.effect-1" }),
+    makeDocument({ _id: "old-race-effect-2", name: "Race: Variant Aasimar" }),
+    makeDocument({ _id: "old-user-effect", name: "Old User Effect" })
+  );
+
+  const result = await importer.reconcileNetherscrollsCharacterActorItems(
+    actor,
+    [{
+      name: "Variant Aasimar",
+      type: "race",
+      effects: [],
+      system: {},
+      flags: { netherscrolls: { id: "race-1" } },
+    }],
+    "character-1",
+    { replaceAll: true }
+  );
+
+  assert.equal(result.deletedLinked, 3);
+  assert.equal(result.deletedEffects, 3);
+  assert.equal(result.created, 1);
+  assert.equal(actor.items.length, 1);
+  assert.equal(actor.items[0].flags.netherscrolls.id, "race-1");
+  assert.equal(Object.keys(actor.items[0].effects ?? {}).length, 0);
+  assert.equal(actor.effects.length, 0);
+});
+
 test("refreshes stale linked library images before embedding character content", async () => {
   const { context, importer } = createHarness();
   const spells = makePack("world.netherscrolls-spells", [
@@ -1246,6 +1297,11 @@ test("does not embed nested high-level or optional features before repair", asyn
       }],
     },
   });
+  // A character refresh deliberately removes these local canonical documents
+  // before applying the API response. Keep the simulated remote response
+  // independent of the compendium collection it is about to replace.
+  const classPayload = classPack.documents[0].toObject();
+  const subclassPayload = subclassPack.documents[0].toObject();
   context.fetch = async (_url, options) => {
     const selection = JSON.parse(options.body);
     return {
@@ -1256,11 +1312,11 @@ test("does not embed nested high-level or optional features before repair", asyn
         data: {
           classes: (selection.classes ?? []).map(() => ({
             _id: "class-1",
-            foundryItem: classPack.documents[0].toObject(),
+            foundryItem: classPayload,
           })),
           subclasses: (selection.subclasses ?? []).map(() => ({
             _id: "subclass-1",
-            foundryItem: subclassPack.documents[0].toObject(),
+            foundryItem: subclassPayload,
           })),
         },
       }),
@@ -1275,8 +1331,8 @@ test("does not embed nested high-level or optional features before repair", asyn
     ).sort(),
     ["class-1", "subclass-1"]
   );
-  assert.equal(classPack.documentLoads, 2);
-  assert.equal(subclassPack.documentLoads, 3);
+  assert.equal(classPack.documentLoads, 3);
+  assert.equal(subclassPack.documentLoads, 4);
   assert.equal(featurePack.documentLoads, 3);
 });
 
