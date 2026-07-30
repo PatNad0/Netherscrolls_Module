@@ -2156,6 +2156,8 @@ function normalizeNetherscrollsCharacterActorCreationData(actorPayload, characte
     ? actorPayload.system.attributes
     : {};
 
+  logNetherscrollsCharacterImportStatAudit(actorPayload, character);
+
   // The API's `character` member is the authoritative current record. Its
   // ability scores can be newer than the persisted Foundry Actor snapshot,
   // so apply them before creating or updating the Actor.
@@ -2218,6 +2220,46 @@ function normalizeNetherscrollsCharacterActorCreationData(actorPayload, characte
     hasPrototypeToken: Boolean(actorPayload.prototypeToken),
   });
   delete actorPayload.token;
+}
+
+function logNetherscrollsCharacterImportStatAudit(actorPayload, character = null) {
+  if (!character || typeof character !== "object") return;
+
+  const characterAbilities = character.abilities && typeof character.abilities === "object"
+    ? character.abilities
+    : {};
+  const characterSkills = character.skills && typeof character.skills === "object"
+    ? character.skills
+    : {};
+  const snapshotSkills = actorPayload?.system?.skills && typeof actorPayload.system.skills === "object"
+    ? actorPayload.system.skills
+    : {};
+  const chaScore = toNumberOrNull(characterAbilities.cha?.score ?? characterAbilities.cha);
+  const chaAdjustments = [character.activeBonuses, character.activeEffects, character.effects]
+    .filter(Array.isArray)
+    .flat()
+    .filter((entry) => entry?.active !== false && /^abilities\.cha(?:\.score)?$/i.test(toTrimmedStringOrNull(entry?.stat) ?? ""))
+    .map((entry) => toTrimmedStringOrNull(entry?.bonus))
+    .filter(Boolean);
+  const skillBonuses = [];
+  const missingSnapshotSkills = [];
+
+  for (const [sourceKey, sourceSkill] of Object.entries(characterSkills)) {
+    if (!sourceSkill || typeof sourceSkill !== "object") continue;
+    const skillKey = getNetherscrollsFoundrySkillKey(sourceKey, sourceSkill);
+    if (!skillKey) continue;
+    const manualBonus = getNetherscrollsCharacterSkillManualBonus(sourceSkill);
+    const name = SKILL_KEY_TO_NAME[skillKey] ?? sourceKey;
+    if (manualBonus) skillBonuses.push(`${name} ${manualBonus >= 0 ? "+" : ""}${manualBonus}`);
+    if (!Object.prototype.hasOwnProperty.call(snapshotSkills, skillKey)) missingSnapshotSkills.push(name);
+  }
+
+  console.info(
+    `${MODULE_ID} | Foundry Import | ${actorPayload?.name ?? character.name ?? "Character"}: API stat audit — ` +
+    `CHA base ${chaScore ?? "not supplied"}; active CHA adjustments ${chaAdjustments.length ? chaAdjustments.join(", ") : "none"}; ` +
+    `skill bonuses ${skillBonuses.length ? skillBonuses.join(", ") : "none"}; ` +
+    `missing from Foundry snapshot ${missingSnapshotSkills.length ? missingSnapshotSkills.join(", ") : "none"}.`
+  );
 }
 
 function normalizeNetherscrollsCharacterAbilities(actorPayload, character = null) {
@@ -9990,27 +10032,36 @@ function injectFoundryExportButtonV1(app, html) {
 
   const header = appElement.find(".window-header");
   if (!header.length) return;
-  if (header.find(".netherscrolls-export-button").length) return;
+  if (header.find(".netherscrolls-export-button, .netherscrolls-import-button").length) return;
 
-  const button = $(
+  const exportButton = $(
     `<a class="header-button netherscrolls-export-button" title="Foundry Export">
       <i class="fas fa-cloud-upload-alt"></i>Foundry Export
     </a>`
   );
+  const importButton = $(
+    `<a class="header-button netherscrolls-import-button" title="Foundry Import">
+      <i class="fas fa-cloud-download-alt"></i>Foundry Import
+    </a>`
+  );
 
-  button.on("click", () => {
+  exportButton.on("click", () => {
     exportActorToNetherscrolls(actor).catch(() => {});
+  });
+  importButton.on("click", () => {
+    importActorFromNetherscrolls(actor).catch(() => {});
   });
 
   const modeSlider = header.find(".mode-slider");
   const title = header.find(".window-title");
   if (modeSlider.length) {
-    modeSlider.last().after(button);
+    modeSlider.last().after(exportButton);
   } else if (title.length) {
-    title.first().before(button);
+    title.first().before(exportButton);
   } else {
-    header.prepend(button);
+    header.prepend(exportButton);
   }
+  exportButton.after(importButton);
 }
 
 function injectFoundryExportButtonV2(app, element) {
@@ -10025,26 +10076,35 @@ function injectFoundryExportButtonV2(app, element) {
     element.querySelector("header.window-header") ||
     element.querySelector(".window-header");
   if (!header) return;
-  if (header.querySelector(".netherscrolls-export-button")) return;
+  if (header.querySelector(".netherscrolls-export-button, .netherscrolls-import-button")) return;
 
-  const button = document.createElement("button");
-  button.type = "button";
-  button.classList.add("header-control", "netherscrolls-export-button");
-  button.title = "Foundry Export";
-  button.innerHTML = '<i class="fas fa-cloud-upload-alt"></i><span>Foundry Export</span>';
-  button.addEventListener("click", () => {
+  const exportButton = document.createElement("button");
+  exportButton.type = "button";
+  exportButton.classList.add("header-control", "netherscrolls-export-button");
+  exportButton.title = "Foundry Export";
+  exportButton.innerHTML = '<i class="fas fa-cloud-upload-alt"></i><span>Foundry Export</span>';
+  exportButton.addEventListener("click", () => {
     exportActorToNetherscrolls(actor).catch(() => {});
+  });
+  const importButton = document.createElement("button");
+  importButton.type = "button";
+  importButton.classList.add("header-control", "netherscrolls-import-button");
+  importButton.title = "Foundry Import";
+  importButton.innerHTML = '<i class="fas fa-cloud-download-alt"></i><span>Foundry Import</span>';
+  importButton.addEventListener("click", () => {
+    importActorFromNetherscrolls(actor).catch(() => {});
   });
 
   const modeSlider = header.querySelector(".mode-slider");
   const title = header.querySelector(".window-title");
   if (modeSlider) {
-    modeSlider.insertAdjacentElement("afterend", button);
+    modeSlider.insertAdjacentElement("afterend", exportButton);
   } else if (title) {
-    title.insertAdjacentElement("beforebegin", button);
+    title.insertAdjacentElement("beforebegin", exportButton);
   } else {
-    header.prepend(button);
+    header.prepend(exportButton);
   }
+  exportButton.insertAdjacentElement("afterend", importButton);
 }
 
 async function exportActorToNetherscrolls(actor) {
@@ -10067,6 +10127,51 @@ async function exportActorToNetherscrolls(actor) {
     });
   }
   return sendFoundryActorExport(actor, payload);
+}
+
+async function importActorFromNetherscrolls(actor) {
+  const characterId = getActorCharacterId(actor);
+  if (!characterId) {
+    ui?.notifications?.warn?.("This Actor is not linked to a Netherscrolls character.");
+    return null;
+  }
+  if (!getNetherscrollsApiKey()) {
+    ui?.notifications?.warn?.("Netherscrolls API Key is missing. Set it in Module Settings.");
+    return null;
+  }
+
+  try {
+    ui?.notifications?.info?.(`Foundry Import: locating ${actor.name ?? "character"}...`);
+    const resolved = await findNetherscrollsCampaignCharacterById(characterId);
+    const importedCharacter = await hydrateNetherscrollsImportedCharacter(
+      resolved.character,
+      resolved.campaignId
+    );
+    const folder = await findOrCreateNetherscrollsCharacterFolder();
+    if (!folder?.id) throw new Error("Foundry could not create the NS-Character Actor folder.");
+    const result = await importNetherscrollsCampaignCharacter(importedCharacter, folder, {
+      onProgress: (stage) => console.info(`${MODULE_ID} | Foundry Import | ${actor.name ?? "Character"} — ${stage}`),
+    });
+    ui?.notifications?.info?.(`Foundry Import succeeded: ${importedCharacter.name ?? actor.name ?? "character"}`);
+    return result;
+  } catch (err) {
+    console.error(`${MODULE_ID} | Foundry Import failed.`, err);
+    ui?.notifications?.error?.(`Foundry Import failed: ${err?.message ?? err}`);
+    throw err;
+  }
+}
+
+async function findNetherscrollsCampaignCharacterById(characterId) {
+  const canonicalCharacterId = normalizeNetherscrollsReferenceValue(characterId);
+  if (!canonicalCharacterId) throw new Error("A Netherscrolls character id is required for Foundry Import.");
+
+  const campaigns = await fetchNetherscrollsCampaigns();
+  for (const campaign of campaigns) {
+    const characters = await fetchNetherscrollsCampaignCharacters(campaign.id);
+    const character = characters.find((entry) => entry.id === canonicalCharacterId);
+    if (character) return { campaignId: campaign.id, character };
+  }
+  throw new Error("The linked Netherscrolls character is not available in any campaign accessible to this API key.");
 }
 
 function queueNetherscrollsClassFeatureRepairForItem(item, { delay = 150 } = {}) {

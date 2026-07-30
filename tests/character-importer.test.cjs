@@ -221,6 +221,7 @@ globalThis.__test = {
   repairNetherscrollsActorClassFeatures,
   importNetherscrollsCampaignCharacter,
   hydrateNetherscrollsImportedCharacter,
+  findNetherscrollsCampaignCharacterById,
   findNetherscrollsActorByCharacterId,
   buildFoundryExportPayload,
   applyFoundryExportCanonicalIds,
@@ -344,7 +345,7 @@ test("normalizes schema-v2 Actor data without legacy token fallback", () => {
 });
 
 test("imports skill training, expertise, abilities, and manual bonuses", () => {
-  const { importer } = createHarness();
+  const { importer, logs } = createHarness();
   const actor = {
     name: "Hero",
     system: {
@@ -374,6 +375,10 @@ test("imports skill training, expertise, abilities, and manual bonuses", () => {
   assert.equal(actor.system.skills.ani.ability, "wis");
   assert.equal(actor.system.skills.ani.value, 0.5);
   assert.equal(actor.system.skills.ani.bonuses.check, "");
+  assert.match(
+    logs.info.find((entry) => String(entry[0]).includes("API stat audit"))[0],
+    /CHA base not supplied; active CHA adjustments none; skill bonuses intimidation \+3, persuasion \+4; missing from Foundry snapshot intimidation, persuasion, stealth, animalHandling\./
+  );
 });
 
 test("uses current character ability scores when the Foundry snapshot is stale", () => {
@@ -1529,6 +1534,46 @@ test("fetches a detailed Foundry Import character at most once", async () => {
   assert.equal(refreshed.foundryActor.img, "https://assets.example.com/image/hero.png");
 });
 
+test("finds a linked character's campaign for the actor-sheet Foundry Import action", async () => {
+  const { context, importer } = createHarness();
+  context.fetch = async (url) => {
+    if (url.endsWith("/campaigns")) {
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({
+          data: [
+            { _id: "campaign-1", name: "First" },
+            { _id: "campaign-2", name: "Second" },
+          ],
+        }),
+      };
+    }
+    if (url.endsWith("/campaign-1/characters")) {
+      return { ok: true, status: 200, statusText: "OK", json: async () => ({ data: [] }) };
+    }
+    if (url.endsWith("/campaign-2/characters")) {
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({
+          data: [{
+            character: { _id: "character-1", name: "Hero" },
+            foundryActor: { name: "Hero", type: "character", system: {} },
+          }],
+        }),
+      };
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+
+  const result = await importer.findNetherscrollsCampaignCharacterById("character-1");
+  assert.equal(result.campaignId, "campaign-2");
+  assert.equal(result.character.id, "character-1");
+});
+
 test("declares every intended world compendium", () => {
   const { importer } = createHarness();
   assert.deepEqual(
@@ -1562,10 +1607,22 @@ test("builds the exact unpruned schema-v2 Foundry Export envelope", () => {
     name: "Hero",
     type: "character",
     flags: { netherscrolls: { characterId: "character-1" }, anotherModule: { keep: true } },
+    _stats: { createdTime: 1700000000000, modifiedTime: 1700000001000, lastModifiedBy: "gm-1" },
     system: { attributes: { hp: { value: 8, max: 10 } } },
     prototypeToken: { disposition: 1 },
     effects: [{ _id: "effect-1" }],
-    items: [{ _id: "item-1", flags: { netherscrolls: { id: "canonical-item" } } }],
+    items: [
+      {
+        _id: "item-1",
+        flags: { netherscrolls: { id: "canonical-item" } },
+        _stats: { createdTime: 1700000000000, modifiedTime: 1700000002000, lastModifiedBy: "player-1" },
+      },
+      {
+        _id: "subclass-1",
+        type: "subclass",
+        flags: { netherscrolls: { id: "canonical-subclass", classId: "canonical-class" } },
+      },
+    ],
   };
   const transformedActor = {
     ...clone(sourceActor),
@@ -1590,7 +1647,15 @@ test("builds the exact unpruned schema-v2 Foundry Export envelope", () => {
   });
   assert.equal(payload.actor.flags.anotherModule.keep, true);
   assert.equal(payload.actor.effects.length, 1);
-  assert.equal(payload.actor.items.length, 1);
+  assert.equal(payload.actor.flags.netherscrolls.characterId, "character-1");
+  assert.equal(payload.actor.items.length, 2);
+  assert.equal(payload.actor.items[0].flags.netherscrolls.id, "canonical-item");
+  assert.equal(payload.actor.items[1].flags.netherscrolls.id, "canonical-subclass");
+  assert.equal(payload.actor.items[1].flags.netherscrolls.classId, "canonical-class");
+  assert.equal(payload.actor._stats.modifiedTime, 1700000001000);
+  assert.equal(payload.actor._stats.lastModifiedBy, "gm-1");
+  assert.equal(payload.actor.items[0]._stats.modifiedTime, 1700000002000);
+  assert.equal(payload.actor.items[0]._stats.lastModifiedBy, "player-1");
 });
 
 test("writes canonical Actor, Item, and subclass ids from Foundry Export responses", async () => {
