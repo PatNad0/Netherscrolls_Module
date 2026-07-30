@@ -2156,6 +2156,11 @@ function normalizeNetherscrollsCharacterActorCreationData(actorPayload, characte
     ? actorPayload.system.attributes
     : {};
 
+  // The API's `character` member is the authoritative current record. Its
+  // ability scores can be newer than the persisted Foundry Actor snapshot,
+  // so apply them before creating or updating the Actor.
+  normalizeNetherscrollsCharacterAbilities(actorPayload, character);
+
   // Character Import responses keep skill training separately from the Foundry Actor
   // payload.  D&D5e expects training/expertise in `value` and a manual skill
   // modifier in `bonuses.check`; without this conversion every skill renders
@@ -2213,6 +2218,34 @@ function normalizeNetherscrollsCharacterActorCreationData(actorPayload, characte
     hasPrototypeToken: Boolean(actorPayload.prototypeToken),
   });
   delete actorPayload.token;
+}
+
+function normalizeNetherscrollsCharacterAbilities(actorPayload, character = null) {
+  const sourceAbilities = character?.abilities;
+  if (!sourceAbilities || typeof sourceAbilities !== "object") return;
+
+  const normalizedAbilities = actorPayload.system.abilities && typeof actorPayload.system.abilities === "object"
+    ? { ...actorPayload.system.abilities }
+    : {};
+  const importedScores = {};
+
+  for (const ability of ABILITY_KEYS) {
+    const score = toNumberOrNull(sourceAbilities[ability]?.score ?? sourceAbilities[ability]);
+    if (score == null) continue;
+
+    normalizedAbilities[ability] = {
+      ...(normalizedAbilities[ability] && typeof normalizedAbilities[ability] === "object"
+        ? normalizedAbilities[ability]
+        : {}),
+      value: Math.trunc(score),
+    };
+    importedScores[ability] = Math.trunc(score);
+  }
+
+  actorPayload.system.abilities = normalizedAbilities;
+  debugNetherscrollsCharacterImport("Normalized D&D5e actor ability scores.", {
+    importedScores,
+  });
 }
 
 function normalizeNetherscrollsCharacterSkills(actorPayload, character = null) {
@@ -2389,7 +2422,7 @@ function collectNetherscrollsCharacterItemSources(importedCharacter) {
   addSubclassWithFeatures(character.subclasses);
   addSubclassWithFeatures(character.subclass);
   add(character.classFeatures, "classFeatures", { embed: false });
-  add(character.backgroundId, "backgrounds");
+  add(getNetherscrollsCharacterBackgroundId(character), "backgrounds");
   add(character.raceId, "races");
   // Actor items are complete direct Foundry payloads. Add them last so the
   // character-record form wins when both represent the same Netherscrolls id,
@@ -2902,9 +2935,7 @@ async function repairNetherscrollsCharacterActorDocumentLinks(
       path: "system.details.background",
       label: "background",
       types: new Set(["background"]),
-      netherscrollsId: normalizeNetherscrollsReferenceValue(
-        character?.backgroundId ?? character?.background?.backgroundId ?? character?.background?.id
-      ),
+      netherscrollsId: getNetherscrollsCharacterBackgroundId(character),
     },
     {
       path: "system.details.race",
@@ -2954,6 +2985,19 @@ async function repairNetherscrollsCharacterActorDocumentLinks(
 
   if (Object.keys(updates).length) await actor.update(updates);
   return repaired;
+}
+
+function getNetherscrollsCharacterBackgroundId(character) {
+  return normalizeNetherscrollsReferenceValue(
+    character?.backgroundId ??
+    character?.background?.backgroundId ??
+    character?.background?._id ??
+    character?.background?.id ??
+    character?.backgrounds?.backgroundId ??
+    character?.backgrounds?._id ??
+    character?.backgrounds?.id ??
+    character?.background
+  );
 }
 
 function getNetherscrollsCharacterOriginalClassId(character) {

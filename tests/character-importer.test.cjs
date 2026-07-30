@@ -356,6 +356,7 @@ test("imports skill training, expertise, abilities, and manual bonuses", () => {
   importer.normalizeNetherscrollsCharacterActorCreationData(actor, {
     skills: {
       intimidation: { ability: "cha", prof: 1, misc: 2, bonus: 1 },
+      persuasion: { ability: "cha", prof: 1, misc: 4, bonus: 0 },
       stealth: { ability: "dex", expertise: true, misc: 0 },
       "animal handling": { ability: "wis", prof: "half" },
     },
@@ -364,12 +365,42 @@ test("imports skill training, expertise, abilities, and manual bonuses", () => {
   assert.equal(actor.system.skills.itm.ability, "cha");
   assert.equal(actor.system.skills.itm.value, 1);
   assert.equal(actor.system.skills.itm.bonuses.check, "3");
+  assert.equal(actor.system.skills.per.ability, "cha");
+  assert.equal(actor.system.skills.per.value, 1);
+  assert.equal(actor.system.skills.per.bonuses.check, "4");
   assert.equal(actor.system.skills.ste.ability, "dex");
   assert.equal(actor.system.skills.ste.value, 2);
   assert.equal(actor.system.skills.ste.bonuses.check, "");
   assert.equal(actor.system.skills.ani.ability, "wis");
   assert.equal(actor.system.skills.ani.value, 0.5);
   assert.equal(actor.system.skills.ani.bonuses.check, "");
+});
+
+test("uses current character ability scores when the Foundry snapshot is stale", () => {
+  const { importer } = createHarness();
+  const actor = {
+    name: "Séléné",
+    system: {
+      traits: { size: "med" },
+      attributes: {},
+      abilities: {
+        str: { value: 10, proficient: 1 },
+        cha: { value: 18, bonuses: { save: "2" } },
+      },
+    },
+  };
+
+  importer.normalizeNetherscrollsCharacterActorCreationData(actor, {
+    abilities: {
+      str: { score: 12 },
+      cha: { score: 28 },
+    },
+  });
+
+  assert.equal(actor.system.abilities.str.value, 12);
+  assert.equal(actor.system.abilities.str.proficient, 1);
+  assert.equal(actor.system.abilities.cha.value, 28);
+  assert.equal(actor.system.abilities.cha.bonuses.save, "2");
 });
 
 test("converts portable active effects into D&D5e skill and save effects", () => {
@@ -455,6 +486,20 @@ test("uses real website reference shapes without treating Foundry _id as identit
     foundryActor: { items: [] },
   });
   assert.deepEqual(Array.from(blankOptionalLinks), []);
+});
+
+test("collects a populated character background reference", () => {
+  const { importer } = createHarness();
+  const sources = importer.collectNetherscrollsCharacterItemSources({
+    character: {
+      background: { _id: "background-1", name: "Acolyte" },
+    },
+    foundryActor: { items: [] },
+  });
+
+  assert.equal(sources.length, 1);
+  assert.equal(sources[0].dataset, "backgrounds");
+  assert.equal(sources[0].netherscrollsId, "background-1");
 });
 
 test("uses permanent public Actor images verbatim and rejects unresolved object keys", () => {
