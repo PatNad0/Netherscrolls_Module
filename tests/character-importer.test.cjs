@@ -434,7 +434,7 @@ test("converts portable active effects into D&D5e skill and save effects", () =>
   assert.equal(effects[2].changes[0].key, "system.skills.per.bonuses.check");
 });
 
-test("uses real website reference shapes without treating Foundry _id as identity", () => {
+test("uses website references and ignores Foundry Actor item snapshots", () => {
   const { importer } = createHarness();
   assert.equal(
     importer.getNetherscrollsCharacterSourceId({
@@ -453,6 +453,11 @@ test("uses real website reference shapes without treating Foundry _id as identit
         type: "loot",
         system: { quantity: 3 },
         flags: { netherscrolls: { id: "item-1" } },
+      }, {
+        _id: "ddb-spell",
+        name: "Spell",
+        type: "spell",
+        system: { prepared: true },
       }],
     },
     character: {
@@ -480,14 +485,18 @@ test("uses real website reference shapes without treating Foundry _id as identit
     1
   );
   assert.equal(
-    sources.find((entry) => entry.netherscrollsId === "item-1").source.system.quantity,
-    3
+    sources.find((entry) => entry.netherscrollsId === "item-1").source.system,
+    undefined
   );
   assert.equal(byDataset.classes.netherscrollsId, "class-1");
   assert.equal(byDataset.classes.source.level, 7);
   assert.equal(byDataset.subclasses.netherscrollsId, "subclass-1");
   assert.equal(byDataset.races.netherscrollsId, "race-1");
   assert.equal(byDataset.backgrounds.netherscrollsId, "background-1");
+  const spellSource = sources.find((entry) => entry.netherscrollsId === "spell-1");
+  assert.equal(spellSource.source.system, undefined);
+  assert.equal(sources.some((entry) => entry.source._id === "foundry-local"), false);
+  assert.equal(sources.some((entry) => entry.source._id === "ddb-spell"), false);
 
   const blankOptionalLinks = importer.collectNetherscrollsCharacterItemSources({
     character: {
@@ -854,17 +863,18 @@ test("resolves targeted Import selections without using an invalid Foundry flag 
 
   const items = makePack("world.netherscrolls-items");
   context.game.packs.set(items.collection, items);
-  const direct = await importer.resolveNetherscrollsCharacterItemSource(
-    {
-      netherscrollsId: "missing-direct",
-      name: "Direct",
-      type: "loot",
-      system: { quantity: 2 },
-    },
-    "items"
+  await assert.rejects(
+    importer.resolveNetherscrollsCharacterItemSource(
+      {
+        netherscrollsId: "missing-direct",
+        name: "Direct",
+        type: "loot",
+        system: { quantity: 2 },
+      },
+      "items"
+    ),
+    /Foundry Import selection/
   );
-  assert.equal(direct.item.name, "Direct");
-  assert.equal(direct.item.type, "loot");
   await assert.rejects(
     importer.resolveNetherscrollsCharacterItemSource(
       { netherscrollsId: "missing-incomplete" },
@@ -1732,7 +1742,7 @@ test("builds the exact unpruned schema-v2 Foundry Export envelope", () => {
     type: "character",
     flags: { netherscrolls: { characterId: "character-1" }, anotherModule: { keep: true } },
     _stats: { createdTime: 1700000000000, modifiedTime: 1700000001000, lastModifiedBy: "gm-1" },
-    system: { attributes: { hp: { value: 8, max: 10 } } },
+    system: { attributes: { hp: { value: 8, max: 10 } }, abilities: { str: { value: 10 } } },
     prototypeToken: { disposition: 1 },
     effects: [{ _id: "effect-1" }],
     items: [
@@ -1746,11 +1756,19 @@ test("builds the exact unpruned schema-v2 Foundry Export envelope", () => {
         type: "subclass",
         flags: { netherscrolls: { id: "canonical-subclass", classId: "canonical-class" } },
       },
+      {
+        _id: "race-1",
+        type: "race",
+        effects: [{
+          name: "Aasimar ability bonus",
+          changes: [{ key: "system.abilities.str.value", mode: 2, value: "2" }],
+        }],
+      },
     ],
   };
   const transformedActor = {
     ...clone(sourceActor),
-    system: { attributes: { hp: { value: 12, max: 12 } } },
+    system: { attributes: { hp: { value: 12, max: 12 } }, abilities: { str: { value: 12 } } },
     prototypeToken: { disposition: 1, sight: { enabled: true } },
   };
   const actor = {
@@ -1766,16 +1784,18 @@ test("builds the exact unpruned schema-v2 Foundry Export envelope", () => {
   assert.equal(payload.systemVersion, context.game.system.version);
   assert.deepEqual(payload.actor, sourceActor);
   assert.deepEqual(clone(payload.preparedActor), {
-    system: transformedActor.system,
+    system: sourceActor.system,
     prototypeToken: transformedActor.prototypeToken,
   });
   assert.equal(payload.actor.flags.anotherModule.keep, true);
   assert.equal(payload.actor.effects.length, 1);
   assert.equal(payload.actor.flags.netherscrolls.characterId, "character-1");
-  assert.equal(payload.actor.items.length, 2);
+  assert.equal(payload.actor.items.length, 3);
   assert.equal(payload.actor.items[0].flags.netherscrolls.id, "canonical-item");
   assert.equal(payload.actor.items[1].flags.netherscrolls.id, "canonical-subclass");
   assert.equal(payload.actor.items[1].flags.netherscrolls.classId, "canonical-class");
+  assert.deepEqual(payload.actor.items[2].effects[0].changes, [{ key: "system.abilities.str.value", mode: 2, value: "2" }]);
+  assert.equal(payload.preparedActor.system.abilities.str.value, 10);
   assert.equal(payload.actor._stats.modifiedTime, 1700000001000);
   assert.equal(payload.actor._stats.lastModifiedBy, "gm-1");
   assert.equal(payload.actor.items[0]._stats.modifiedTime, 1700000002000);

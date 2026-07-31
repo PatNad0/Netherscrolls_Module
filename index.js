@@ -2452,7 +2452,6 @@ function collectNetherscrollsCharacterItemSources(importedCharacter) {
       });
     }
   };
-  const actor = importedCharacter?.foundryActor ?? {};
   const character = importedCharacter?.character ?? {};
   const addSubclassWithFeatures = (value) => {
     const subclasses = Array.isArray(value) ? value : value == null ? [] : [value];
@@ -2487,10 +2486,6 @@ function collectNetherscrollsCharacterItemSources(importedCharacter) {
   add(character.classFeatures, "classFeatures", { embed: false });
   add(getNetherscrollsCharacterBackgroundId(character), "backgrounds");
   add(character.raceId, "races");
-  // Actor items are complete direct Foundry payloads. Add them last so the
-  // character-record form wins when both represent the same Netherscrolls id,
-  // and never interpret their local Foundry `_id` as a Netherscrolls id.
-  add(actor.items, null, { allowRecordId: false });
 
   const deduplicated = [];
   const byKey = new Map();
@@ -2514,9 +2509,6 @@ function collectNetherscrollsCharacterItemSources(importedCharacter) {
     }
 
     const existing = deduplicated[existingIndex];
-    // Character references are collected first and carry semantic fields such
-    // as class level. Merge a later Actor item into that reference so mutable
-    // state such as quantity/uses is retained without creating a second item.
     existing.source = mergeNetherscrollsDefaults(existing.source, source);
     existing.embed = existing.embed && descriptor.embed;
   }
@@ -2588,24 +2580,19 @@ async function resolveNetherscrollsCharacterItemSource(
     normalizeNetherscrollsReferenceValue(suppliedNetherscrollsId) ??
     getNetherscrollsCharacterSourceId(source);
   const direct = getNetherscrollsFoundryItemPayload(source) ?? source;
-  let document = netherscrollsId
-    ? await findNetherscrollsCompendiumDocumentById(dataset, netherscrollsId)
-    : null;
-  if (netherscrollsId) {
-    debugNetherscrollsCharacterImport(
-      document ? "Matched character content to an imported compendium document." : "No imported compendium document matched character content after targeted fetch.",
-      { dataset, netherscrollsId, documentId: document?.id ?? null, documentName: document?.name ?? null }
-    );
+  if (!netherscrollsId) {
+    const message = `Character ${dataset} content is missing its Netherscrolls id and cannot be recreated from the library.`;
+    if (required) throw new Error(message);
+    console.warn(`${MODULE_ID} | ${message}`);
+    return { item: null };
   }
-
-  const hasCompleteFoundryItem =
-    direct &&
-    typeof direct === "object" &&
-    toTrimmedStringOrNull(direct?.type) &&
-    direct?.system &&
-    typeof direct.system === "object";
-  if (!document && !hasCompleteFoundryItem) {
-    const message = `Could not resolve required Netherscrolls ${dataset} ${netherscrollsId ?? "reference"} through Foundry Import selection.`;
+  const document = await findNetherscrollsCompendiumDocumentById(dataset, netherscrollsId);
+  debugNetherscrollsCharacterImport(
+    document ? "Matched character content to an imported compendium document." : "No imported compendium document matched character content after targeted fetch.",
+    { dataset, netherscrollsId, documentId: document?.id ?? null, documentName: document?.name ?? null }
+  );
+  if (!document) {
+    const message = `Could not resolve required Netherscrolls ${dataset} ${netherscrollsId} through Foundry Import selection.`;
     if (required) throw new Error(message);
     console.warn(`${MODULE_ID} | ${message}`);
     return { item: null };
@@ -10305,9 +10292,26 @@ async function exportActorToNetherscrolls(actor) {
     console.warn(`${MODULE_ID} | Unable to repair class features before Foundry Export.`, err);
   }
 
+  const exportPayload = buildFoundryExportPayload(actor);
+  const imageJobs = collectNetherscrollsFoundryExportImageJobs(exportPayload);
+  if (imageJobs.length) {
+    ui?.notifications?.info?.(`${actorName}: ${imageJobs.length} image${imageJobs.length === 1 ? "" : "s"} to move to Netherscrolls.`);
+  } else {
+    ui?.notifications?.info?.(`${actorName}'s artwork is already ready. Sending the character sheet...`);
+  }
+
+  let preparedImageCount = 0;
   let payload;
   try {
-    payload = await buildNetherscrollsImageReadyFoundryExportPayload(actor);
+    payload = await prepareNetherscrollsFoundryExportImages(actor, exportPayload, {
+      onImageProgress: ({ label }) => {
+        preparedImageCount += 1;
+        ui?.notifications?.info?.(`${actorName}: moving image ${preparedImageCount} of ${imageJobs.length} (${label})...`);
+      },
+    });
+    if (imageJobs.length) {
+      ui?.notifications?.info?.(`${actorName}'s artwork is ready. Sending the character sheet...`);
+    }
   } catch (err) {
     console.error(`${MODULE_ID} | Foundry Export could not prepare its images.`, err);
     ui?.notifications?.error?.(`Foundry Export could not prepare its images: ${err?.message ?? err}`);
@@ -10725,7 +10729,8 @@ function buildFoundryExportPayload(actor) {
     systemVersion: String(game?.system?.version ?? ""),
     actor: sourceActor,
     preparedActor: {
-      system: preparedActor?.system ?? {},
+      // Netherscrolls applies Active Effects itself. Send only the base Actor system here so effects (including race effects) are never baked into stats.
+      system: duplicateNetherscrollsData(sourceActor?.system ?? {}),
       prototypeToken: preparedActor?.prototypeToken ?? {},
     },
   };
@@ -10739,7 +10744,7 @@ async function buildNetherscrollsImageReadyFoundryExportPayload(actor, options =
 async function prepareNetherscrollsFoundryExportImages(
   actor,
   payload,
-  { apiKey = getNetherscrollsApiKey(), cache = new Map() } = {}
+  { apiKey = getNetherscrollsApiKey(), cache = new Map(), onImageProgress = null } = {}
 ) {
   const actorData = payload?.actor;
   if (!actorData || typeof actorData !== "object") return payload;
@@ -10748,8 +10753,9 @@ async function prepareNetherscrollsFoundryExportImages(
   await replaceNetherscrollsExportImage(actor, actorData, {
     apiKey,
     cache,
-    label: actorData.name ?? actor?.name ?? "character",
+    label: `${actorData.name ?? actor?.name ?? "character"} portrait`,
     isCharacter: true,
+    onImageProgress,
   });
   if (actorImage && actorImage !== actorData.img) {
     replaceNetherscrollsExportTokenImage(payload?.preparedActor, actorImage, actorData.img);
@@ -10757,7 +10763,8 @@ async function prepareNetherscrollsFoundryExportImages(
   await replaceNetherscrollsExportActorTokenImage(actor, actorData, payload?.preparedActor, {
     apiKey,
     cache,
-    label: actorData.name ?? actor?.name ?? "character",
+    label: `${actorData.name ?? actor?.name ?? "character"} token`,
+    onImageProgress,
   });
 
   const itemsById = new Map(
@@ -10770,13 +10777,47 @@ async function prepareNetherscrollsFoundryExportImages(
       apiKey,
       cache,
       label: itemData.name ?? itemData.type ?? "item",
+      onImageProgress,
     });
   }
 
   return payload;
 }
 
-async function replaceNetherscrollsExportImage(document, data, { apiKey, cache, label, isCharacter = false }) {
+function collectNetherscrollsFoundryExportImageJobs(payload) {
+  const jobs = [];
+  const seen = new Set();
+  const add = (image, module, label) => {
+    if (!isNetherscrollsFoundryExportUploadCandidate(image)) return;
+    const key = `${module}:${image}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    jobs.push({ image, module, label });
+  };
+
+  const actorData = payload?.actor;
+  if (!actorData || typeof actorData !== "object") return jobs;
+  const actorName = actorData.name ?? "character";
+  add(actorData.img, "characters", `${actorName} portrait`);
+  add(actorData?.prototypeToken?.texture?.src, "characters", `${actorName} token`);
+  for (const itemData of Array.isArray(actorData.items) ? actorData.items : []) {
+    if (!itemData || typeof itemData !== "object") continue;
+    add(itemData.img, getNetherscrollsExportImageModule(itemData, false), itemData.name ?? itemData.type ?? "item");
+  }
+  return jobs;
+}
+
+function isNetherscrollsFoundryExportUploadCandidate(value) {
+  const image = toTrimmedStringOrNull(value);
+  return Boolean(
+    image &&
+    image !== NETHERSCROLLS_DEFAULT_IMAGE &&
+    !isNetherscrollsExportSvg(image) &&
+    !isNetherscrollsExportImageReference(image) &&
+    isFoundryServerImageReference(image)
+  );
+}
+async function replaceNetherscrollsExportImage(document, data, { apiKey, cache, label, isCharacter = false, onImageProgress = null }) {
   const image = toTrimmedStringOrNull(data?.img);
   if (!image || image === NETHERSCROLLS_DEFAULT_IMAGE || isNetherscrollsExportSvg(image)) return;
 
@@ -10786,13 +10827,12 @@ async function replaceNetherscrollsExportImage(document, data, { apiKey, cache, 
   const cachedImage = cachedKey && (cachedSource === image || cachedUrl === image)
     ? { key: cachedKey, url: cachedUrl }
     : null;
-  if (!cachedImage && (
-    isNetherscrollsExportImageReference(image) ||
-    !isFoundryServerImageReference(image)
-  )) return;
+  if (!cachedImage && !isNetherscrollsFoundryExportUploadCandidate(image)) return;
   const module = getNetherscrollsExportImageModule(data, isCharacter);
   const cacheKey = `${module}:${image}`;
-  const uploadedImage = cachedImage || cache.get(cacheKey) || (await uploadNetherscrollsExportImage(image, { apiKey, label, module }));
+  const cachedUpload = cachedImage || cache.get(cacheKey);
+  if (!cachedUpload) onImageProgress?.({ label, module });
+  const uploadedImage = cachedUpload || await uploadNetherscrollsExportImage(image, { apiKey, label, module });
   cache.set(cacheKey, uploadedImage);
 
   data.img = uploadedImage.url;
@@ -10800,18 +10840,16 @@ async function replaceNetherscrollsExportImage(document, data, { apiKey, cache, 
   await cacheNetherscrollsExportImage(document, image, uploadedImage, { isCharacter });
 }
 
-async function replaceNetherscrollsExportActorTokenImage(actor, actorData, preparedActor, { apiKey, cache, label }) {
+async function replaceNetherscrollsExportActorTokenImage(actor, actorData, preparedActor, { apiKey, cache, label, onImageProgress = null }) {
   const image = toTrimmedStringOrNull(actorData?.prototypeToken?.texture?.src);
-  if (
-    !image ||
-    isNetherscrollsExportImageReference(image) ||
-    !isFoundryServerImageReference(image)
-  ) return;
+  if (!isNetherscrollsFoundryExportUploadCandidate(image)) return;
 
   const cacheKey = `characters:${image}`;
-  const uploadedImage = cache.get(cacheKey) || await uploadNetherscrollsExportImage(image, {
+  const cachedUpload = cache.get(cacheKey);
+  if (!cachedUpload) onImageProgress?.({ label, module: "characters" });
+  const uploadedImage = cachedUpload || await uploadNetherscrollsExportImage(image, {
     apiKey,
-    label: `${label ?? "character"} token`,
+    label,
     module: "characters",
   });
   cache.set(cacheKey, uploadedImage);
