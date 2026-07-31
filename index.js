@@ -10723,6 +10723,14 @@ function buildFoundryExportPayload(actor) {
   }
 
   const sourceActor = actor.toObject();
+  // Class/subclass features are recreated by Netherscrolls from the selected
+  // class level and subclass. They are Foundry Items of type `feat`, but are
+  // not character feats and must not be exported as such.
+  if (Array.isArray(sourceActor.items)) {
+    sourceActor.items = sourceActor.items.filter(
+      (item) => !isNetherscrollsImportedClassFeatureDocument(item)
+    );
+  }
   const preparedActor = actor.toObject(false);
   return {
     schemaVersion: 2,

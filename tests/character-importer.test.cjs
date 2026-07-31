@@ -1733,7 +1733,7 @@ test("exposes the Foundry Import material submit action", () => {
   assert.match(template, /Foundry Import Material/);
 });
 
-test("builds the exact unpruned schema-v2 Foundry Export envelope", () => {
+test("omits Netherscrolls class features while preserving real feats in the Foundry Export envelope", () => {
   const { context, importer } = createHarness();
   const calls = [];
   const sourceActor = {
@@ -1764,6 +1764,18 @@ test("builds the exact unpruned schema-v2 Foundry Export envelope", () => {
           changes: [{ key: "system.abilities.str.value", mode: 2, value: "2" }],
         }],
       },
+      {
+        _id: "class-feature-1",
+        name: "Rage",
+        type: "feat",
+        flags: { netherscrolls: { id: "rage-1" }, "netherscrolls-module": { featureScope: "class", parentClassNetherscrollsId: "class-1" } },
+      },
+      {
+        _id: "feat-1",
+        name: "Alert",
+        type: "feat",
+        flags: { netherscrolls: { id: "alert-1" } },
+      },
     ],
   };
   const transformedActor = {
@@ -1782,7 +1794,9 @@ test("builds the exact unpruned schema-v2 Foundry Export envelope", () => {
   assert.deepEqual(calls, [true, false]);
   assert.equal(payload.schemaVersion, 2);
   assert.equal(payload.systemVersion, context.game.system.version);
-  assert.deepEqual(payload.actor, sourceActor);
+  const expectedActor = clone(sourceActor);
+  expectedActor.items = expectedActor.items.filter((item) => item._id !== "class-feature-1");
+  assert.deepEqual(payload.actor, expectedActor);
   assert.deepEqual(clone(payload.preparedActor), {
     system: sourceActor.system,
     prototypeToken: transformedActor.prototypeToken,
@@ -1790,11 +1804,13 @@ test("builds the exact unpruned schema-v2 Foundry Export envelope", () => {
   assert.equal(payload.actor.flags.anotherModule.keep, true);
   assert.equal(payload.actor.effects.length, 1);
   assert.equal(payload.actor.flags.netherscrolls.characterId, "character-1");
-  assert.equal(payload.actor.items.length, 3);
+  assert.equal(payload.actor.items.length, 4);
   assert.equal(payload.actor.items[0].flags.netherscrolls.id, "canonical-item");
   assert.equal(payload.actor.items[1].flags.netherscrolls.id, "canonical-subclass");
   assert.equal(payload.actor.items[1].flags.netherscrolls.classId, "canonical-class");
   assert.deepEqual(payload.actor.items[2].effects[0].changes, [{ key: "system.abilities.str.value", mode: 2, value: "2" }]);
+  assert.equal(payload.actor.items.some((item) => item._id === "class-feature-1"), false);
+  assert.equal(payload.actor.items.some((item) => item._id === "feat-1"), true);
   assert.equal(payload.preparedActor.system.abilities.str.value, 10);
   assert.equal(payload.actor._stats.modifiedTime, 1700000001000);
   assert.equal(payload.actor._stats.lastModifiedBy, "gm-1");
