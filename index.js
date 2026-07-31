@@ -10295,7 +10295,7 @@ function injectFoundryExportButtonV2(app, element) {
 async function exportActorToNetherscrolls(actor) {
   if (!actor) return;
   const actorName = toTrimmedStringOrNull(actor.name) ?? "your character";
-  ui?.notifications?.info?.(`Sending ${actorName} through the Netherscrolls? ?`);
+  ui?.notifications?.info?.(`Sending ${actorName} through the Netherscrolls...`);
   try {
     const repairResult = await repairNetherscrollsActorClassFeatures(actor, { notify: false });
     if (repairResult.created > 0) {
@@ -10778,7 +10778,7 @@ async function prepareNetherscrollsFoundryExportImages(
 
 async function replaceNetherscrollsExportImage(document, data, { apiKey, cache, label, isCharacter = false }) {
   const image = toTrimmedStringOrNull(data?.img);
-  if (!image || image === NETHERSCROLLS_DEFAULT_IMAGE) return;
+  if (!image || image === NETHERSCROLLS_DEFAULT_IMAGE || isNetherscrollsExportSvg(image)) return;
 
   const cachedSource = toTrimmedStringOrNull(data?.flags?.[MODULE_ID]?.exportedImageSource);
   const cachedKey = toTrimmedStringOrNull(data?.flags?.[MODULE_ID]?.exportedImageKey);
@@ -10867,6 +10867,15 @@ function isFoundryServerImageReference(value) {
   }
 }
 
+function isNetherscrollsExportSvg(value) {
+  const image = toTrimmedStringOrNull(value);
+  if (!image) return false;
+  try {
+    return /\.svg$/i.test(new URL(image, globalThis.location?.origin ?? "http://foundry.local").pathname);
+  } catch {
+    return /\.svg(?:[?#]|$)/i.test(image);
+  }
+}
 function getNetherscrollsExportImageModule(data, isCharacter) {
   if (isCharacter) return "characters";
   const type = toTrimmedStringOrNull(data?.type)?.toLowerCase();
@@ -11084,7 +11093,7 @@ async function sendFoundryActorExport(actor, payload = buildFoundryExportPayload
     }
     await applyFoundryExportCanonicalIds(actor, data);
     const name = data?.data?.name ?? actor?.name ?? "actor";
-    ui?.notifications?.info?.(`? ${name} has arrived safely in Netherscrolls!`);
+    ui?.notifications?.info?.(`${name} has arrived safely in Netherscrolls!`);
     return data;
   } catch (err) {
     console.error(`${MODULE_ID} | Foundry Export failed.`, err);

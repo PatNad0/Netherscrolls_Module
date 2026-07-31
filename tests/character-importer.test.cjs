@@ -1806,6 +1806,12 @@ test("uploads non-Netherscrolls Actor and embedded Item images before export", a
     type: "loot",
     img: "https://assets.example.com/not-hosted-by-foundry.png",
     system: {},
+  }, {
+    _id: "svg-item",
+    name: "Default SVG image",
+    type: "loot",
+    img: "icons/svg/item-bag.svg",
+    system: {},
   }]);
   context.fetch = async (url, options = {}) => {
     calls.push({ url: String(url), options });
@@ -1820,7 +1826,8 @@ test("uploads non-Netherscrolls Actor and embedded Item images before export", a
 
   assert.match(payload.actor.img, /^https:\/\/api\.netherscrolls\.ca\/media\/image\/upload-\d+\.png$/);
   for (const item of payload.actor.items.slice(0, types.length)) assert.match(item.img, /^https:\/\/api\.netherscrolls\.ca\/media\/image\/upload-\d+\.png$/);
-  assert.equal(payload.actor.items.at(-1).img, "https://assets.example.com/not-hosted-by-foundry.png");
+  assert.equal(payload.actor.items[types.length].img, "https://assets.example.com/not-hosted-by-foundry.png");
+  assert.equal(payload.actor.items[types.length + 1].img, "icons/svg/item-bag.svg");
   assert.match(actor.img, /^https:\/\/api\.netherscrolls\.ca\/media\/image\/upload-\d+\.png$/);
   assert.match(actor.items[0].img, /^https:\/\/api\.netherscrolls\.ca\/media\/image\/upload-\d+\.png$/);
   assert.match(payload.actor.prototypeToken.texture.src, /^https:\/\/api\.netherscrolls\.ca\/media\/image\/upload-\d+\.png$/);
