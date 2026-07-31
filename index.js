@@ -847,6 +847,7 @@ const SETTINGS = {
   importFromNetherscroll: "importFromNetherscroll",
   exportButton: "showFoundryExportButton",
   importQueuePolling: "pollFoundryImportQueue",
+  importQueuePollingSafetyReset: "pollFoundryImportQueueSafetyResetV1",
   debug: "debugMode",
   devEnhancedDamage: "devEnhancedDamage",
 };
@@ -902,7 +903,7 @@ Hooks.once("init", () => {
   });
 
   game.settings.register(MODULE_ID, SETTINGS.importQueuePolling, {
-    name: "EXPERIMENTAL ? Poll the Foundry Import queue",
+    name: "EXPERIMENTAL: Poll the Foundry Import queue",
     hint: "Experimental: periodically apply queued campaign characters using the DM or administrator API key.",
     scope: "world",
     config: true,
@@ -911,6 +912,13 @@ Hooks.once("init", () => {
     default: false,
     onChange: (value) => toggleNetherscrollsImportQueuePolling(Boolean(value)),
   });
+  game.settings.register(MODULE_ID, SETTINGS.importQueuePollingSafetyReset, {
+    scope: "world",
+    config: false,
+    type: Boolean,
+    default: false,
+  });
+
 
   game.settings.register(MODULE_ID, SETTINGS.debug, {
     name: "Debug mode",
@@ -1547,6 +1555,16 @@ async function fetchNetherscrollsCampaigns() {
     })
     .filter(Boolean)
     .sort((a, b) => a.label.localeCompare(b.label));
+}
+
+async function disableLegacyNetherscrollsImportQueuePolling() {
+  if (game?.settings?.get(MODULE_ID, SETTINGS.importQueuePollingSafetyReset) === true) return;
+  try {
+    await game.settings.set(MODULE_ID, SETTINGS.importQueuePolling, false);
+    await game.settings.set(MODULE_ID, SETTINGS.importQueuePollingSafetyReset, true);
+  } catch (err) {
+    console.error(`${MODULE_ID} | Unable to disable legacy Foundry Import queue polling.`, err);
+  }
 }
 
 function toggleNetherscrollsImportQueuePolling(enabled) {
@@ -3296,7 +3314,8 @@ function isNetherscrollsImportedCharacterDocument(document, markerFlag, characte
   );
 }
 
-Hooks.once("ready", () => {
+Hooks.once("ready", async () => {
+  await disableLegacyNetherscrollsImportQueuePolling();
   installNetherscrollsSpellbookSectionOrdering();
   toggleRerollInitHook(game.settings.get(MODULE_ID, SETTINGS.rerollInit) === true);
   toggleNpcDeathSaveHook(game.settings.get(MODULE_ID, SETTINGS.npcDeathSave) === true);
@@ -10208,7 +10227,9 @@ function injectFoundryExportButtonV1(app, html) {
   );
 
   exportButton.on("click", () => {
-    exportActorToNetherscrolls(actor).catch(() => {});
+    exportActorToNetherscrolls(actor).catch((err) => {
+      console.error(`${MODULE_ID} | Foundry Export could not be completed.`, err);
+    });
   });
   importButton.on("click", () => {
     importActorFromNetherscrolls(actor).catch(() => {});
@@ -10246,7 +10267,9 @@ function injectFoundryExportButtonV2(app, element) {
   exportButton.title = "Foundry Export";
   exportButton.innerHTML = '<i class="fas fa-cloud-upload-alt"></i><span>Foundry Export</span>';
   exportButton.addEventListener("click", () => {
-    exportActorToNetherscrolls(actor).catch(() => {});
+    exportActorToNetherscrolls(actor).catch((err) => {
+      console.error(`${MODULE_ID} | Foundry Export could not be completed.`, err);
+    });
   });
   const importButton = document.createElement("button");
   importButton.type = "button";
@@ -10280,13 +10303,24 @@ async function exportActorToNetherscrolls(actor) {
     console.warn(`${MODULE_ID} | Unable to repair class features before Foundry Export.`, err);
   }
 
-  const payload = await buildNetherscrollsImageReadyFoundryExportPayload(actor);
+  let payload;
+  try {
+    payload = await buildNetherscrollsImageReadyFoundryExportPayload(actor);
+  } catch (err) {
+    console.error(`${MODULE_ID} | Foundry Export could not prepare its images.`, err);
+    ui?.notifications?.error?.(`Foundry Export could not prepare its images: ${err?.message ?? err}`);
+    throw err;
+  }
   if (isDebugEnabled()) {
-    const content = renderFoundryTransferPayload(payload);
-    ChatMessage.create({
-      speaker: ChatMessage.getSpeaker({ actor }),
-      content,
-    });
+    try {
+      const content = renderFoundryTransferPayload(payload);
+      await ChatMessage.create({
+        speaker: ChatMessage.getSpeaker({ actor }),
+        content,
+      });
+    } catch (err) {
+      console.warn(`${MODULE_ID} | Unable to post Foundry Export debug payload.`, err);
+    }
   }
   return sendFoundryActorExport(actor, payload);
 }
@@ -10708,12 +10742,16 @@ async function prepareNetherscrollsFoundryExportImages(
   const actorData = payload?.actor;
   if (!actorData || typeof actorData !== "object") return payload;
 
+  const actorImage = toTrimmedStringOrNull(actorData.img);
   await replaceNetherscrollsExportImage(actor, actorData, {
     apiKey,
     cache,
     label: actorData.name ?? actor?.name ?? "character",
     isCharacter: true,
   });
+  if (actorImage && actorImage !== actorData.img) {
+    replaceNetherscrollsExportTokenImage(payload?.preparedActor, actorImage, actorData.img);
+  }
 
   const itemsById = new Map(
     Array.from(actor?.items ?? []).map((item) => [String(item?.id ?? item?._id ?? ""), item])
@@ -10748,7 +10786,14 @@ async function replaceNetherscrollsExportImage(document, data, { apiKey, cache, 
   cache.set(cacheKey, uploadedImage);
 
   data.img = uploadedImage.url;
-  await cacheNetherscrollsExportImage(document, image, uploadedImage);
+  replaceNetherscrollsExportTokenImage(data, image, uploadedImage.url);
+  await cacheNetherscrollsExportImage(document, image, uploadedImage, { isCharacter });
+}
+
+function replaceNetherscrollsExportTokenImage(data, source, url) {
+  const tokenImage = toTrimmedStringOrNull(data?.prototypeToken?.texture?.src);
+  if (!url || !tokenImage || tokenImage !== source) return;
+  data.prototypeToken.texture.src = url;
 }
 
 function isNetherscrollsExportImageReference(value) {
@@ -10829,7 +10874,7 @@ function getNetherscrollsExportImageFilename(image, contentType) {
   return `netherscrolls-export.${extension}`;
 }
 
-async function cacheNetherscrollsExportImage(document, source, uploadedImage) {
+async function cacheNetherscrollsExportImage(document, source, uploadedImage, { isCharacter = false } = {}) {
   if (!document?.update) return;
   try {
     const flags = duplicateNetherscrollsData(document.flags ?? {});
@@ -10840,12 +10885,18 @@ async function cacheNetherscrollsExportImage(document, source, uploadedImage) {
       exportedImageUrl: uploadedImage.url ?? "",
       exportedImageSha256: uploadedImage.sha256 ?? "",
     };
-    await document.update({
+    const changes = {
       flags,
       ...(uploadedImage.url ? { img: uploadedImage.url } : {}),
-    });
+    };
+    const tokenImage = toTrimmedStringOrNull(document?.prototypeToken?.texture?.src);
+    if (isCharacter && uploadedImage.url && tokenImage === source) {
+      changes["prototypeToken.texture.src"] = uploadedImage.url;
+    }
+    await document.update(changes);
   } catch (err) {
     console.warn(`${MODULE_ID} | Unable to cache the Netherscrolls image export reference.`, err);
+    if (isCharacter) throw err;
   }
 }
 

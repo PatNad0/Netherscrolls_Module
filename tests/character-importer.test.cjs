@@ -1789,6 +1789,7 @@ test("uploads non-Netherscrolls Actor and embedded Item images before export", a
     name: "Hero",
     type: "character",
     img: "modules/test/hero.png",
+    prototypeToken: { texture: { src: "modules/test/hero.png" } },
   });
   const types = ["loot", "feat", "background", "class", "subclass", "spell", "race"];
   await actor.createEmbeddedDocuments("Item", types.map((type, index) => ({
@@ -1821,6 +1822,9 @@ test("uploads non-Netherscrolls Actor and embedded Item images before export", a
   for (const item of payload.actor.items) assert.match(item.img, /^https:\/\/api\.netherscrolls\.ca\/media\/image\/upload-\d+\.png$/);
   assert.match(actor.img, /^https:\/\/api\.netherscrolls\.ca\/media\/image\/upload-\d+\.png$/);
   assert.match(actor.items[0].img, /^https:\/\/api\.netherscrolls\.ca\/media\/image\/upload-\d+\.png$/);
+  assert.match(payload.actor.prototypeToken.texture.src, /^https:\/\/api\.netherscrolls\.ca\/media\/image\/upload-\d+\.png$/);
+  assert.match(payload.preparedActor.prototypeToken.texture.src, /^https:\/\/api\.netherscrolls\.ca\/media\/image\/upload-\d+\.png$/);
+  assert.match(actor.prototypeToken.texture.src, /^https:\/\/api\.netherscrolls\.ca\/media\/image\/upload-\d+\.png$/);
   const uploads = calls.filter((entry) => entry.options.method === "POST");
   assert.equal(calls.length, (types.length + 2) * 2);
   assert.equal(uploads.length, types.length + 2);
