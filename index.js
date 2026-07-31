@@ -10779,7 +10779,10 @@ async function replaceNetherscrollsExportImage(document, data, { apiKey, cache, 
   const cachedImage = cachedKey && (cachedSource === image || cachedUrl === image)
     ? { key: cachedKey, url: cachedUrl }
     : null;
-  if (!cachedImage && isNetherscrollsExportImageReference(image)) return;
+  if (!cachedImage && (
+    isNetherscrollsExportImageReference(image) ||
+    !isFoundryServerImageReference(image)
+  )) return;
   const module = getNetherscrollsExportImageModule(data, isCharacter);
   const cacheKey = `${module}:${image}`;
   const uploadedImage = cachedImage || cache.get(cacheKey) || (await uploadNetherscrollsExportImage(image, { apiKey, label, module }));
@@ -10802,6 +10805,17 @@ function isNetherscrollsExportImageReference(value) {
   try {
     const hostname = new URL(image, globalThis.location?.origin ?? "http://foundry.local").hostname.toLowerCase();
     return hostname === "netherscrolls.ca" || hostname.endsWith(".netherscrolls.ca");
+  } catch {
+    return false;
+  }
+}
+
+function isFoundryServerImageReference(value) {
+  const image = toTrimmedStringOrNull(value);
+  if (!image || /^(?:data|blob):/i.test(image)) return false;
+  try {
+    const origin = globalThis.location?.origin ?? "http://foundry.local";
+    return new URL(image, origin).origin === new URL(origin).origin;
   } catch {
     return false;
   }
