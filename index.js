@@ -902,13 +902,13 @@ Hooks.once("init", () => {
   });
 
   game.settings.register(MODULE_ID, SETTINGS.importQueuePolling, {
-    name: "Poll the Foundry Import queue",
-    hint: "Periodically apply queued campaign characters using the DM or administrator API key.",
+    name: "EXPERIMENTAL ? Poll the Foundry Import queue",
+    hint: "Experimental: periodically apply queued campaign characters using the DM or administrator API key.",
     scope: "world",
     config: true,
     restricted: true,
     type: Boolean,
-    default: true,
+    default: false,
     onChange: (value) => toggleNetherscrollsImportQueuePolling(Boolean(value)),
   });
 
@@ -10741,12 +10741,13 @@ async function replaceNetherscrollsExportImage(document, data, { apiKey, cache, 
   const cachedImage = cachedKey && (cachedSource === image || cachedUrl === image)
     ? { key: cachedKey, url: cachedUrl }
     : null;
-  if (!cachedImage && (isNetherscrollsExportImageReference(image) || !isFoundryHostedImageReference(image))) return;
-  const uploadedImage = cachedImage || cache.get(image) || (await uploadNetherscrollsExportImage(image, { apiKey, label }));
-  cache.set(image, uploadedImage);
+  if (!cachedImage && isNetherscrollsExportImageReference(image)) return;
+  const module = getNetherscrollsExportImageModule(data, isCharacter);
+  const cacheKey = `${module}:${image}`;
+  const uploadedImage = cachedImage || cache.get(cacheKey) || (await uploadNetherscrollsExportImage(image, { apiKey, label, module }));
+  cache.set(cacheKey, uploadedImage);
 
-  data.img = uploadedImage.key;
-  if (isCharacter) data.ns_ImageLink = uploadedImage.key;
+  data.img = uploadedImage.url;
   await cacheNetherscrollsExportImage(document, image, uploadedImage);
 }
 
@@ -10761,28 +10762,35 @@ function isNetherscrollsExportImageReference(value) {
   }
 }
 
-function isFoundryHostedImageReference(value) {
-  const image = toTrimmedStringOrNull(value);
-  if (!image || /^data:/i.test(image)) return false;
-  if (!/^https?:\/\//i.test(image)) return !image.startsWith("//");
-  try {
-    const foundryOrigin = globalThis.location?.origin;
-    return Boolean(foundryOrigin && new URL(image).origin === foundryOrigin);
-  } catch {
-    return false;
-  }
+function getNetherscrollsExportImageModule(data, isCharacter) {
+  if (isCharacter) return "characters";
+  const type = toTrimmedStringOrNull(data?.type)?.toLowerCase();
+  if (["feats", "races", "backgrounds", "classes", "subclasses", "spells"].includes(type)) return type;
+  const moduleByType = {
+    feat: "feats",
+    race: "races",
+    background: "backgrounds",
+    class: "classes",
+    subclass: "subclasses",
+    spell: "spells",
+  };
+  if (moduleByType[type]) return moduleByType[type];
+  return "items";
 }
 
 
-async function uploadNetherscrollsExportImage(image, { apiKey, label }) {
+async function uploadNetherscrollsExportImage(image, { apiKey, label, module }) {
   if (!apiKey) throw new Error("Netherscrolls API Key is missing. Set it in Module Settings.");
   const imageResponse = await fetch(image);
   if (!imageResponse?.ok) {
     throw new Error(`Could not read the image for ${label ?? "this export"} before uploading it to Netherscrolls.`);
   }
   const blob = await imageResponse.blob();
+  const sha256 = await getNetherscrollsImageSha256(blob);
   const formData = new FormData();
   formData.append("image", blob, getNetherscrollsExportImageFilename(image, blob?.type));
+  formData.append("module", module);
+  formData.append("sha256", sha256);
 
   const response = await fetch(NETHERSCROLLS_MEDIA_IMAGE_ENDPOINT, {
     method: "POST",
@@ -10797,10 +10805,16 @@ async function uploadNetherscrollsExportImage(image, { apiKey, label }) {
   }
   const key = toTrimmedStringOrNull(result?.data?.key ?? result?.key);
   if (!key) throw new Error(`Netherscrolls did not return an image key for ${label ?? "this export"}.`);
-  return {
-    key,
-    url: toTrimmedStringOrNull(result?.data?.url ?? result?.url ?? result?.data?.imageUrl ?? result?.imageUrl),
-  };
+  const url = toTrimmedStringOrNull(result?.data?.url ?? result?.url);
+  if (!url) throw new Error(`Netherscrolls did not return an image URL for ${label ?? "this export"}.`);
+  return { key, url, sha256 };
+}
+
+async function getNetherscrollsImageSha256(blob) {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) throw new Error("This Foundry browser does not support SHA-256 image hashing.");
+  const digest = await subtle.digest("SHA-256", await blob.arrayBuffer());
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function getNetherscrollsExportImageFilename(image, contentType) {
@@ -10824,6 +10838,7 @@ async function cacheNetherscrollsExportImage(document, source, uploadedImage) {
       exportedImageSource: source,
       exportedImageKey: uploadedImage.key,
       exportedImageUrl: uploadedImage.url ?? "",
+      exportedImageSha256: uploadedImage.sha256 ?? "",
     };
     await document.update({
       flags,

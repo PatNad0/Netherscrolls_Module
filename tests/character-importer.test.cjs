@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const test = require("node:test");
 const vm = require("node:vm");
+const { webcrypto } = require("node:crypto");
 
 const MODULE_ID = "netherscrolls-module";
 const clone = (value) => JSON.parse(JSON.stringify(value ?? {}));
@@ -83,6 +84,7 @@ function createHarness() {
     URL,
     FormData: globalThis.FormData,
     Blob: globalThis.Blob,
+    crypto: webcrypto,
     setTimeout,
     clearTimeout,
     console: {
@@ -1780,7 +1782,7 @@ test("builds the exact unpruned schema-v2 Foundry Export envelope", () => {
   assert.equal(payload.actor.items[0]._stats.lastModifiedBy, "player-1");
 });
 
-test("uploads Foundry-hosted Actor and embedded Item images before export", async () => {
+test("uploads non-Netherscrolls Actor and embedded Item images before export", async () => {
   const { context, importer } = createHarness();
   const actor = makeActor(context, {
     _id: "actor-1",
@@ -1815,20 +1817,22 @@ test("uploads Foundry-hosted Actor and embedded Item images before export", asyn
   const payload = importer.buildFoundryExportPayload(actor);
   await importer.prepareNetherscrollsFoundryExportImages(actor, payload, { apiKey: "test-key" });
 
-  assert.match(payload.actor.img, /^image\/upload-\d+\.png$/);
-  assert.equal(payload.actor.ns_ImageLink, payload.actor.img);
-  for (const item of payload.actor.items.filter((item) => item._id !== "external-item")) {
-    assert.match(item.img, /^image\/upload-\d+\.png$/);
-  }
-  assert.equal(payload.actor.items.find((item) => item._id === "external-item").img, "https://assets.example.com/not-hosted-by-foundry.png");
+  assert.match(payload.actor.img, /^https:\/\/api\.netherscrolls\.ca\/media\/image\/upload-\d+\.png$/);
+  for (const item of payload.actor.items) assert.match(item.img, /^https:\/\/api\.netherscrolls\.ca\/media\/image\/upload-\d+\.png$/);
   assert.match(actor.img, /^https:\/\/api\.netherscrolls\.ca\/media\/image\/upload-\d+\.png$/);
   assert.match(actor.items[0].img, /^https:\/\/api\.netherscrolls\.ca\/media\/image\/upload-\d+\.png$/);
-  assert.equal(calls.length, (types.length + 1) * 2);
+  const uploads = calls.filter((entry) => entry.options.method === "POST");
+  assert.equal(calls.length, (types.length + 2) * 2);
+  assert.equal(uploads.length, types.length + 2);
+  assert.deepEqual(uploads.map((entry) => entry.options.body.get("module")).sort(), [
+    "backgrounds", "characters", "classes", "feats", "items", "items", "races", "spells", "subclasses",
+  ].sort());
+  for (const upload of uploads) assert.match(upload.options.body.get("sha256"), /^[a-f0-9]{64}$/);
 
   const repeatPayload = importer.buildFoundryExportPayload(actor);
   await importer.prepareNetherscrollsFoundryExportImages(actor, repeatPayload, { apiKey: "test-key" });
-  assert.equal(calls.length, (types.length + 1) * 2);
-  assert.match(repeatPayload.actor.img, /^image\/upload-\d+\.png$/);
+  assert.equal(calls.length, (types.length + 2) * 2);
+  assert.match(repeatPayload.actor.img, /^https:\/\/api\.netherscrolls\.ca\/media\/image\/upload-\d+\.png$/);
 });
 
 test("writes canonical Actor, Item, and subclass ids from Foundry Export responses", async () => {
