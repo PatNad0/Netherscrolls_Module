@@ -82,6 +82,7 @@ function createHarness() {
   const context = {
     URL,
     FormData: globalThis.FormData,
+    Blob: globalThis.Blob,
     setTimeout,
     clearTimeout,
     console: {
@@ -204,6 +205,8 @@ globalThis.__test = {
   normalizeNetherscrollsCharacterActorCreationData,
   normalizeNetherscrollsImagePath,
   normalizeNetherscrollsImportImagePath,
+  normalizeNetherscrollsItemData,
+  normalizeNetherscrollsFoundryItemData,
   sortNetherscrollsSpellbookSections,
   buildNetherscrollsPortableActiveEffects,
   buildNetherscrollsSourceImportRequest,
@@ -224,6 +227,7 @@ globalThis.__test = {
   findNetherscrollsCampaignCharacterById,
   findNetherscrollsActorByCharacterId,
   buildFoundryExportPayload,
+  prepareNetherscrollsFoundryExportImages,
   applyFoundryExportCanonicalIds,
   exportNetherscrollsCampaignActors,
   importMissingNetherscrollsCharacterDocuments,
@@ -541,6 +545,23 @@ test("uses permanent public Actor images verbatim and rejects unresolved object 
     "item-1"
   );
   assert.equal(item.img, "https://i.postimg.cc/wBj0LZyj/image.png");
+});
+
+test("uses the Netherscrolls default image for items without an imported image", () => {
+  const { importer } = createHarness();
+  const defaultImage = "https://i.postimg.cc/wBj0LZyj/image.png";
+
+  assert.equal(
+    importer.normalizeNetherscrollsItemData({ name: "Image-less Item", type: "equipment" }).img,
+    defaultImage
+  );
+  assert.equal(
+    importer.normalizeNetherscrollsFoundryItemData({
+      name: "Image-less Foundry Item",
+      foundryItem: { name: "Image-less Foundry Item", type: "equipment", system: {} },
+    }).img,
+    defaultImage
+  );
 });
 
 test("keeps compendium data canonical while preserving mutable character state", () => {
@@ -1757,6 +1778,57 @@ test("builds the exact unpruned schema-v2 Foundry Export envelope", () => {
   assert.equal(payload.actor._stats.lastModifiedBy, "gm-1");
   assert.equal(payload.actor.items[0]._stats.modifiedTime, 1700000002000);
   assert.equal(payload.actor.items[0]._stats.lastModifiedBy, "player-1");
+});
+
+test("uploads Foundry-hosted Actor and embedded Item images before export", async () => {
+  const { context, importer } = createHarness();
+  const actor = makeActor(context, {
+    _id: "actor-1",
+    name: "Hero",
+    type: "character",
+    img: "modules/test/hero.png",
+  });
+  const types = ["loot", "feat", "background", "class", "subclass", "spell", "race"];
+  await actor.createEmbeddedDocuments("Item", types.map((type, index) => ({
+    _id: `${type}-${index}`,
+    name: `${type} image`,
+    type,
+    img: `modules/test/${type}.png`,
+    system: {},
+  })));
+  const calls = [];
+  await actor.createEmbeddedDocuments("Item", [{
+    _id: "external-item",
+    name: "External image",
+    type: "loot",
+    img: "https://assets.example.com/not-hosted-by-foundry.png",
+    system: {},
+  }]);
+  context.fetch = async (url, options = {}) => {
+    calls.push({ url: String(url), options });
+    if (options.method === "POST") {
+      return { ok: true, json: async () => ({ data: { key: `image/upload-${calls.length}.png`, url: `https://api.netherscrolls.ca/media/image/upload-${calls.length}.png` } }) };
+    }
+    return { ok: true, blob: async () => new context.Blob(["image"], { type: "image/png" }) };
+  };
+
+  const payload = importer.buildFoundryExportPayload(actor);
+  await importer.prepareNetherscrollsFoundryExportImages(actor, payload, { apiKey: "test-key" });
+
+  assert.match(payload.actor.img, /^image\/upload-\d+\.png$/);
+  assert.equal(payload.actor.ns_ImageLink, payload.actor.img);
+  for (const item of payload.actor.items.filter((item) => item._id !== "external-item")) {
+    assert.match(item.img, /^image\/upload-\d+\.png$/);
+  }
+  assert.equal(payload.actor.items.find((item) => item._id === "external-item").img, "https://assets.example.com/not-hosted-by-foundry.png");
+  assert.match(actor.img, /^https:\/\/api\.netherscrolls\.ca\/media\/image\/upload-\d+\.png$/);
+  assert.match(actor.items[0].img, /^https:\/\/api\.netherscrolls\.ca\/media\/image\/upload-\d+\.png$/);
+  assert.equal(calls.length, (types.length + 1) * 2);
+
+  const repeatPayload = importer.buildFoundryExportPayload(actor);
+  await importer.prepareNetherscrollsFoundryExportImages(actor, repeatPayload, { apiKey: "test-key" });
+  assert.equal(calls.length, (types.length + 1) * 2);
+  assert.match(repeatPayload.actor.img, /^image\/upload-\d+\.png$/);
 });
 
 test("writes canonical Actor, Item, and subclass ids from Foundry Export responses", async () => {

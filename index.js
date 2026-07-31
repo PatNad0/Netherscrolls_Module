@@ -126,6 +126,7 @@ const NETHERSCROLLS_IMPORT_SIDEBAR_FOLDER = {
   sort: 0,
 };
 const NETHERSCROLLS_API_BASE = "https://api.netherscrolls.ca/api/foundry";
+const NETHERSCROLLS_MEDIA_IMAGE_ENDPOINT = `${NETHERSCROLLS_API_BASE}/media/image`;
 const NETHERSCROLLS_EXPORT_ENDPOINT = `${NETHERSCROLLS_API_BASE}/export`;
 const NETHERSCROLLS_IMPORT_SELECTION_ENDPOINT = `${NETHERSCROLLS_API_BASE}/import/selection`;
 const NETHERSCROLLS_SOURCES_ENDPOINT = `${NETHERSCROLLS_API_BASE}/import/sources`;
@@ -6381,7 +6382,9 @@ function normalizeNetherscrollsFoundryItemData(item) {
     type: source.type,
     system: source.system,
   });
-  source.img = normalizeNetherscrollsImportImagePath(source.img, source.image);
+  // Some API rows carry the image alongside the Foundry payload. Prefer either
+  // supplied image, then use the Netherscrolls default when neither is present.
+  source.img = normalizeNetherscrollsImportImagePath(source.img, source.image, item?.img, item?.image);
   source.sort ??= 0;
   source.ownership ??= { default: 0 };
   source.effects ??= [];
@@ -10277,7 +10280,7 @@ async function exportActorToNetherscrolls(actor) {
     console.warn(`${MODULE_ID} | Unable to repair class features before Foundry Export.`, err);
   }
 
-  const payload = buildFoundryExportPayload(actor);
+  const payload = await buildNetherscrollsImageReadyFoundryExportPayload(actor);
   if (isDebugEnabled()) {
     const content = renderFoundryTransferPayload(payload);
     ChatMessage.create({
@@ -10692,6 +10695,145 @@ function buildFoundryExportPayload(actor) {
   };
 }
 
+async function buildNetherscrollsImageReadyFoundryExportPayload(actor, options = {}) {
+  const payload = buildFoundryExportPayload(actor);
+  return prepareNetherscrollsFoundryExportImages(actor, payload, options);
+}
+
+async function prepareNetherscrollsFoundryExportImages(
+  actor,
+  payload,
+  { apiKey = getNetherscrollsApiKey(), cache = new Map() } = {}
+) {
+  const actorData = payload?.actor;
+  if (!actorData || typeof actorData !== "object") return payload;
+
+  await replaceNetherscrollsExportImage(actor, actorData, {
+    apiKey,
+    cache,
+    label: actorData.name ?? actor?.name ?? "character",
+    isCharacter: true,
+  });
+
+  const itemsById = new Map(
+    Array.from(actor?.items ?? []).map((item) => [String(item?.id ?? item?._id ?? ""), item])
+  );
+  for (const itemData of Array.isArray(actorData.items) ? actorData.items : []) {
+    if (!itemData || typeof itemData !== "object") continue;
+    const foundryId = String(itemData._id ?? itemData.id ?? "");
+    await replaceNetherscrollsExportImage(itemsById.get(foundryId) ?? null, itemData, {
+      apiKey,
+      cache,
+      label: itemData.name ?? itemData.type ?? "item",
+    });
+  }
+
+  return payload;
+}
+
+async function replaceNetherscrollsExportImage(document, data, { apiKey, cache, label, isCharacter = false }) {
+  const image = toTrimmedStringOrNull(data?.img);
+  if (!image || image === NETHERSCROLLS_DEFAULT_IMAGE) return;
+
+  const cachedSource = toTrimmedStringOrNull(data?.flags?.[MODULE_ID]?.exportedImageSource);
+  const cachedKey = toTrimmedStringOrNull(data?.flags?.[MODULE_ID]?.exportedImageKey);
+  const cachedUrl = toTrimmedStringOrNull(data?.flags?.[MODULE_ID]?.exportedImageUrl);
+  const cachedImage = cachedKey && (cachedSource === image || cachedUrl === image)
+    ? { key: cachedKey, url: cachedUrl }
+    : null;
+  if (!cachedImage && (isNetherscrollsExportImageReference(image) || !isFoundryHostedImageReference(image))) return;
+  const uploadedImage = cachedImage || cache.get(image) || (await uploadNetherscrollsExportImage(image, { apiKey, label }));
+  cache.set(image, uploadedImage);
+
+  data.img = uploadedImage.key;
+  if (isCharacter) data.ns_ImageLink = uploadedImage.key;
+  await cacheNetherscrollsExportImage(document, image, uploadedImage);
+}
+
+function isNetherscrollsExportImageReference(value) {
+  const image = toTrimmedStringOrNull(value);
+  if (!image || image === NETHERSCROLLS_DEFAULT_IMAGE || /^image\//i.test(image)) return true;
+  try {
+    const hostname = new URL(image, globalThis.location?.origin ?? "http://foundry.local").hostname.toLowerCase();
+    return hostname === "netherscrolls.ca" || hostname.endsWith(".netherscrolls.ca");
+  } catch {
+    return false;
+  }
+}
+
+function isFoundryHostedImageReference(value) {
+  const image = toTrimmedStringOrNull(value);
+  if (!image || /^data:/i.test(image)) return false;
+  if (!/^https?:\/\//i.test(image)) return !image.startsWith("//");
+  try {
+    const foundryOrigin = globalThis.location?.origin;
+    return Boolean(foundryOrigin && new URL(image).origin === foundryOrigin);
+  } catch {
+    return false;
+  }
+}
+
+
+async function uploadNetherscrollsExportImage(image, { apiKey, label }) {
+  if (!apiKey) throw new Error("Netherscrolls API Key is missing. Set it in Module Settings.");
+  const imageResponse = await fetch(image);
+  if (!imageResponse?.ok) {
+    throw new Error(`Could not read the image for ${label ?? "this export"} before uploading it to Netherscrolls.`);
+  }
+  const blob = await imageResponse.blob();
+  const formData = new FormData();
+  formData.append("image", blob, getNetherscrollsExportImageFilename(image, blob?.type));
+
+  const response = await fetch(NETHERSCROLLS_MEDIA_IMAGE_ENDPOINT, {
+    method: "POST",
+    headers: { Accept: "application/json", "x-api-key": apiKey },
+    body: formData,
+  });
+  const result = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(
+      result?.error?.message ?? result?.message ?? `Netherscrolls image upload failed for ${label ?? "this export"}.`
+    );
+  }
+  const key = toTrimmedStringOrNull(result?.data?.key ?? result?.key);
+  if (!key) throw new Error(`Netherscrolls did not return an image key for ${label ?? "this export"}.`);
+  return {
+    key,
+    url: toTrimmedStringOrNull(result?.data?.url ?? result?.url ?? result?.data?.imageUrl ?? result?.imageUrl),
+  };
+}
+
+function getNetherscrollsExportImageFilename(image, contentType) {
+  try {
+    const pathname = new URL(image, globalThis.location?.origin ?? "http://foundry.local").pathname;
+    const filename = pathname.split("/").pop();
+    if (filename && /\.[a-z0-9]{2,5}$/i.test(filename)) return filename;
+  } catch {
+    // Use a safe generated filename below.
+  }
+  const extension = String(contentType ?? "").split("/")[1]?.replace(/[^a-z0-9]/gi, "") || "png";
+  return `netherscrolls-export.${extension}`;
+}
+
+async function cacheNetherscrollsExportImage(document, source, uploadedImage) {
+  if (!document?.update) return;
+  try {
+    const flags = duplicateNetherscrollsData(document.flags ?? {});
+    flags[MODULE_ID] = {
+      ...(flags[MODULE_ID] ?? {}),
+      exportedImageSource: source,
+      exportedImageKey: uploadedImage.key,
+      exportedImageUrl: uploadedImage.url ?? "",
+    };
+    await document.update({
+      flags,
+      ...(uploadedImage.url ? { img: uploadedImage.url } : {}),
+    });
+  } catch (err) {
+    console.warn(`${MODULE_ID} | Unable to cache the Netherscrolls image export reference.`, err);
+  }
+}
+
 function toTrimmedStringOrNull(value) {
   if (value == null) return null;
   const str = String(value).trim();
@@ -10839,11 +10981,20 @@ async function exportNetherscrollsCampaignActors(campaignId, actors, { retryFail
 
   const succeeded = [];
   let failed = [];
+  const imageUploadCache = new Map();
   const maximumAttempts = retryFailedOnce ? 2 : 1;
   for (let attempt = 1; attempt <= maximumAttempts && pending.length; attempt += 1) {
     const endpoint = `${NETHERSCROLLS_CAMPAIGNS_ENDPOINT}/${encodeURIComponent(canonicalCampaignId)}/characters/export`;
     const requestPayload = {
-      characters: pending.map(({ actor }) => buildFoundryExportPayload(actor)),
+      characters: await Promise.all(
+        pending.map(async (entry) => {
+          entry.payload ??= await buildNetherscrollsImageReadyFoundryExportPayload(entry.actor, {
+            apiKey,
+            cache: imageUploadCache,
+          });
+          return entry.payload;
+        })
+      ),
     };
     const { data: responseBody, status } = await requestNetherscrollsJson(endpoint, {
       method: "POST",
