@@ -10294,6 +10294,8 @@ function injectFoundryExportButtonV2(app, element) {
 
 async function exportActorToNetherscrolls(actor) {
   if (!actor) return;
+  const actorName = toTrimmedStringOrNull(actor.name) ?? "your character";
+  ui?.notifications?.info?.(`Sending ${actorName} through the Netherscrolls? ?`);
   try {
     const repairResult = await repairNetherscrollsActorClassFeatures(actor, { notify: false });
     if (repairResult.created > 0) {
@@ -10752,6 +10754,11 @@ async function prepareNetherscrollsFoundryExportImages(
   if (actorImage && actorImage !== actorData.img) {
     replaceNetherscrollsExportTokenImage(payload?.preparedActor, actorImage, actorData.img);
   }
+  await replaceNetherscrollsExportActorTokenImage(actor, actorData, payload?.preparedActor, {
+    apiKey,
+    cache,
+    label: actorData.name ?? actor?.name ?? "character",
+  });
 
   const itemsById = new Map(
     Array.from(actor?.items ?? []).map((item) => [String(item?.id ?? item?._id ?? ""), item])
@@ -10791,6 +10798,45 @@ async function replaceNetherscrollsExportImage(document, data, { apiKey, cache, 
   data.img = uploadedImage.url;
   replaceNetherscrollsExportTokenImage(data, image, uploadedImage.url);
   await cacheNetherscrollsExportImage(document, image, uploadedImage, { isCharacter });
+}
+
+async function replaceNetherscrollsExportActorTokenImage(actor, actorData, preparedActor, { apiKey, cache, label }) {
+  const image = toTrimmedStringOrNull(actorData?.prototypeToken?.texture?.src);
+  if (
+    !image ||
+    isNetherscrollsExportImageReference(image) ||
+    !isFoundryServerImageReference(image)
+  ) return;
+
+  const cacheKey = `characters:${image}`;
+  const uploadedImage = cache.get(cacheKey) || await uploadNetherscrollsExportImage(image, {
+    apiKey,
+    label: `${label ?? "character"} token`,
+    module: "characters",
+  });
+  cache.set(cacheKey, uploadedImage);
+
+  actorData.prototypeToken.texture.src = uploadedImage.url;
+  replaceNetherscrollsExportTokenImage(preparedActor, image, uploadedImage.url);
+  await cacheNetherscrollsExportActorTokenImage(actor, image, uploadedImage);
+}
+
+async function cacheNetherscrollsExportActorTokenImage(actor, source, uploadedImage) {
+  if (!actor?.update) return;
+  try {
+    const flags = duplicateNetherscrollsData(actor.flags ?? {});
+    flags[MODULE_ID] = {
+      ...(flags[MODULE_ID] ?? {}),
+      exportedTokenImageSource: source,
+      exportedTokenImageKey: uploadedImage.key,
+      exportedTokenImageUrl: uploadedImage.url ?? "",
+      exportedTokenImageSha256: uploadedImage.sha256 ?? "",
+    };
+    await actor.update({ flags, "prototypeToken.texture.src": uploadedImage.url });
+  } catch (err) {
+    console.warn(`${MODULE_ID} | Unable to cache the Netherscrolls token image export reference.`, err);
+    throw err;
+  }
 }
 
 function replaceNetherscrollsExportTokenImage(data, source, url) {
@@ -11038,7 +11084,7 @@ async function sendFoundryActorExport(actor, payload = buildFoundryExportPayload
     }
     await applyFoundryExportCanonicalIds(actor, data);
     const name = data?.data?.name ?? actor?.name ?? "actor";
-    ui?.notifications?.info?.(`Foundry Export succeeded: ${name}`);
+    ui?.notifications?.info?.(`? ${name} has arrived safely in Netherscrolls!`);
     return data;
   } catch (err) {
     console.error(`${MODULE_ID} | Foundry Export failed.`, err);

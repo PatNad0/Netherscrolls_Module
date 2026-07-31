@@ -1789,7 +1789,7 @@ test("uploads non-Netherscrolls Actor and embedded Item images before export", a
     name: "Hero",
     type: "character",
     img: "modules/test/hero.png",
-    prototypeToken: { texture: { src: "modules/test/hero.png" } },
+    prototypeToken: { texture: { src: "modules/test/hero-token.png" } },
   });
   const types = ["loot", "feat", "background", "class", "subclass", "spell", "race"];
   await actor.createEmbeddedDocuments("Item", types.map((type, index) => ({
@@ -1827,16 +1827,16 @@ test("uploads non-Netherscrolls Actor and embedded Item images before export", a
   assert.match(payload.preparedActor.prototypeToken.texture.src, /^https:\/\/api\.netherscrolls\.ca\/media\/image\/upload-\d+\.png$/);
   assert.match(actor.prototypeToken.texture.src, /^https:\/\/api\.netherscrolls\.ca\/media\/image\/upload-\d+\.png$/);
   const uploads = calls.filter((entry) => entry.options.method === "POST");
-  assert.equal(calls.length, (types.length + 1) * 2);
-  assert.equal(uploads.length, types.length + 1);
+  assert.equal(calls.length, (types.length + 2) * 2);
+  assert.equal(uploads.length, types.length + 2);
   assert.deepEqual(uploads.map((entry) => entry.options.body.get("module")).sort(), [
-    "backgrounds", "characters", "classes", "feats", "items", "races", "spells", "subclasses",
+    "backgrounds", "characters", "characters", "classes", "feats", "items", "races", "spells", "subclasses",
   ].sort());
   for (const upload of uploads) assert.match(upload.options.body.get("sha256"), /^[a-f0-9]{64}$/);
 
   const repeatPayload = importer.buildFoundryExportPayload(actor);
   await importer.prepareNetherscrollsFoundryExportImages(actor, repeatPayload, { apiKey: "test-key" });
-  assert.equal(calls.length, (types.length + 1) * 2);
+  assert.equal(calls.length, (types.length + 2) * 2);
   assert.match(repeatPayload.actor.img, /^https:\/\/api\.netherscrolls\.ca\/media\/image\/upload-\d+\.png$/);
 });
 
