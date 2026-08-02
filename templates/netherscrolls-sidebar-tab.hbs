@@ -1,0 +1,15 @@
+<section class="netherscrolls-sidebar-panel">
+  <header>
+    <h2>Netherscrolls</h2>
+  </header>
+
+  {{#if visionLimitEnabled}}
+  <button type="button" data-action="openHardVision">
+    <i class="fa-solid fa-eye-low-vision" aria-hidden="true"></i>
+    Limit player vision
+  </button>
+  <p class="hint">Select a token you own, then choose a maximum vision range.</p>
+  {{else}}
+  <p class="hint">Player vision limit is disabled in Netherscrolls module settings.</p>
+  {{/if}}
+</section>

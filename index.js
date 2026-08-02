@@ -854,8 +854,9 @@ const SETTINGS = {
 };
 
 const HARD_VISION_SVG_NS = "http://www.w3.org/2000/svg";
+const HARD_VISION_SIDEBAR_TAB = "netherscrolls-hard-vision";
 const hardVisionController = createHardVisionController();
-
+const NetherscrollsHardVisionSidebarTab = createNetherscrollsHardVisionSidebarTabClass();
 function createHardVisionController() {
   return {
     active: false,
@@ -1136,51 +1137,67 @@ function isNetherscrollsHardVisionEnabled() {
 }
 
 function refreshNetherscrollsHardVisionTab() {
-  ui?.sidebar?.render?.();
-  requestAnimationFrame(() => injectNetherscrollsHardVisionSidebarTab());
+  ui?.[HARD_VISION_SIDEBAR_TAB]?.render?.({ force: false });
 }
 
-function injectNetherscrollsHardVisionSidebarTab(root = document) {
-  const tabId = `${MODULE_ID}-hard-vision-sidebar-tab`;
-  const existing = root?.querySelector?.(`#${tabId}`) ?? document.getElementById(tabId);
-  if (!isNetherscrollsHardVisionEnabled()) {
-    existing?.remove();
-    return;
-  }
-  if (existing) return;
+function createNetherscrollsHardVisionSidebarTabClass() {
+  const HandlebarsApplicationMixin = globalThis.foundry?.applications?.api?.HandlebarsApplicationMixin;
+  const AbstractSidebarTab = globalThis.foundry?.applications?.sidebar?.AbstractSidebarTab;
+  if (!HandlebarsApplicationMixin || !AbstractSidebarTab) return null;
 
-  const navigation =
-    root?.querySelector?.("#sidebar-tabs, .sidebar-tabs") ??
-    document.querySelector("#sidebar-tabs, .sidebar-tabs");
-  if (!navigation) return;
+  return class NetherscrollsHardVisionSidebarTab extends HandlebarsApplicationMixin(AbstractSidebarTab) {
+    static tabName = HARD_VISION_SIDEBAR_TAB;
 
-  const prototype = Array.from(navigation.children).find((entry) =>
-    entry.matches?.("button, a, [data-tab]")
-  );
-  if (!prototype) return;
+    static DEFAULT_OPTIONS = {
+      id: HARD_VISION_SIDEBAR_TAB,
+      classes: ["netherscrolls-sidebar-tab"],
+      window: {
+        title: "Netherscrolls",
+        icon: "fa-solid fa-scroll",
+      },
+      actions: {
+        openHardVision: () => hardVisionController.openMenu(),
+      },
+    };
 
-  const tab = prototype.cloneNode(false);
-  tab.id = tabId;
-  tab.removeAttribute("href");
-  tab.removeAttribute("data-tab");
-  tab.removeAttribute("data-action");
-  tab.classList.remove("active");
-  tab.dataset.tooltip = "Netherscrolls";
-  tab.setAttribute("title", "Netherscrolls");
-  tab.setAttribute("aria-label", "Netherscrolls");
-  tab.innerHTML = '<i class="fa-solid fa-scroll" aria-hidden="true"></i>';
-  tab.addEventListener("click", (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    hardVisionController.openMenu();
-  });
+    static PARTS = {
+      content: {
+        template: `modules/${MODULE_ID}/templates/netherscrolls-sidebar-tab.hbs`,
+        root: true,
+      },
+    };
 
-  const collapseControl = navigation.querySelector(
-    '[data-action="toggle"], [data-action="collapse"], .sidebar-collapse'
-  );
-  navigation.insertBefore(tab, collapseControl ?? null);
+    async _prepareContext(options) {
+      const context = await super._prepareContext(options);
+      return {
+        ...context,
+        visionLimitEnabled: isNetherscrollsHardVisionEnabled(),
+      };
+    }
+  };
+}
+
+function registerNetherscrollsHardVisionSidebarTab() {
+  if (!NetherscrollsHardVisionSidebarTab) return;
+
+  const uiConfig = globalThis.CONFIG?.ui;
+  if (!uiConfig) return;
+
+  uiConfig[HARD_VISION_SIDEBAR_TAB] = NetherscrollsHardVisionSidebarTab;
+  const Sidebar = uiConfig.sidebar;
+  if (!Sidebar?.TABS) return;
+
+  const descriptor = {
+    icon: "fa-solid fa-scroll",
+    tooltip: "Netherscrolls",
+  };
+  const settingsTab = Sidebar.TABS.settings;
+  if (settingsTab) delete Sidebar.TABS.settings;
+  Sidebar.TABS[HARD_VISION_SIDEBAR_TAB] = descriptor;
+  if (settingsTab) Sidebar.TABS.settings = settingsTab;
 }
 Hooks.once("init", () => {
+  registerNetherscrollsHardVisionSidebarTab();
   game.settings.register(MODULE_ID, SETTINGS.rerollInit, {
     name: "Reroll initiative each round",
     hint: "When a new combat round starts, reset and reroll all initiatives.",
@@ -3664,7 +3681,6 @@ Hooks.on("renderApplicationV1", (app, html) => {
 
 Hooks.on("renderApplicationV2", (app, element) => {
   injectFoundryExportButtonV2(app, element);
-  if (app?.id === "sidebar") injectNetherscrollsHardVisionSidebarTab(element);
 });
 
 Hooks.on("renderActorSheet", (app, html) => {
