@@ -1032,7 +1032,7 @@ function createHardVisionController() {
       this.active = true;
       this.ensureOverlay();
       if (!this.animationFrame) this.animationLoop();
-      refreshNetherscrollsSceneControls();
+      refreshNetherscrollsHardVisionTab();
     },
 
     stop() {
@@ -1041,7 +1041,7 @@ function createHardVisionController() {
       if (this.animationFrame) cancelAnimationFrame(this.animationFrame);
       this.animationFrame = null;
       this.removeOverlay();
-      refreshNetherscrollsSceneControls();
+      refreshNetherscrollsHardVisionTab();
     },
 
     async openMenu() {
@@ -1135,8 +1135,50 @@ function isNetherscrollsHardVisionEnabled() {
   }
 }
 
-function refreshNetherscrollsSceneControls() {
-  ui?.controls?.render?.();
+function refreshNetherscrollsHardVisionTab() {
+  ui?.sidebar?.render?.();
+  requestAnimationFrame(() => injectNetherscrollsHardVisionSidebarTab());
+}
+
+function injectNetherscrollsHardVisionSidebarTab(root = document) {
+  const tabId = `${MODULE_ID}-hard-vision-sidebar-tab`;
+  const existing = root?.querySelector?.(`#${tabId}`) ?? document.getElementById(tabId);
+  if (!isNetherscrollsHardVisionEnabled()) {
+    existing?.remove();
+    return;
+  }
+  if (existing) return;
+
+  const navigation =
+    root?.querySelector?.("#sidebar-tabs, .sidebar-tabs") ??
+    document.querySelector("#sidebar-tabs, .sidebar-tabs");
+  if (!navigation) return;
+
+  const prototype = Array.from(navigation.children).find((entry) =>
+    entry.matches?.("button, a, [data-tab]")
+  );
+  if (!prototype) return;
+
+  const tab = prototype.cloneNode(false);
+  tab.id = tabId;
+  tab.removeAttribute("href");
+  tab.removeAttribute("data-tab");
+  tab.removeAttribute("data-action");
+  tab.classList.remove("active");
+  tab.dataset.tooltip = "Netherscrolls";
+  tab.setAttribute("title", "Netherscrolls");
+  tab.setAttribute("aria-label", "Netherscrolls");
+  tab.innerHTML = '<i class="fa-solid fa-scroll" aria-hidden="true"></i>';
+  tab.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    hardVisionController.openMenu();
+  });
+
+  const collapseControl = navigation.querySelector(
+    '[data-action="toggle"], [data-action="collapse"], .sidebar-collapse'
+  );
+  navigation.insertBefore(tab, collapseControl ?? null);
 }
 Hooks.once("init", () => {
   game.settings.register(MODULE_ID, SETTINGS.rerollInit, {
@@ -1233,7 +1275,7 @@ Hooks.once("init", () => {
     default: false,
     onChange: (value) => {
       if (!value) hardVisionController.stop();
-      refreshNetherscrollsSceneControls();
+      refreshNetherscrollsHardVisionTab();
     },
   });
 });
@@ -3602,6 +3644,7 @@ function isNetherscrollsImportedCharacterDocument(document, markerFlag, characte
 }
 
 Hooks.once("ready", async () => {
+  refreshNetherscrollsHardVisionTab();
   await disableLegacyNetherscrollsImportQueuePolling();
   installNetherscrollsSpellbookSectionOrdering();
   toggleRerollInitHook(game.settings.get(MODULE_ID, SETTINGS.rerollInit) === true);
@@ -3614,30 +3657,6 @@ Hooks.once("ready", async () => {
   );
 });
 
-Hooks.on("getSceneControlButtons", (controls) => {
-  if (!isNetherscrollsHardVisionEnabled() || !Array.isArray(controls)) return;
-  if (controls.some((control) => control.name === "netherscrolls")) return;
-
-  controls.push({
-    name: "netherscrolls",
-    title: "Netherscrolls",
-    icon: "fa-solid fa-scroll",
-    layer: "tokens",
-    visible: true,
-    tools: [
-      {
-        name: "hardVision",
-        title: "Limit player vision",
-        icon: "fa-solid fa-eye-low-vision",
-        button: true,
-        active: hardVisionController.active,
-        visible: true,
-        onClick: () => hardVisionController.openMenu(),
-      },
-    ],
-  });
-});
-
 Hooks.on("canvasTearDown", () => hardVisionController.stop());
 Hooks.on("renderApplicationV1", (app, html) => {
   injectFoundryExportButtonV1(app, html);
@@ -3645,6 +3664,7 @@ Hooks.on("renderApplicationV1", (app, html) => {
 
 Hooks.on("renderApplicationV2", (app, element) => {
   injectFoundryExportButtonV2(app, element);
+  if (app?.id === "sidebar") injectNetherscrollsHardVisionSidebarTab(element);
 });
 
 Hooks.on("renderActorSheet", (app, html) => {
