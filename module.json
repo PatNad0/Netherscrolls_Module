@@ -2,7 +2,7 @@
   "id": "netherscrolls-module",
   "title": "Netherscrolls Module",
   "description": "Module supporting the Netherscrolls Experience.",
-  "version": "1.2.434",
+  "version": "1.2.555",
   "authors": [
     {
       "name": "Pat"
@@ -13,7 +13,7 @@
   "download": "https://github.com/PatNad0/Netherscrolls_Module/releases/latest/download/Netherscrolls_Module.zip",
   "compatibility": {
     "minimum": "13",
-    "verified": "14.555"
+    "verified": "14.364"
   },
   "languages": [
     {
