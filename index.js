@@ -850,8 +850,294 @@ const SETTINGS = {
   importQueuePollingSafetyReset: "pollFoundryImportQueueSafetyResetV1",
   debug: "debugMode",
   devEnhancedDamage: "devEnhancedDamage",
+  hardVision: "enableHardVision",
 };
 
+const HARD_VISION_SVG_NS = "http://www.w3.org/2000/svg";
+const hardVisionController = createHardVisionController();
+
+function createHardVisionController() {
+  return {
+    active: false,
+    range: 30,
+    tokenIds: [],
+    svg: null,
+    mask: null,
+    maskBackground: null,
+    blackout: null,
+    circles: new Map(),
+    animationFrame: null,
+
+    getBoard() {
+      return canvas?.app?.canvas ?? canvas?.app?.view ?? document.querySelector("#board");
+    },
+
+    getToken(tokenId) {
+      return canvas?.tokens?.placeables?.find((token) => token.document.id === tokenId);
+    },
+
+    createSvgElement(name) {
+      return document.createElementNS(HARD_VISION_SVG_NS, name);
+    },
+
+    ensureOverlay() {
+      if (this.svg?.isConnected) return this.svg;
+
+      const board = this.getBoard();
+      if (!board) return null;
+
+      const maskId = `${MODULE_ID}-hard-vision-mask-${Math.random().toString(36).slice(2)}`;
+      const svg = this.createSvgElement("svg");
+      svg.id = `${MODULE_ID}-hard-vision-overlay`;
+      svg.setAttribute("aria-hidden", "true");
+      Object.assign(svg.style, {
+        position: "fixed",
+        left: "0px",
+        top: "0px",
+        width: "0px",
+        height: "0px",
+        pointerEvents: "none",
+        userSelect: "none",
+        overflow: "hidden",
+        zIndex: "5",
+      });
+
+      const definitions = this.createSvgElement("defs");
+      const mask = this.createSvgElement("mask");
+      mask.id = maskId;
+      mask.setAttribute("maskUnits", "userSpaceOnUse");
+      mask.setAttribute("maskContentUnits", "userSpaceOnUse");
+      mask.setAttribute("mask-type", "luminance");
+
+      const maskBackground = this.createSvgElement("rect");
+      maskBackground.setAttribute("x", "0");
+      maskBackground.setAttribute("y", "0");
+      maskBackground.setAttribute("fill", "white");
+      mask.append(maskBackground);
+      definitions.append(mask);
+
+      const blackout = this.createSvgElement("rect");
+      blackout.setAttribute("x", "0");
+      blackout.setAttribute("y", "0");
+      blackout.setAttribute("fill", "#000000");
+      blackout.setAttribute("mask", `url(#${maskId})`);
+      svg.append(definitions, blackout);
+      document.body.append(svg);
+
+      this.svg = svg;
+      this.mask = mask;
+      this.maskBackground = maskBackground;
+      this.blackout = blackout;
+      return svg;
+    },
+
+    removeOverlay() {
+      this.svg?.remove();
+      this.svg = null;
+      this.mask = null;
+      this.maskBackground = null;
+      this.blackout = null;
+      this.circles.clear();
+    },
+
+    getCircle(tokenId) {
+      let circle = this.circles.get(tokenId);
+      if (circle?.isConnected) return circle;
+
+      circle = this.createSvgElement("circle");
+      circle.setAttribute("fill", "black");
+      this.mask.append(circle);
+      this.circles.set(tokenId, circle);
+      return circle;
+    },
+
+    removeUnusedCircles(activeTokenIds) {
+      for (const [tokenId, circle] of this.circles.entries()) {
+        if (activeTokenIds.has(tokenId)) continue;
+        circle.remove();
+        this.circles.delete(tokenId);
+      }
+    },
+
+    updateOverlay() {
+      if (!this.active) return;
+      if (!isNetherscrollsHardVisionEnabled()) {
+        this.stop();
+        return;
+      }
+      if (!canvas?.ready) {
+        if (this.svg) this.svg.style.display = "none";
+        return;
+      }
+
+      const board = this.getBoard();
+      const svg = this.ensureOverlay();
+      if (!board || !svg || !canvas.dimensions) return;
+
+      const boardRectangle = board.getBoundingClientRect();
+      if (boardRectangle.width <= 0 || boardRectangle.height <= 0) {
+        svg.style.display = "none";
+        return;
+      }
+
+      Object.assign(svg.style, {
+        display: "block",
+        left: `${boardRectangle.left}px`,
+        top: `${boardRectangle.top}px`,
+        width: `${boardRectangle.width}px`,
+        height: `${boardRectangle.height}px`,
+      });
+      svg.setAttribute("viewBox", `0 0 ${boardRectangle.width} ${boardRectangle.height}`);
+      svg.setAttribute("width", String(boardRectangle.width));
+      svg.setAttribute("height", String(boardRectangle.height));
+      for (const rectangle of [this.maskBackground, this.blackout]) {
+        rectangle.setAttribute("width", String(boardRectangle.width));
+        rectangle.setAttribute("height", String(boardRectangle.height));
+      }
+
+      const activeTokenIds = new Set();
+      const canvasRadius = this.range * canvas.dimensions.distancePixels;
+      for (const tokenId of this.tokenIds) {
+        const token = this.getToken(tokenId);
+        if (!token) continue;
+
+        activeTokenIds.add(tokenId);
+        const center = token.center;
+        const clientCenter = canvas.clientCoordinatesFromCanvas({ x: center.x, y: center.y });
+        const clientEdge = canvas.clientCoordinatesFromCanvas({
+          x: center.x + canvasRadius,
+          y: center.y,
+        });
+        const radius = Math.hypot(clientEdge.x - clientCenter.x, clientEdge.y - clientCenter.y);
+        const circle = this.getCircle(tokenId);
+        circle.setAttribute("cx", String(clientCenter.x - boardRectangle.left));
+        circle.setAttribute("cy", String(clientCenter.y - boardRectangle.top));
+        circle.setAttribute("r", String(radius));
+      }
+
+      this.removeUnusedCircles(activeTokenIds);
+      if (!activeTokenIds.size) svg.style.display = "none";
+    },
+
+    animationLoop() {
+      if (!this.active) {
+        this.animationFrame = null;
+        return;
+      }
+      this.updateOverlay();
+      this.animationFrame = requestAnimationFrame(() => this.animationLoop());
+    },
+
+    start() {
+      this.active = true;
+      this.ensureOverlay();
+      if (!this.animationFrame) this.animationLoop();
+      refreshNetherscrollsSceneControls();
+    },
+
+    stop() {
+      this.active = false;
+      this.tokenIds = [];
+      if (this.animationFrame) cancelAnimationFrame(this.animationFrame);
+      this.animationFrame = null;
+      this.removeOverlay();
+      refreshNetherscrollsSceneControls();
+    },
+
+    async openMenu() {
+      if (!isNetherscrollsHardVisionEnabled()) {
+        return ui?.notifications?.warn?.("Player vision limit is disabled in Netherscrolls settings.");
+      }
+      if (!canvas?.ready) return ui?.notifications?.warn?.("The canvas is not ready.");
+
+      const DialogV2 = foundry?.applications?.api?.DialogV2;
+      if (!DialogV2?.input) {
+        return ui?.notifications?.error?.("Player vision limit requires Foundry VTT's DialogV2 API.");
+      }
+
+      const existingRange = Number.isFinite(this.range) ? this.range : 30;
+      const result = await DialogV2.input({
+        window: { title: "Player Vision Limit" },
+        content: `
+          <div class="form-group">
+            <label>Vision</label>
+            <div class="form-fields">
+              <select name="mode">
+                <option value="limited">Limited</option>
+                <option value="unlimited">No Limit</option>
+              </select>
+            </div>
+          </div>
+          <div data-ns-hard-vision-range></div>
+        `,
+        render: (_event, dialog) => {
+          const root = dialog.element ?? dialog.form;
+          const modeSelect = root?.querySelector?.('[name="mode"]');
+          const container = root?.querySelector?.("[data-ns-hard-vision-range]");
+          if (!modeSelect || !container) return;
+
+          let rememberedRange = String(existingRange);
+          const refreshRangeInput = () => {
+            const oldInput = root.querySelector('[name="range"]');
+            if (oldInput) rememberedRange = oldInput.value;
+            container.replaceChildren();
+            if (modeSelect.value === "unlimited") return;
+
+            const group = document.createElement("div");
+            group.className = "form-group";
+            group.innerHTML = `
+              <label>Maximum Range</label>
+              <div class="form-fields">
+                <input type="number" name="range" value="${rememberedRange}" min="0" step="1" autofocus>
+              </div>
+              <p class="hint">Uses the scene's distance units.</p>
+            `;
+            container.append(group);
+          };
+          modeSelect.addEventListener("change", refreshRangeInput);
+          refreshRangeInput();
+        },
+        ok: { label: "Apply" },
+        rejectClose: false,
+      });
+
+      if (!result) return;
+      if (result.mode === "unlimited") {
+        this.stop();
+        return ui?.notifications?.info?.("Local vision limit removed.");
+      }
+
+      const range = Number(result.range);
+      if (!Number.isFinite(range) || range < 0) {
+        return ui?.notifications?.error?.("Enter a valid vision range.");
+      }
+
+      const selectedTokens = canvas.tokens.controlled.filter((token) => token.document.isOwner);
+      if (!selectedTokens.length) {
+        return ui?.notifications?.warn?.("Select a token you control first.");
+      }
+
+      this.range = range;
+      this.tokenIds = selectedTokens.map((token) => token.document.id);
+      this.start();
+      return ui?.notifications?.info?.(
+        `Local vision limited to ${range} ${canvas.dimensions.units || "units"}.`
+      );
+    },
+  };
+}
+
+function isNetherscrollsHardVisionEnabled() {
+  try {
+    return game?.settings?.get(MODULE_ID, SETTINGS.hardVision) === true;
+  } catch (_err) {
+    return false;
+  }
+}
+
+function refreshNetherscrollsSceneControls() {
+  ui?.controls?.render?.();
+}
 Hooks.once("init", () => {
   game.settings.register(MODULE_ID, SETTINGS.rerollInit, {
     name: "Reroll initiative each round",
@@ -937,7 +1223,21 @@ Hooks.once("init", () => {
     type: Boolean,
     default: false,
   });
+
+  game.settings.register(MODULE_ID, SETTINGS.hardVision, {
+    name: "Enable player vision limit",
+    hint: "Show the Netherscrolls scene-control tab that lets players locally limit vision around selected tokens.",
+    scope: "world",
+    config: true,
+    type: Boolean,
+    default: false,
+    onChange: (value) => {
+      if (!value) hardVisionController.stop();
+      refreshNetherscrollsSceneControls();
+    },
+  });
 });
+
 
 const NetherscrollsImportSettings = createNetherscrollsImportSettingsClass();
 
@@ -3314,6 +3614,31 @@ Hooks.once("ready", async () => {
   );
 });
 
+Hooks.on("getSceneControlButtons", (controls) => {
+  if (!isNetherscrollsHardVisionEnabled() || !Array.isArray(controls)) return;
+  if (controls.some((control) => control.name === "netherscrolls")) return;
+
+  controls.push({
+    name: "netherscrolls",
+    title: "Netherscrolls",
+    icon: "fa-solid fa-scroll",
+    layer: "tokens",
+    visible: true,
+    tools: [
+      {
+        name: "hardVision",
+        title: "Limit player vision",
+        icon: "fa-solid fa-eye-low-vision",
+        button: true,
+        active: hardVisionController.active,
+        visible: true,
+        onClick: () => hardVisionController.openMenu(),
+      },
+    ],
+  });
+});
+
+Hooks.on("canvasTearDown", () => hardVisionController.stop());
 Hooks.on("renderApplicationV1", (app, html) => {
   injectFoundryExportButtonV1(app, html);
 });
