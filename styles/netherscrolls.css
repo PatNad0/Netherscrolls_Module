@@ -434,7 +434,12 @@
   }
 }
 
-.netherscrolls-sidebar-tab,
+.netherscrolls-sidebar-tab {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+}
+
 .netherscrolls-sidebar-tab .netherscrolls-sidebar-panel {
   width: 100%;
 }
@@ -448,7 +453,6 @@
   padding: 1rem 0.85rem;
   text-align: center;
 }
-
 .netherscrolls-sidebar-panel__header {
   width: 100%;
 }
@@ -481,10 +485,11 @@
 }
 
 .netherscrolls-sidebar-panel .hint {
+  align-self: center;
+  width: 100%;
   margin: 0;
-  text-align: center;
+  text-align: center !important;
 }
-
 .netherscrolls-sidebar-panel__disabled {
   max-width: 18rem;
 }

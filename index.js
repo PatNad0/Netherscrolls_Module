@@ -1142,7 +1142,7 @@ function refreshNetherscrollsHardVisionTab() {
 
 function openNetherscrollsModuleConfiguration() {
   const SettingsConfig = globalThis.foundry?.applications?.settings?.SettingsConfig;
-  if (SettingsConfig) return new SettingsConfig({ initialCategory: "modules" }).render({ force: true });
+  if (SettingsConfig) return new SettingsConfig({ initialCategory: MODULE_ID }).render({ force: true });
   return ui?.settings?.activate?.();
 }
 
