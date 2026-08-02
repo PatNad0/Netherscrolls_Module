@@ -855,6 +855,7 @@ const SETTINGS = {
 
 const HARD_VISION_SVG_NS = "http://www.w3.org/2000/svg";
 const HARD_VISION_SIDEBAR_TAB = "netherscrolls-hard-vision";
+const HARD_VISION_SCENE_FLAG = "hardVision";
 const hardVisionController = createHardVisionController();
 const NetherscrollsHardVisionSidebarTab = createNetherscrollsHardVisionSidebarTabClass();
 function createHardVisionController() {
@@ -862,6 +863,7 @@ function createHardVisionController() {
     active: false,
     range: 30,
     tokenIds: [],
+    rangesByTokenId: new Map(),
     svg: null,
     mask: null,
     maskBackground: null,
@@ -997,12 +999,13 @@ function createHardVisionController() {
       }
 
       const activeTokenIds = new Set();
-      const canvasRadius = this.range * canvas.dimensions.distancePixels;
       for (const tokenId of this.tokenIds) {
         const token = this.getToken(tokenId);
         if (!token) continue;
 
         activeTokenIds.add(tokenId);
+        const range = this.rangesByTokenId.get(tokenId) ?? this.range;
+        const canvasRadius = range * canvas.dimensions.distancePixels;
         const center = token.center;
         const clientCenter = canvas.clientCoordinatesFromCanvas({ x: center.x, y: center.y });
         const clientEdge = canvas.clientCoordinatesFromCanvas({
@@ -1029,6 +1032,22 @@ function createHardVisionController() {
       this.animationFrame = requestAnimationFrame(() => this.animationLoop());
     },
 
+    applyRestrictions(restrictions) {
+      const validRestrictions = Array.from(restrictions ?? [])
+        .map(({ tokenId, range }) => ({ tokenId: String(tokenId ?? ""), range: Number(range) }))
+        .filter(({ tokenId, range }) => tokenId && Number.isFinite(range) && range >= 0);
+      if (!validRestrictions.length) {
+        this.stop();
+        return;
+      }
+
+      this.tokenIds = validRestrictions.map(({ tokenId }) => tokenId);
+      this.rangesByTokenId = new Map(
+        validRestrictions.map(({ tokenId, range }) => [tokenId, range])
+      );
+      this.range = validRestrictions[0].range;
+      this.start();
+    },
     start() {
       this.active = true;
       this.ensureOverlay();
@@ -1039,6 +1058,7 @@ function createHardVisionController() {
     stop() {
       this.active = false;
       this.tokenIds = [];
+      this.rangesByTokenId.clear();
       if (this.animationFrame) cancelAnimationFrame(this.animationFrame);
       this.animationFrame = null;
       this.removeOverlay();
@@ -1103,24 +1123,48 @@ function createHardVisionController() {
       });
 
       if (!result) return;
+
+      const isGM = game.user?.isGM === true;
+      const selectedTokens = canvas.tokens.controlled.filter(
+        (token) => isGM || token.document.isOwner
+      );
+
       if (result.mode === "unlimited") {
-        this.stop();
-        return ui?.notifications?.info?.("Local vision limit removed.");
+        if (!isGM) {
+          this.stop();
+          return ui?.notifications?.info?.("Local vision limit removed.");
+        }
+        if (!selectedTokens.length) {
+          return ui?.notifications?.warn?.("Select at least one token to remove its player vision limit.");
+        }
+        await updateNetherscrollsSceneVisionRestrictions({
+          tokenIds: selectedTokens.map((token) => token.document.id),
+          enabled: false,
+        });
+        return ui?.notifications?.info?.("Player vision limit removed from the selected token(s).");
       }
 
       const range = Number(result.range);
       if (!Number.isFinite(range) || range < 0) {
         return ui?.notifications?.error?.("Enter a valid vision range.");
       }
-
-      const selectedTokens = canvas.tokens.controlled.filter((token) => token.document.isOwner);
       if (!selectedTokens.length) {
-        return ui?.notifications?.warn?.("Select a token you control first.");
+        return ui?.notifications?.warn?.(
+          isGM
+            ? "Select at least one player token first."
+            : "Select a token you control first."
+        );
       }
 
-      this.range = range;
-      this.tokenIds = selectedTokens.map((token) => token.document.id);
-      this.start();
+      const tokenIds = selectedTokens.map((token) => token.document.id);
+      if (isGM) {
+        await updateNetherscrollsSceneVisionRestrictions({ tokenIds, range, enabled: true });
+        return ui?.notifications?.info?.(
+          `Player vision limited to ${range} ${canvas.dimensions.units || "units"}.`
+        );
+      }
+
+      this.applyRestrictions(tokenIds.map((tokenId) => ({ tokenId, range })));
       return ui?.notifications?.info?.(
         `Local vision limited to ${range} ${canvas.dimensions.units || "units"}.`
       );
@@ -1134,6 +1178,59 @@ function isNetherscrollsHardVisionEnabled() {
   } catch (_err) {
     return false;
   }
+}
+function getNetherscrollsSceneVisionRestrictions(scene) {
+  const stored =
+    scene?.getFlag?.(MODULE_ID, HARD_VISION_SCENE_FLAG) ??
+    scene?.flags?.[MODULE_ID]?.[HARD_VISION_SCENE_FLAG];
+  const tokenRanges = stored?.tokenRanges;
+  if (!tokenRanges || typeof tokenRanges !== "object") return [];
+
+  return Object.entries(tokenRanges)
+    .map(([tokenId, range]) => ({ tokenId: String(tokenId), range: Number(range) }))
+    .filter(({ tokenId, range }) => tokenId && Number.isFinite(range) && range >= 0);
+}
+
+function syncNetherscrollsSceneVisionRestrictions(scene = canvas?.scene) {
+  if (
+    !isNetherscrollsHardVisionEnabled() ||
+    !canvas?.ready ||
+    !scene ||
+    scene.id !== canvas.scene?.id ||
+    game.user?.isGM
+  ) {
+    hardVisionController.stop();
+    return;
+  }
+
+  const ownedRestrictions = getNetherscrollsSceneVisionRestrictions(scene).filter(({ tokenId }) => {
+    const token = hardVisionController.getToken(tokenId);
+    return token?.document?.isOwner === true;
+  });
+  hardVisionController.applyRestrictions(ownedRestrictions);
+}
+
+async function updateNetherscrollsSceneVisionRestrictions({ tokenIds, range = null, enabled }) {
+  if (!game.user?.isGM) {
+    throw new Error("Only a GM can set player vision limits.");
+  }
+
+  const scene = canvas?.scene;
+  if (!scene?.setFlag) throw new Error("Open a scene before setting a player vision limit.");
+
+  const nextTokenRanges = Object.fromEntries(
+    getNetherscrollsSceneVisionRestrictions(scene).map(({ tokenId, range: currentRange }) => [
+      tokenId,
+      currentRange,
+    ])
+  );
+
+  for (const tokenId of new Set(tokenIds ?? [])) {
+    if (enabled) nextTokenRanges[tokenId] = Number(range);
+    else delete nextTokenRanges[tokenId];
+  }
+
+  await scene.setFlag(MODULE_ID, HARD_VISION_SCENE_FLAG, { tokenRanges: nextTokenRanges });
 }
 
 function refreshNetherscrollsHardVisionTab() {
@@ -1304,6 +1401,7 @@ Hooks.once("init", () => {
     default: false,
     onChange: (value) => {
       if (!value) hardVisionController.stop();
+      else syncNetherscrollsSceneVisionRestrictions();
       refreshNetherscrollsHardVisionTab();
     },
   });
@@ -3674,6 +3772,7 @@ function isNetherscrollsImportedCharacterDocument(document, markerFlag, characte
 
 Hooks.once("ready", async () => {
   refreshNetherscrollsHardVisionTab();
+  syncNetherscrollsSceneVisionRestrictions();
   await disableLegacyNetherscrollsImportQueuePolling();
   installNetherscrollsSpellbookSectionOrdering();
   toggleRerollInitHook(game.settings.get(MODULE_ID, SETTINGS.rerollInit) === true);
@@ -3686,6 +3785,11 @@ Hooks.once("ready", async () => {
   );
 });
 
+Hooks.on("canvasReady", () => syncNetherscrollsSceneVisionRestrictions());
+Hooks.on("updateScene", (scene, changes) => {
+  if (scene.id !== canvas?.scene?.id || !changes?.flags?.[MODULE_ID]) return;
+  syncNetherscrollsSceneVisionRestrictions(scene);
+});
 Hooks.on("canvasTearDown", () => hardVisionController.stop());
 Hooks.on("renderApplicationV1", (app, html) => {
   injectFoundryExportButtonV1(app, html);
