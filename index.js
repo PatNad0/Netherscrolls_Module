@@ -1140,6 +1140,16 @@ function refreshNetherscrollsHardVisionTab() {
   ui?.[HARD_VISION_SIDEBAR_TAB]?.render?.({ force: false });
 }
 
+function openNetherscrollsModuleConfiguration() {
+  const SettingsConfig = globalThis.foundry?.applications?.settings?.SettingsConfig;
+  if (SettingsConfig) return new SettingsConfig({ initialCategory: "modules" }).render({ force: true });
+  return ui?.settings?.activate?.();
+}
+
+function openNetherscrollsImporter() {
+  return new NetherscrollsImportSettings().render({ force: true });
+}
+
 function createNetherscrollsHardVisionSidebarTabClass() {
   const HandlebarsApplicationMixin = globalThis.foundry?.applications?.api?.HandlebarsApplicationMixin;
   const AbstractSidebarTab = globalThis.foundry?.applications?.sidebar?.AbstractSidebarTab;
@@ -1156,6 +1166,8 @@ function createNetherscrollsHardVisionSidebarTabClass() {
         icon: "fa-solid fa-scroll",
       },
       actions: {
+        openModuleConfig: () => openNetherscrollsModuleConfiguration(),
+        openImporter: () => openNetherscrollsImporter(),
         openHardVision: () => hardVisionController.openMenu(),
       },
     };
