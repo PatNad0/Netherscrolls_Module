@@ -1,0 +1,34 @@
+{
+  "id": "netherscrolls-module",
+  "title": "Netherscrolls Module",
+  "description": "Module supporting the Netherscrolls Experience.",
+  "version": "1.2.431",
+  "authors": [
+    {
+      "name": "Pat"
+    }
+  ],
+  "url": "https://github.com/PatNad0/Netherscrolls_Module",
+  "manifest": "https://github.com/PatNad0/Netherscrolls_Module/releases/latest/download/module.json",
+  "download": "https://github.com/PatNad0/Netherscrolls_Module/releases/latest/download/Netherscrolls_Module.zip",
+  "compatibility": {
+    "minimum": "13",
+    "verified": "14.364"
+  },
+  "languages": [
+    {
+      "lang": "en",
+      "name": "English",
+      "path": "lang/en.json"
+    }
+  ],
+  "esmodules": [
+    "index.js"
+  ],
+  "styles": [
+    "styles/netherscrolls.css"
+  ],
+  "options": {
+    "NS_API_KEY": ""
+  }
+}
