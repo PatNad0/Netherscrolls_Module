@@ -1230,6 +1230,11 @@ async function updateNetherscrollsSceneVisionRestrictions({ tokenIds, range = nu
     else delete nextTokenRanges[tokenId];
   }
 
+  if (!Object.keys(nextTokenRanges).length) {
+    await scene.unsetFlag(MODULE_ID, HARD_VISION_SCENE_FLAG);
+    return;
+  }
+
   await scene.setFlag(MODULE_ID, HARD_VISION_SCENE_FLAG, { tokenRanges: nextTokenRanges });
 }
 
@@ -3786,8 +3791,8 @@ Hooks.once("ready", async () => {
 });
 
 Hooks.on("canvasReady", () => syncNetherscrollsSceneVisionRestrictions());
-Hooks.on("updateScene", (scene, changes) => {
-  if (scene.id !== canvas?.scene?.id || !changes?.flags?.[MODULE_ID]) return;
+Hooks.on("updateScene", (scene) => {
+  if (scene.id !== canvas?.scene?.id) return;
   syncNetherscrollsSceneVisionRestrictions(scene);
 });
 Hooks.on("canvasTearDown", () => hardVisionController.stop());
