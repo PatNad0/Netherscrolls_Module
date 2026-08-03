@@ -865,6 +865,7 @@ function createHardVisionController() {
     range: 30,
     tokenIds: [],
     rangesByTokenId: new Map(),
+    sceneManaged: false,
     svg: null,
     mask: null,
     maskBackground: null,
@@ -974,6 +975,17 @@ function createHardVisionController() {
         return;
       }
 
+      if (this.sceneManaged) {
+        const sceneRestrictions = getNetherscrollsOwnedSceneVisionRestrictions();
+        const changed =
+          sceneRestrictions.length !== this.rangesByTokenId.size ||
+          sceneRestrictions.some(({ tokenId, range }) => this.rangesByTokenId.get(tokenId) !== range);
+        if (changed) {
+          this.applyRestrictions(sceneRestrictions, { sceneManaged: true });
+          return;
+        }
+      }
+
       const board = this.getBoard();
       const svg = this.ensureOverlay();
       if (!board || !svg || !canvas.dimensions) return;
@@ -1033,7 +1045,8 @@ function createHardVisionController() {
       this.animationFrame = requestAnimationFrame(() => this.animationLoop());
     },
 
-    applyRestrictions(restrictions) {
+    applyRestrictions(restrictions, { sceneManaged = false } = {}) {
+      this.sceneManaged = sceneManaged;
       const validRestrictions = Array.from(restrictions ?? [])
         .map(({ tokenId, range }) => ({ tokenId: String(tokenId ?? ""), range: Number(range) }))
         .filter(({ tokenId, range }) => tokenId && Number.isFinite(range) && range >= 0);
@@ -1060,10 +1073,46 @@ function createHardVisionController() {
       this.active = false;
       this.tokenIds = [];
       this.rangesByTokenId.clear();
+      this.sceneManaged = false;
       if (this.animationFrame) cancelAnimationFrame(this.animationFrame);
       this.animationFrame = null;
       this.removeOverlay();
       refreshNetherscrollsHardVisionTab();
+    },
+
+    async removeSelectedRestrictions() {
+      if (!isNetherscrollsHardVisionEnabled()) {
+        return ui?.notifications?.warn?.("Player vision limit is disabled in Netherscrolls settings.");
+      }
+      if (!canvas?.ready) return ui?.notifications?.warn?.("The canvas is not ready.");
+
+      const isGM = game.user?.isGM === true;
+      const selectedTokens = canvas.tokens.controlled.filter(
+        (token) => isGM || token.document.isOwner
+      );
+      if (!selectedTokens.length) {
+        return ui?.notifications?.warn?.(
+          isGM
+            ? "Select at least one player token first."
+            : "Select a token you control first."
+        );
+      }
+
+      if (!isGM) {
+        this.stop();
+        return ui?.notifications?.info?.("Local vision limit removed.");
+      }
+
+      try {
+        await updateNetherscrollsSceneVisionRestrictions({
+          tokenIds: selectedTokens.map((token) => token.document.id),
+          enabled: false,
+        });
+        return ui?.notifications?.info?.("Player vision limit removed from the selected token(s).");
+      } catch (error) {
+        console.error(`${MODULE_ID} | Failed to remove player vision limit.`, error);
+        return ui?.notifications?.error?.("Unable to remove the player vision limit. See the console for details.");
+      }
     },
 
     async openMenu() {
@@ -1130,20 +1179,7 @@ function createHardVisionController() {
         (token) => isGM || token.document.isOwner
       );
 
-      if (result.mode === "unlimited") {
-        if (!isGM) {
-          this.stop();
-          return ui?.notifications?.info?.("Local vision limit removed.");
-        }
-        if (!selectedTokens.length) {
-          return ui?.notifications?.warn?.("Select at least one token to remove its player vision limit.");
-        }
-        await updateNetherscrollsSceneVisionRestrictions({
-          tokenIds: selectedTokens.map((token) => token.document.id),
-          enabled: false,
-        });
-        return ui?.notifications?.info?.("Player vision limit removed from the selected token(s).");
-      }
+      if (result.mode === "unlimited") return this.removeSelectedRestrictions();
 
       const range = Number(result.range);
       if (!Number.isFinite(range) || range < 0) {
@@ -1192,6 +1228,14 @@ function getNetherscrollsSceneVisionRestrictions(scene) {
     .filter(({ tokenId, range }) => tokenId && Number.isFinite(range) && range >= 0);
 }
 
+function getNetherscrollsOwnedSceneVisionRestrictions(scene = canvas?.scene) {
+  if (game.user?.isGM) return [];
+  return getNetherscrollsSceneVisionRestrictions(scene).filter(({ tokenId }) => {
+    const token = hardVisionController.getToken(tokenId);
+    return token?.document?.isOwner === true;
+  });
+}
+
 function syncNetherscrollsSceneVisionRestrictions(scene = canvas?.scene) {
   if (
     !isNetherscrollsHardVisionEnabled() ||
@@ -1204,11 +1248,7 @@ function syncNetherscrollsSceneVisionRestrictions(scene = canvas?.scene) {
     return;
   }
 
-  const ownedRestrictions = getNetherscrollsSceneVisionRestrictions(scene).filter(({ tokenId }) => {
-    const token = hardVisionController.getToken(tokenId);
-    return token?.document?.isOwner === true;
-  });
-  hardVisionController.applyRestrictions(ownedRestrictions);
+  hardVisionController.applyRestrictions(getNetherscrollsOwnedSceneVisionRestrictions(scene), { sceneManaged: true });
 }
 function broadcastNetherscrollsSceneVisionRestrictions(scene, tokenRanges) {
   game.socket?.emit?.(HARD_VISION_SOCKET_EVENT, {
@@ -1234,7 +1274,7 @@ function handleNetherscrollsSceneVisionSync({ action, sceneId, tokenRanges } = {
       const token = hardVisionController.getToken(tokenId);
       return token?.document?.isOwner === true && Number.isFinite(range) && range >= 0;
     });
-  hardVisionController.applyRestrictions(ownedRestrictions);
+  hardVisionController.applyRestrictions(ownedRestrictions, { sceneManaged: true });
 }
 
 async function updateNetherscrollsSceneVisionRestrictions({ tokenIds, range = null, enabled }) {
@@ -1300,6 +1340,7 @@ function createNetherscrollsHardVisionSidebarTabClass() {
         openModuleConfig: () => openNetherscrollsModuleConfiguration(),
         openImporter: () => openNetherscrollsImporter(),
         openHardVision: () => hardVisionController.openMenu(),
+        removeHardVision: () => hardVisionController.removeSelectedRestrictions(),
       },
     };
 
