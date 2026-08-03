@@ -856,6 +856,7 @@ const SETTINGS = {
 const HARD_VISION_SVG_NS = "http://www.w3.org/2000/svg";
 const HARD_VISION_SIDEBAR_TAB = "netherscrolls-hard-vision";
 const HARD_VISION_SCENE_FLAG = "hardVision";
+const HARD_VISION_SOCKET_EVENT = `module.${MODULE_ID}`;
 const hardVisionController = createHardVisionController();
 const NetherscrollsHardVisionSidebarTab = createNetherscrollsHardVisionSidebarTabClass();
 function createHardVisionController() {
@@ -1209,6 +1210,32 @@ function syncNetherscrollsSceneVisionRestrictions(scene = canvas?.scene) {
   });
   hardVisionController.applyRestrictions(ownedRestrictions);
 }
+function broadcastNetherscrollsSceneVisionRestrictions(scene, tokenRanges) {
+  game.socket?.emit?.(HARD_VISION_SOCKET_EVENT, {
+    action: "syncHardVision",
+    sceneId: scene?.id,
+    tokenRanges,
+  });
+}
+
+function handleNetherscrollsSceneVisionSync({ action, sceneId, tokenRanges } = {}) {
+  if (
+    action !== "syncHardVision" ||
+    game.user?.isGM ||
+    sceneId !== canvas?.scene?.id ||
+    !isNetherscrollsHardVisionEnabled()
+  ) {
+    return;
+  }
+
+  const ownedRestrictions = Object.entries(tokenRanges ?? {})
+    .map(([tokenId, range]) => ({ tokenId: String(tokenId), range: Number(range) }))
+    .filter(({ tokenId, range }) => {
+      const token = hardVisionController.getToken(tokenId);
+      return token?.document?.isOwner === true && Number.isFinite(range) && range >= 0;
+    });
+  hardVisionController.applyRestrictions(ownedRestrictions);
+}
 
 async function updateNetherscrollsSceneVisionRestrictions({ tokenIds, range = null, enabled }) {
   if (!game.user?.isGM) {
@@ -1232,10 +1259,12 @@ async function updateNetherscrollsSceneVisionRestrictions({ tokenIds, range = nu
 
   if (!Object.keys(nextTokenRanges).length) {
     await scene.unsetFlag(MODULE_ID, HARD_VISION_SCENE_FLAG);
+    broadcastNetherscrollsSceneVisionRestrictions(scene, nextTokenRanges);
     return;
   }
 
   await scene.setFlag(MODULE_ID, HARD_VISION_SCENE_FLAG, { tokenRanges: nextTokenRanges });
+  broadcastNetherscrollsSceneVisionRestrictions(scene, nextTokenRanges);
 }
 
 function refreshNetherscrollsHardVisionTab() {
@@ -3776,6 +3805,7 @@ function isNetherscrollsImportedCharacterDocument(document, markerFlag, characte
 }
 
 Hooks.once("ready", async () => {
+  game.socket?.on?.(HARD_VISION_SOCKET_EVENT, handleNetherscrollsSceneVisionSync);
   refreshNetherscrollsHardVisionTab();
   syncNetherscrollsSceneVisionRestrictions();
   await disableLegacyNetherscrollsImportQueuePolling();
