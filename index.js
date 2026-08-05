@@ -1340,7 +1340,6 @@ function createNetherscrollsHardVisionSidebarTabClass() {
         openModuleConfig: () => openNetherscrollsModuleConfiguration(),
         openImporter: () => openNetherscrollsImporter(),
         openHardVision: () => hardVisionController.openMenu(),
-        removeHardVision: () => hardVisionController.removeSelectedRestrictions(),
       },
     };
 
