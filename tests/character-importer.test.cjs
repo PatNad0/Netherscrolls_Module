@@ -205,6 +205,9 @@ function createHarness() {
 globalThis.__test = {
   NETHERSCROLLS_WORLD_IMPORT_PACKS,
   normalizeNetherscrollsCharacterActorCreationData,
+  applyNetherscrollsCharacterHitDiceToClassItems,
+  applyNetherscrollsCharacterClassSelectionsToItems,
+  buildNetherscrollsAdditionalResourceItems,
   normalizeNetherscrollsImagePath,
   normalizeNetherscrollsImportImagePath,
   normalizeNetherscrollsItemData,
@@ -343,11 +346,159 @@ test("normalizes schema-v2 Actor data without legacy token fallback", () => {
   assert.equal(actor.system.attributes.ac.flat, 13);
   assert.equal(actor.system.attributes.ac.calc, "flat");
   assert.equal("value" in actor.system.attributes.ac, false);
-  assert.equal(actor.system.attributes.hp.value, 86);
+  assert.equal(actor.system.attributes.hp.value, 0);
   assert.equal(actor.system.attributes.hp.max, 86);
   assert.equal(actor.system.details.xp.value, 17200);
-  assert.deepEqual(actor.prototypeToken, { disposition: 1 });
+  assert.equal(actor.prototypeToken.disposition, 1);
+  assert.equal(actor.prototypeToken.name, "Hero");
+  assert.equal(actor.prototypeToken.actorLink, true);
+  assert.equal(actor.prototypeToken.bar1.attribute, "attributes.hp");
   assert.equal("token" in actor, false);
+});
+
+test("applies the complete native character projection over a stale Foundry snapshot", () => {
+  const { importer } = createHarness();
+  const actor = {
+    name: "Old Hero",
+    img: "old.webp",
+    prototypeToken: { disposition: -1, texture: { src: "old-token.webp" } },
+    system: {
+      traits: { size: "lg", languages: { value: ["orc"] } },
+      attributes: {
+        hp: { value: 1, max: 2, temp: 9 }, ac: { value: 9 }, prof: 2, exhaustion: 3,
+        init: { ability: "wis", proficient: 0, bonus: "9" }, movement: { walk: "10" },
+        senses: { darkvision: 120 }, spellcasting: "int",
+      },
+      abilities: { str: { value: 8, proficient: 0, bonuses: { save: "9" } } },
+      currency: { gp: 1, ep: 7 },
+      details: { xp: { value: 1 }, alignment: "Old", biography: { value: "Old story", public: "keep" } },
+      spells: { spell1: { value: 0, max: 1, override: null } },
+      resources: { primary: { label: "Old", value: 0, max: 1, sr: true } },
+      bonuses: { mwak: { attack: "9" }, rwak: { attack: "9" }, msak: { attack: "9" }, rsak: { attack: "9" }, spell: { dc: "9" } },
+      hitDice: { d10: { value: 0, max: 1 } },
+    },
+  };
+  importer.normalizeNetherscrollsCharacterActorCreationData(actor, {
+    name: "Current Hero",
+    ns_ImageLink: "https://assets.example.com/current.webp",
+    proficiencyBonus: 4,
+    hp: { current: 69, max: 101, temp: 2 },
+    armorClass: 17,
+    exhaustion: 1,
+    xp: 140010,
+    backstory: "Current story",
+    abilities: { str: { score: 19 } },
+    savingThrows: { str: { prof: 1, misc: 2, bonus: 1 } },
+    initiative: { ability: "dex", prof: 0.5, misc: 2, bonus: 1 },
+    currency: { pp: 2, gp: 10, sp: 3, cp: 4 },
+    spellSlots: { current: { lvl1: 2, lvl2: 0 }, max: { lvl1: 4, lvl2: 2 } },
+    Ressources: [{ Name: "Lay on Hands", CurrentQty: 20, TotalQty: 30 }],
+    ToHitStr: { misc: 1, bonus: 2 },
+    ToHitDext: { misc: -1, bonus: 2 },
+    ToHitMagic: { misc: 2, bonus: 2 },
+    SaveDC: { misc: 1, bonus: 4 },
+    hitDice: { current: { d10: 8 }, max: { d10: 11 } },
+    advanced: {
+      alignment: "True Neutral", spellcastingAbility: "cha",
+      movement: { walk: "30", fly: "0", units: "ft" },
+      senses: { darkvision: 0, units: "ft" },
+      traits: { size: "med", languages: { value: ["common", "goblin"] } },
+      token: { disposition: 1, width: 1, texture: { src: "current-token.webp" } },
+    },
+  });
+  assert.equal(actor.name, "Current Hero");
+  assert.equal(actor.img, "https://assets.example.com/current.webp");
+  assert.deepEqual(clone(actor.system.attributes.hp), { value: 69, max: 101, temp: 2 });
+  assert.equal(actor.system.attributes.ac.flat, 17);
+  assert.equal(actor.system.attributes.prof, 4);
+  assert.equal(actor.system.attributes.exhaustion, 1);
+  assert.equal(actor.system.attributes.init.ability, "dex");
+  assert.equal(actor.system.attributes.init.proficient, 0.5);
+  assert.equal(actor.system.attributes.init.bonus, "3");
+  assert.equal(actor.system.attributes.spellcasting, "cha");
+  assert.equal(actor.system.abilities.str.value, 19);
+  assert.equal(actor.system.abilities.str.proficient, 1);
+  assert.equal(actor.system.abilities.str.bonuses.save, "3");
+  assert.deepEqual(clone(actor.system.currency), { gp: 10, ep: 7, pp: 2, sp: 3, cp: 4 });
+  assert.equal(actor.system.details.xp.value, 140010);
+  assert.equal(actor.system.details.alignment, "True Neutral");
+  assert.equal(actor.system.spells.spell1.value, 2);
+  assert.equal(actor.system.resources.primary.value, 20);
+  assert.equal(actor.system.bonuses.mwak.attack, "3");
+  assert.equal(actor.system.bonuses.rsak.attack, "4");
+  assert.equal(actor.system.bonuses.spell.dc, "5");
+  assert.deepEqual(clone(actor.system.hitDice.d10), { value: 8, max: 11 });
+  assert.equal(actor.prototypeToken.texture.src, "current-token.webp");
+});
+
+test("applies aggregate current hit dice to multiclass class Items", () => {
+  const { importer } = createHarness();
+  const items = [
+    { type: "class", system: { levels: 5, hd: { denomination: "d10", spent: 0 } } },
+    { type: "class", system: { levels: 6, hd: { denomination: "d10", spent: 0 } } },
+    { type: "class", system: { levels: 2, hd: { denomination: "d6", spent: 0 } } },
+  ];
+  importer.applyNetherscrollsCharacterHitDiceToClassItems(items, {
+    hitDice: { current: { d6: 1, d10: 8 }, max: { d6: 2, d10: 11 } },
+  });
+  assert.equal(items[0].system.hd.spent, 3);
+  assert.equal(items[1].system.hd.spent, 0);
+  assert.equal(items[2].system.hd.spent, 1);
+});
+
+test("preserves every Netherscrolls-only character field and applies token grid sizing", () => {
+  const { importer } = createHarness();
+  const character = {
+    meta: { schemaVersion: 1, updatedAt: "2026-08-09T10:26:16.896Z" },
+    _id: "character-1", name: "Native Hero", ownerId: "owner-1", campaignId: "campaign-1",
+    foundryFlag: "ForeignActor1234", grid: "2x3", ns_BorderLink: "image/native-border.webp",
+    ns_ImageLink: "https://assets.example.com/native-hero.webp",
+    sheetTheme: { version: 2, presetId: "custom", fontStyle: "cinzel" },
+    themeMusic: ["music/native-theme.mp3"], lastRev: "revision-9", __v: 5,
+    advanced: { background: "Homebrew Wanderer", traits: { size: "med" } },
+  };
+  const actor = { name: "Stale Hero", system: {}, prototypeToken: {} };
+  importer.normalizeNetherscrollsCharacterActorCreationData(actor, character);
+  assert.equal(actor.name, "Native Hero");
+  assert.equal(actor.prototypeToken.width, 2);
+  assert.equal(actor.prototypeToken.height, 3);
+  assert.equal(actor.system.details.background, "Homebrew Wanderer");
+  assert.equal(actor.flags.netherscrolls.characterId, "character-1");
+  assert.equal(actor.flags.netherscrolls.campaignId, "campaign-1");
+  assert.equal(actor.flags.netherscrolls.ownerId, "owner-1");
+  assert.equal("foundryFlag" in actor.flags[MODULE_ID].nativeCharacter, false);
+  for (const key of ["meta", "_id", "name", "ownerId", "campaignId", "grid", "ns_BorderLink", "ns_ImageLink", "sheetTheme", "themeMusic", "lastRev", "__v", "advanced"]) {
+    assert.deepEqual(clone(actor.flags[MODULE_ID].nativeCharacter[key]), clone(character[key]));
+  }
+});
+
+test("stores class selections and represents resources beyond the three Actor slots", () => {
+  const { importer } = createHarness();
+  const items = [
+    { type: "class", flags: { netherscrolls: { id: "class-1" } } },
+    { type: "subclass", flags: { netherscrolls: { id: "subclass-1" } } },
+  ];
+  const selection = { classId: "class-1", level: 7, choicesByLevel: { 1: ["feature-a"] }, subclass: { subclassId: "subclass-1", choicesByLevel: { 3: ["feature-c"] } } };
+  importer.applyNetherscrollsCharacterClassSelectionsToItems(items, { classes: [selection] });
+  assert.deepEqual(clone(items[0].flags[MODULE_ID].nativeClassSelection), selection);
+  assert.deepEqual(clone(items[1].flags[MODULE_ID].nativeSubclassSelection), selection.subclass);
+
+  const character = {
+    Ressources: [
+      { Name: "First", CurrentQty: 1, TotalQty: 1 }, { Name: "Second", CurrentQty: 2, TotalQty: 2 },
+      { Name: "Third", CurrentQty: 3, TotalQty: 3 }, { Name: "Ki Pool", CurrentQty: 4, TotalQty: 8 },
+    ],
+    activeBonuses: [
+      { active: true, stat: "Ressources.CurrentQty", bonus: "+1" },
+      { active: true, stat: "Ressources.Ki Pool.CurrentQty", bonus: "+2" },
+      { active: true, stat: "Ressources.Ki Pool.TotalQty.totalOverride", bonus: "10" },
+    ],
+  };
+  const resourceItems = importer.buildNetherscrollsAdditionalResourceItems(character, "character-1");
+  assert.equal(resourceItems.length, 1);
+  assert.equal(resourceItems[0].system.uses.max, "10");
+  assert.equal(resourceItems[0].system.uses.spent, 3);
+  assert.equal(resourceItems[0].flags[MODULE_ID].nativeCharacterResource, true);
 });
 
 test("imports skill training, expertise, abilities, and manual bonuses", () => {
@@ -366,6 +517,7 @@ test("imports skill training, expertise, abilities, and manual bonuses", () => {
       persuasion: { ability: "cha", prof: 1, misc: 4, bonus: 0 },
       stealth: { ability: "dex", expertise: true, misc: 0 },
       "animal handling": { ability: "wis", prof: "half" },
+      lore_cooking: { name: "Cooking Lore", ability: "int", prof: 1, bonus: 2 },
     },
   });
 
@@ -381,9 +533,12 @@ test("imports skill training, expertise, abilities, and manual bonuses", () => {
   assert.equal(actor.system.skills.ani.ability, "wis");
   assert.equal(actor.system.skills.ani.value, 0.5);
   assert.equal(actor.system.skills.ani.bonuses.check, "");
+  assert.equal(actor.system.skills.lore_cooking.ability, "int");
+  assert.equal(actor.system.skills.lore_cooking.value, 1);
+  assert.equal(actor.system.skills.lore_cooking.bonuses.check, "2");
   assert.match(
     logs.info.find((entry) => String(entry[0]).includes("API stat audit"))[0],
-    /CHA base not supplied; active CHA adjustments none; skill bonuses intimidation \+3, persuasion \+4; missing from Foundry snapshot intimidation, persuasion, stealth, animalHandling\./
+    /skill bonuses intimidation \+3, persuasion \+4, Cooking Lore \+2; missing from Foundry snapshot intimidation, persuasion, stealth, animalHandling, Cooking Lore\./
   );
 });
 
@@ -434,7 +589,37 @@ test("converts portable active effects into D&D5e skill and save effects", () =>
   assert.equal(effects[2].changes[0].key, "system.skills.per.bonuses.check");
 });
 
-test("uses website references and ignores Foundry Actor item snapshots", () => {
+test("maps every native active-bonus family to its D&D5e Actor field", () => {
+  const { importer } = createHarness();
+  const rows = [
+    ["proficiencyBonus", "system.attributes.prof"], ["xp", "system.details.xp.value"],
+    ["armorClass", "system.attributes.ac.flat"], ["exhaustion", "system.attributes.exhaustion"],
+    ["initiative", "system.attributes.init.bonus"], ["ToHitStr", "system.bonuses.mwak.attack"],
+    ["ToHitDext", "system.bonuses.rwak.attack"], ["SaveDC", "system.bonuses.spell.dc"],
+    ["abilities.cha.score", "system.abilities.cha.value"], ["savingThrows.dex.prof", "system.abilities.dex.proficient"],
+    ["skills.lore_cooking.bonus", "system.skills.lore_cooking.bonuses.check"],
+    ["hp.current", "system.attributes.hp.value"], ["hp.max", "system.attributes.hp.max"],
+    ["hitDice.current.d10", "system.hitDice.d10.value"], ["hitDice.max.d10", "system.hitDice.d10.max"],
+    ["spellSlots.current.lvl3", "system.spells.spell3.value"], ["currency.gp", "system.currency.gp"],
+    ["Ressources.Ki Pool.CurrentQty", "system.resources.secondary.value"],
+  ];
+  const activeBonuses = rows.map(([stat], index) => ({ _id: `bonus-${index}`, active: true, stat, bonus: "+2", source: "Native", note: `note-${index}` }));
+  activeBonuses.push({ _id: "magic", active: true, stat: "ToHitMagic.totalOverride", bonus: "7", source: "Native" });
+  const effects = importer.buildNetherscrollsPortableActiveEffects({
+    Ressources: [{ Name: "Other" }, { Name: "Ki Pool" }],
+    activeBonuses,
+  });
+  const byStat = new Map(effects.map((effect) => [effect.flags[MODULE_ID].sourceStat, effect]));
+  for (const [stat, key] of rows) {
+    assert.ok(byStat.has(stat), stat);
+    assert.ok(byStat.get(stat).changes.some((change) => change.key === key), `${stat} -> ${key}`);
+  }
+  assert.equal(byStat.get("ToHitMagic.totalOverride").changes.length, 2);
+  assert.equal(byStat.get("ToHitMagic.totalOverride").changes[0].mode, 5);
+  assert.equal(byStat.get("xp").flags[MODULE_ID].nativeActiveBonus.note, "note-1");
+});
+
+test("uses native references while retaining matching embedded Item state", () => {
   const { importer } = createHarness();
   assert.equal(
     importer.getNetherscrollsCharacterSourceId({
@@ -479,15 +664,12 @@ test("uses website references and ignores Foundry Actor item snapshots", () => {
   const byDataset = Object.fromEntries(
     sources.map((entry) => [entry.dataset, entry])
   );
-  assert.equal(sources.length, 7);
+  assert.equal(sources.length, 8);
   assert.equal(
     sources.filter((entry) => entry.netherscrollsId === "item-1").length,
     1
   );
-  assert.equal(
-    sources.find((entry) => entry.netherscrollsId === "item-1").source.system,
-    undefined
-  );
+  assert.equal(sources.find((entry) => entry.netherscrollsId === "item-1").source.system.quantity, 3);
   assert.equal(byDataset.classes.netherscrollsId, "class-1");
   assert.equal(byDataset.classes.source.level, 7);
   assert.equal(byDataset.subclasses.netherscrollsId, "subclass-1");
@@ -495,8 +677,7 @@ test("uses website references and ignores Foundry Actor item snapshots", () => {
   assert.equal(byDataset.backgrounds.netherscrollsId, "background-1");
   const spellSource = sources.find((entry) => entry.netherscrollsId === "spell-1");
   assert.equal(spellSource.source.system, undefined);
-  assert.equal(sources.some((entry) => entry.source._id === "foundry-local"), false);
-  assert.equal(sources.some((entry) => entry.source._id === "ddb-spell"), false);
+  assert.equal(sources.some((entry) => entry.source._id === "ddb-spell"), true);
 
   const blankOptionalLinks = importer.collectNetherscrollsCharacterItemSources({
     character: {
@@ -863,18 +1044,16 @@ test("resolves targeted Import selections without using an invalid Foundry flag 
 
   const items = makePack("world.netherscrolls-items");
   context.game.packs.set(items.collection, items);
-  await assert.rejects(
-    importer.resolveNetherscrollsCharacterItemSource(
-      {
-        netherscrollsId: "missing-direct",
-        name: "Direct",
-        type: "loot",
-        system: { quantity: 2 },
-      },
-      "items"
-    ),
-    /Foundry Import selection/
+  const direct = await importer.resolveNetherscrollsCharacterItemSource(
+    {
+      netherscrollsId: "missing-direct",
+      name: "Direct",
+      type: "loot",
+      system: { quantity: 2 },
+    },
+    "items"
   );
+  assert.equal(direct.item.system.quantity, 2);
   await assert.rejects(
     importer.resolveNetherscrollsCharacterItemSource(
       { netherscrollsId: "missing-incomplete" },
@@ -1369,12 +1548,13 @@ test("does not embed nested high-level or optional features before repair", asyn
   assert.equal(featurePack.documentLoads, 3);
 });
 
-test("class feature repair filters level/optional/owned features and is idempotent", async () => {
+test("class feature repair applies selected choices while filtering unselected/high/owned features", async () => {
   const { context, importer } = createHarness();
   const featureMap = new Map();
   const addFeature = (uuid, id, level, optional = false, scope = "class") => {
     featureMap.set(uuid, makeDocument({
       _id: id,
+      uuid,
       name: id,
       type: "feat",
       system: { type: { value: "class" } },
@@ -1393,6 +1573,7 @@ test("class feature repair filters level/optional/owned features and is idempote
   addFeature("Compendium.test.Item.low", "feature-low", 1);
   addFeature("Compendium.test.Item.high", "feature-high", 8);
   addFeature("Compendium.test.Item.optional", "feature-optional", 2, true);
+  addFeature("Compendium.test.Item.unselected", "feature-unselected", 2, true);
   addFeature("Compendium.test.Item.owned", "feature-owned", 2);
   addFeature("Compendium.test.Item.sub", "feature-sub", 3, false, "subclass");
   context.fromUuid = async (uuid) => featureMap.get(uuid) ?? null;
@@ -1412,8 +1593,10 @@ test("class feature repair filters level/optional/owned features and is idempote
             "Compendium.test.Item.low",
             "Compendium.test.Item.high",
             "Compendium.test.Item.optional",
+            "Compendium.test.Item.unselected",
             "Compendium.test.Item.owned",
           ],
+          choicesByLevel: { 2: ["feature-optional"] },
         },
       },
     }),
@@ -1443,17 +1626,21 @@ test("class feature repair filters level/optional/owned features and is idempote
     })
   );
 
+  const featurePack = makePack("world.netherscrolls-class-features", Array.from(featureMap.values()));
+  context.game.packs.set(featurePack.collection, featurePack);
+
   const first = await importer.repairNetherscrollsActorClassFeatures(actor);
   const second = await importer.repairNetherscrollsActorClassFeatures(actor);
   const ids = actor.items
     .map((item) => item.flags?.netherscrolls?.id)
     .filter(Boolean);
-  assert.equal(first.created, 2);
+  assert.equal(first.created, 3);
   assert.equal(second.created, 0);
   assert.equal(ids.includes("feature-low"), true);
   assert.equal(ids.includes("feature-sub"), true);
   assert.equal(ids.includes("feature-high"), false);
-  assert.equal(ids.includes("feature-optional"), false);
+  assert.equal(ids.includes("feature-optional"), true);
+  assert.equal(ids.includes("feature-unselected"), false);
   assert.equal(ids.filter((id) => id === "feature-owned").length, 1);
 });
 
@@ -1473,6 +1660,7 @@ test("creates then updates one Actor with canonical identity and progress feedba
     id: "character-1",
     name: "Hero",
     character: {
+      hp: { current: 20, max: 20, temp: 0 },
       armorClass: { value: 10, misc: 2, bonus: 1 },
       backgroundId: "",
       raceId: "",
@@ -1501,7 +1689,8 @@ test("creates then updates one Actor with canonical identity and progress feedba
     { onProgress: (stage) => progress.push(stage) }
   );
   const changed = clone(importedCharacter);
-  changed.foundryActor.system.attributes.hp.value = 9;
+  changed.character.hp.current = 9;
+  changed.foundryActor.system.attributes.hp.value = 99;
   const second = await importer.importNetherscrollsCampaignCharacter(
     changed,
     { id: "ns-character-folder" },
@@ -1515,7 +1704,7 @@ test("creates then updates one Actor with canonical identity and progress feedba
   assert.equal(actor.type, "character");
   assert.equal(actor.folder, "ns-character-folder");
   assert.equal(actor.flags.netherscrolls.characterId, "character-1");
-  assert.equal(actor.system.attributes.hp.value, 20);
+  assert.equal(actor.system.attributes.hp.value, 9);
   assert.equal(actor.system.attributes.ac.flat, 13);
   assert.equal(progress.includes("repairing class features..."), true);
   assert.equal(progress.includes("complete."), true);
@@ -1534,6 +1723,94 @@ test("creates then updates one Actor with canonical identity and progress feedba
     importer.findNetherscrollsActorByCharacterId("linked-character"),
     linkedActor
   );
+});
+
+test("creates a complete Character Actor when foundryActor is entirely absent", async () => {
+  const { context, importer } = createHarness();
+  context.Actor = {
+    implementation: {
+      async create(payload) {
+        const actor = makeActor(context, payload);
+        context.game.actors.push(actor);
+        return actor;
+      },
+    },
+  };
+
+  const result = await importer.importNetherscrollsCampaignCharacter({
+    id: "native-only-character",
+    name: "Envelope Name",
+    character: {
+      _id: "native-only-character",
+      name: "Native Only Hero",
+      ownerId: "owner-1",
+      campaignId: "campaign-1",
+      ns_ImageLink: "https://assets.example.com/native-only.webp",
+      grid: "2x2",
+      proficiencyBonus: 3,
+      hp: { current: 17, max: 24, temp: 4 },
+      armorClass: { value: 13, misc: 1, bonus: 2 },
+      exhaustion: 1,
+      xp: 6500,
+      backstory: "Created without a Foundry Actor snapshot.",
+      abilities: { str: { score: 16 }, dex: { score: 14 }, cha: { score: 12 } },
+      savingThrows: { str: { prof: 1, misc: 1, bonus: 1 } },
+      skills: { athletics: { ability: "str", prof: 1, misc: 2, bonus: 1 } },
+      initiative: { ability: "dex", prof: 0.5, misc: 1, bonus: 1 },
+      currency: { pp: 1, gp: 20, sp: 3, cp: 4 },
+      spellSlots: { current: { lvl1: 2 }, max: { lvl1: 4 } },
+      hitDice: { current: { d10: 2 }, max: { d10: 3 } },
+      Ressources: [
+        { Name: "First", CurrentQty: 1, TotalQty: 2 },
+        { Name: "Second", CurrentQty: 2, TotalQty: 3 },
+        { Name: "Third", CurrentQty: 3, TotalQty: 4 },
+        { Name: "Fourth", CurrentQty: 4, TotalQty: 5 },
+      ],
+      ToHitStr: { misc: 1, bonus: 2 },
+      ToHitDext: { misc: 2, bonus: 2 },
+      ToHitMagic: { misc: 3, bonus: 2 },
+      SaveDC: { misc: 1, bonus: 3 },
+      activeBonuses: [{ _id: "native-effect", active: true, stat: "hp.temp", bonus: "+2", source: "Native" }],
+      advanced: {
+        alignment: "Neutral Good",
+        background: "Homebrew Scholar",
+        spellcastingAbility: "cha",
+        movement: { walk: "30", fly: "10", units: "ft" },
+        senses: { darkvision: 60, units: "ft" },
+        traits: { size: "med", languages: { value: ["common"] } },
+        token: { disposition: 1, sight: { enabled: true } },
+      },
+      items: [], spells: [], feats: [], classes: [], raceId: "", backgroundId: "",
+      ns_BorderLink: "image/border.webp",
+      sheetTheme: { version: 2, presetId: "custom" },
+      themeMusic: ["music/theme.mp3"],
+      meta: { schemaVersion: 1 },
+      lastRev: "revision-1",
+      __v: 1,
+    },
+  }, { id: "ns-character-folder" });
+
+  const actor = result.actor;
+  assert.equal(result.created, true);
+  assert.equal(actor.name, "Native Only Hero");
+  assert.equal(actor.img, "https://assets.example.com/native-only.webp");
+  assert.deepEqual(clone(actor.system.attributes.hp), { value: 17, max: 24, temp: 4 });
+  assert.equal(actor.system.attributes.ac.flat, 16);
+  assert.equal(actor.system.attributes.prof, 3);
+  assert.equal(actor.system.abilities.str.value, 16);
+  assert.equal(actor.system.abilities.str.proficient, 1);
+  assert.equal(actor.system.skills.ath.value, 1);
+  assert.equal(actor.system.currency.gp, 20);
+  assert.equal(actor.system.spells.spell1.value, 2);
+  assert.equal(actor.system.resources.primary.value, 1);
+  assert.equal(actor.system.bonuses.mwak.attack, "3");
+  assert.equal(actor.system.details.background, "Homebrew Scholar");
+  assert.equal(actor.prototypeToken.width, 2);
+  assert.equal(actor.prototypeToken.height, 2);
+  assert.equal(actor.items.some((item) => item.name === "Fourth"), true);
+  assert.equal(actor.effects.length, 1);
+  assert.equal(actor.flags[MODULE_ID].nativeCharacter.sheetTheme.presetId, "custom");
+  assert.equal(actor.flags[MODULE_ID].nativeCharacter.themeMusic[0], "music/theme.mp3");
 });
 
 test("imports a public portrait, background link, and linked document images end to end", async () => {
@@ -1593,6 +1870,9 @@ test("imports a public portrait, background link, and linked document images end
       id: "character-1",
       name: "Séléné",
       character: {
+        ns_ImageLink: "https://assets.example.com/image/selene.webp",
+        hp: { current: 95, max: 95, temp: 0 },
+        armorClass: 16,
         backgroundId: "background-1",
         spells: [{ spellId: "spell-1" }],
       },
@@ -1645,7 +1925,7 @@ test("fetches a detailed Foundry Import character at most once", async () => {
   await importer.hydrateNetherscrollsImportedCharacter({
     id: "character-1",
     name: "Hero",
-    foundryActor: fullImport.foundryActor,
+    character: fullImport.character,
   }, "campaign-1");
   assert.equal(fetches, 0);
 
@@ -1658,14 +1938,15 @@ test("fetches a detailed Foundry Import character at most once", async () => {
   const refreshed = await importer.hydrateNetherscrollsImportedCharacter({
     id: "character-1",
     name: "Hero",
+    character: { _id: "character-1", name: "Current Hero" },
     foundryActor: {
       name: "Hero",
       type: "character",
       img: "image/old-list-snapshot.png",
     },
   }, "campaign-1");
-  assert.equal(fetches, 2);
-  assert.equal(refreshed.foundryActor.img, "https://assets.example.com/image/hero.png");
+  assert.equal(fetches, 1);
+  assert.equal(refreshed.character.name, "Current Hero");
 });
 
 test("finds a linked character's campaign for the actor-sheet Foundry Import action", async () => {
@@ -1733,7 +2014,7 @@ test("exposes the Foundry Import material submit action", () => {
   assert.match(template, /Foundry Import Material/);
 });
 
-test("omits Netherscrolls and native Foundry class features while preserving real feats in the Foundry Export envelope", () => {
+test("exports only native Character fields while preserving complete embedded content", () => {
   const { context, importer } = createHarness();
   const calls = [];
   const sourceActor = {
@@ -1799,19 +2080,14 @@ test("omits Netherscrolls and native Foundry class features while preserving rea
   const payload = importer.buildFoundryExportPayload(actor);
   assert.deepEqual(calls, [true, false]);
   assert.equal(payload.schemaVersion, 2);
-  assert.equal(payload.systemVersion, context.game.system.version);
-  const expectedActor = clone(sourceActor);
-  expectedActor.items = expectedActor.items.filter(
-    (item) => !["class-feature-1", "foundry-class-feature-1"].includes(item._id)
-  );
-  assert.deepEqual(payload.actor, expectedActor);
-  assert.deepEqual(clone(payload.preparedActor), {
-    system: sourceActor.system,
-    prototypeToken: transformedActor.prototypeToken,
-  });
-  assert.equal(payload.actor.flags.anotherModule.keep, true);
-  assert.equal(payload.actor.effects.length, 1);
+  assert.equal("systemVersion" in payload, false);
+  assert.equal("_id" in payload.actor, false);
+  assert.equal("_stats" in payload.actor, false);
+  assert.equal("effects" in payload.actor, false);
+  assert.equal("anotherModule" in payload.actor.flags, false);
   assert.equal(payload.actor.flags.netherscrolls.characterId, "character-1");
+  assert.deepEqual(clone(payload.actor.system.attributes.hp), { value: 8, max: 10 });
+  assert.equal(payload.actor.system.abilities.str.value, 10);
   assert.equal(payload.actor.items.length, 4);
   assert.equal(payload.actor.items[0].flags.netherscrolls.id, "canonical-item");
   assert.equal(payload.actor.items[1].flags.netherscrolls.id, "canonical-subclass");
@@ -1821,8 +2097,7 @@ test("omits Netherscrolls and native Foundry class features while preserving rea
   assert.equal(payload.actor.items.some((item) => item._id === "foundry-class-feature-1"), false);
   assert.equal(payload.actor.items.some((item) => item._id === "feat-1"), true);
   assert.equal(payload.preparedActor.system.abilities.str.value, 10);
-  assert.equal(payload.actor._stats.modifiedTime, 1700000001000);
-  assert.equal(payload.actor._stats.lastModifiedBy, "gm-1");
+  assert.deepEqual(payload.preparedActor.prototypeToken, transformedActor.prototypeToken);
   assert.equal(payload.actor.items[0]._stats.modifiedTime, 1700000002000);
   assert.equal(payload.actor.items[0]._stats.lastModifiedBy, "player-1");
 });
