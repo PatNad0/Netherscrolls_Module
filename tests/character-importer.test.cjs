@@ -2453,7 +2453,7 @@ test("invalidates an older queue-poll schedule when polling is toggled again", a
   await Promise.resolve();
 
   assert.equal(scheduled.length, 1);
-  assert.equal(scheduled[0].delay, 5 * 60_000);
+  assert.equal(scheduled[0].delay, 30_000);
 });
 
 test("acknowledges a completed import and retries a transient queue deletion", async () => {
