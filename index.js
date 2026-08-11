@@ -138,7 +138,13 @@ const NETHERSCROLLS_CAMPAIGN_CACHE_TTL_MS = 5 * 60_000;
 const NETHERSCROLLS_CHARACTER_SELECTION_CACHE_TTL_MS = 5 * 60_000;
 const NETHERSCROLLS_IMAGE_VALIDATION_CONCURRENCY = 6;
 const NETHERSCROLLS_IMAGE_VALIDATION_TIMEOUT_MS = 15_000;
-const NETHERSCROLLS_EXCLUDED_IMPORT_SOURCE_IDS = new Set(["6a4b21868f309c84b6cb7908"]);
+const NETHERSCROLLS_COMPENDIUM_WRITE_BATCH_SIZE = 50;
+const NETHERSCROLLS_IMPORT_PREPARATION_FRAME_BUDGET_MS = 12;
+const NETHERSCROLLS_FOUNDRY_CREATED_SOURCE_ID = "6a4b21868f309c84b6cb7908";
+const NETHERSCROLLS_EXCLUDED_IMPORT_SOURCE_IDS = new Set([NETHERSCROLLS_FOUNDRY_CREATED_SOURCE_ID]);
+const NETHERSCROLLS_SOURCE_NAME_FALLBACKS = new Map([
+  [NETHERSCROLLS_FOUNDRY_CREATED_SOURCE_ID, "Foundry Export"],
+]);
 const NETHERSCROLLS_IMPORT_ENDPOINTS = {
   classes: `${NETHERSCROLLS_API_BASE}/import/classes`,
   items: `${NETHERSCROLLS_API_BASE}/import/items`,
@@ -162,6 +168,13 @@ const netherscrollsCharacterSelectionRefreshes = new Map();
 const netherscrollsValidImageReferences = new Set();
 const netherscrollsDeadImageReferences = new Set();
 const netherscrollsPendingImageValidations = new Map();
+const netherscrollsSourceNamesById = new Map(NETHERSCROLLS_SOURCE_NAME_FALLBACKS);
+const netherscrollsSourceCatalogState = {
+  apiKey: null,
+  loaded: false,
+  pending: null,
+};
+const NETHERSCROLLS_PACK_FOLDER_INDEX_READY = Symbol("netherscrollsPackFolderIndexReady");
 const netherscrollsCampaignCache = {
   apiKey: null,
   campaigns: null,
@@ -1649,6 +1662,9 @@ async function getNetherscrollsImportSettingsContext(context = {}) {
 }
 
 async function getNetherscrollsImportSourceContext(apiKey) {
+  if (netherscrollsSourceCatalogState.apiKey !== apiKey) {
+    resetNetherscrollsSourceNameCache(apiKey);
+  }
   try {
     const response = await fetch(NETHERSCROLLS_SOURCES_ENDPOINT, {
       method: "GET",
@@ -1666,6 +1682,11 @@ async function getNetherscrollsImportSourceContext(apiKey) {
       throw new Error(message);
     }
 
+    registerNetherscrollsSourceNames(data);
+    if (apiKey === netherscrollsSourceCatalogState.apiKey) {
+      netherscrollsSourceCatalogState.loaded = true;
+    }
+
     return {
       sources: normalizeNetherscrollsImportSources(data),
       sourceLoadError: null,
@@ -1679,14 +1700,157 @@ async function getNetherscrollsImportSourceContext(apiKey) {
   }
 }
 
+function isNetherscrollsSourceObjectId(value) {
+  return /^[a-f\d]{24}$/i.test(String(value ?? "").trim());
+}
+
+function resetNetherscrollsSourceNameCache(apiKey) {
+  netherscrollsSourceNamesById.clear();
+  for (const [id, name] of NETHERSCROLLS_SOURCE_NAME_FALLBACKS) {
+    netherscrollsSourceNamesById.set(id, name);
+  }
+  netherscrollsSourceCatalogState.apiKey = apiKey;
+  netherscrollsSourceCatalogState.loaded = false;
+  netherscrollsSourceCatalogState.pending = null;
+}
+
+function registerNetherscrollsSourceName(idValue, nameValue) {
+  const id = normalizeNetherscrollsReferenceValue(idValue);
+  const name = toTrimmedStringOrNull(nameValue);
+  if (!id || !name || !isNetherscrollsSourceObjectId(id)) return;
+  netherscrollsSourceNamesById.set(id.toLowerCase(), name);
+}
+
+function getNetherscrollsSourceRows(data) {
+  if (Array.isArray(data?.data?.sources)) return data.data.sources;
+  if (Array.isArray(data?.sources)) return data.sources;
+  if (Array.isArray(data)) return data;
+  return [];
+}
+
+function registerNetherscrollsSourceNames(data) {
+  for (const source of getNetherscrollsSourceRows(data)) {
+    registerNetherscrollsSourceName(
+      source?._id ?? source?.id ?? source?.netherscrollsId,
+      source?.name ?? source?.key ?? source?.abbreviation
+    );
+  }
+
+  const meta = data?.meta;
+  for (const source of Array.isArray(meta?.sourceRecords) ? meta.sourceRecords : []) {
+    registerNetherscrollsSourceName(
+      source?._id ?? source?.id ?? source?.netherscrollsId,
+      source?.name ?? source?.key ?? source?.abbreviation
+    );
+  }
+
+  const requestedSources = Array.isArray(meta?.requestedSources) ? meta.requestedSources : [];
+  const displaySources = Array.isArray(meta?.sources) ? meta.sources : [];
+  for (let index = 0; index < Math.min(requestedSources.length, displaySources.length); index += 1) {
+    registerNetherscrollsSourceName(requestedSources[index], displaySources[index]);
+  }
+}
+
+function getNetherscrollsSourceDisplayName(value) {
+  if (value && typeof value === "object") {
+    const embeddedName = toTrimmedStringOrNull(value.name ?? value.label ?? value.key ?? value.abbreviation);
+    if (embeddedName) return embeddedName;
+    value = value._id ?? value.id ?? value.netherscrollsId;
+  }
+  const normalized = toTrimmedStringOrNull(value);
+  if (!normalized) return null;
+  return netherscrollsSourceNamesById.get(normalized.toLowerCase()) ?? normalized;
+}
+
+async function collectNetherscrollsSourceIds(value) {
+  const ids = new Set();
+  const pending = [{ value, parentKey: "" }];
+  const budget = createNetherscrollsMainThreadBudget();
+  while (pending.length) {
+    const current = pending.pop();
+    const currentValue = current?.value;
+    if (!currentValue || typeof currentValue !== "object") continue;
+    if (Array.isArray(currentValue)) {
+      for (const entry of currentValue) pending.push({ value: entry, parentKey: current.parentKey });
+      await yieldNetherscrollsMainThreadIfNeeded(budget);
+      continue;
+    }
+
+    for (const [key, entry] of Object.entries(currentValue)) {
+      const normalizedKey = key.toLowerCase();
+      const isSourceField = normalizedKey === "source" ||
+        ((normalizedKey === "book" || normalizedKey === "custom") && current.parentKey === "source");
+      if (isSourceField) {
+        if (typeof entry === "string" && isNetherscrollsSourceObjectId(entry)) {
+          ids.add(entry.trim().toLowerCase());
+        } else if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+          registerNetherscrollsSourceName(
+            entry._id ?? entry.id ?? entry.netherscrollsId,
+            entry.name ?? entry.label ?? entry.key ?? entry.abbreviation
+          );
+        }
+      }
+      if (entry && typeof entry === "object") {
+        pending.push({ value: entry, parentKey: normalizedKey });
+      }
+    }
+    await yieldNetherscrollsMainThreadIfNeeded(budget);
+  }
+  return ids;
+}
+
+async function loadNetherscrollsSourceNameCatalog(apiKey) {
+  if (!apiKey) return;
+  if (netherscrollsSourceCatalogState.apiKey !== apiKey) {
+    resetNetherscrollsSourceNameCache(apiKey);
+  }
+  if (netherscrollsSourceCatalogState.loaded) return;
+  if (netherscrollsSourceCatalogState.pending) {
+    await netherscrollsSourceCatalogState.pending;
+    return;
+  }
+
+  netherscrollsSourceCatalogState.pending = (async () => {
+    const response = await fetch(NETHERSCROLLS_SOURCES_ENDPOINT, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        "x-api-key": apiKey,
+      },
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(
+        data?.error?.message ?? data?.message ??
+        `Source list failed (${response.status} ${response.statusText}).`
+      );
+    }
+    registerNetherscrollsSourceNames(data);
+    netherscrollsSourceCatalogState.loaded = true;
+  })().finally(() => {
+    netherscrollsSourceCatalogState.pending = null;
+  });
+  await netherscrollsSourceCatalogState.pending;
+}
+
+async function prepareNetherscrollsImportSourceNames(data) {
+  registerNetherscrollsSourceNames(data);
+  const sourceIds = await collectNetherscrollsSourceIds(data);
+  const unresolvedIds = Array.from(sourceIds).filter(
+    (id) => !netherscrollsSourceNamesById.has(id)
+  );
+  if (!unresolvedIds.length) return data;
+
+  try {
+    await loadNetherscrollsSourceNameCatalog(getNetherscrollsApiKey());
+  } catch (err) {
+    console.warn(`${MODULE_ID} | Unable to translate Netherscrolls source ids.`, err);
+  }
+  return data;
+}
+
 function normalizeNetherscrollsImportSources(data) {
-  const rows = Array.isArray(data?.data?.sources)
-    ? data.data.sources
-    : Array.isArray(data?.sources)
-      ? data.sources
-      : Array.isArray(data)
-        ? data
-        : [];
+  const rows = getNetherscrollsSourceRows(data);
 
   return rows
     .map((source) => {
@@ -4910,6 +5074,7 @@ async function sendNetherscrollsImportRequest(importRequest) {
 }
 
 async function applyNetherscrollsImportResponse(data, requestTypeKey = null, allowedTypeKeys = null) {
+  await prepareNetherscrollsImportSourceNames(data);
   await sanitizeNetherscrollsImportResponseImages(data);
   const result = {};
   const allowedTypes = Array.isArray(allowedTypeKeys) ? new Set(allowedTypeKeys) : null;
@@ -5002,6 +5167,7 @@ async function importNetherscrollsClasses(classes) {
   const subclassFolderCache = new Map();
   await ensureNetherscrollsClassFolderTree(classPack, classFolderCache);
   await ensureNetherscrollsSubclassFolderTree(subclassPack, subclassFolderCache);
+  const preparationBudget = createNetherscrollsMainThreadBudget();
 
   for (const classSource of classes) {
     const classNetherscrollsId = getNetherscrollsSourceId(classSource);
@@ -5024,6 +5190,7 @@ async function importNetherscrollsClasses(classes) {
           legacySubclassDeleteIds.push(legacySubclass.id);
         }
       }
+      await yieldNetherscrollsMainThreadIfNeeded(preparationBudget);
       continue;
     }
 
@@ -5060,6 +5227,7 @@ async function importNetherscrollsClasses(classes) {
         if (legacySubclass?.id && legacySubclass?.type === "subclass") {
           legacySubclassDeleteIds.push(legacySubclass.id);
         }
+        await yieldNetherscrollsMainThreadIfNeeded(preparationBudget);
         continue;
       }
 
@@ -5089,6 +5257,7 @@ async function importNetherscrollsClasses(classes) {
         legacySubclassDeleteIds.push(legacySubclass.id);
       }
     }
+    await yieldNetherscrollsMainThreadIfNeeded(preparationBudget);
   }
 
   const ItemClass = Item?.implementation ?? Item;
@@ -5097,10 +5266,14 @@ async function importNetherscrollsClasses(classes) {
   );
   const uniqueSubclassDeleteIds = Array.from(new Set(subclassDeleteIds));
   if (uniqueClassDeleteIds.length) {
-    await ItemClass.deleteDocuments(uniqueClassDeleteIds, { pack: classPack.collection, render: false });
+    await runNetherscrollsCompendiumDocumentBatches(
+      ItemClass, "deleteDocuments", uniqueClassDeleteIds, classPack
+    );
   }
   if (uniqueSubclassDeleteIds.length) {
-    await ItemClass.deleteDocuments(uniqueSubclassDeleteIds, { pack: subclassPack.collection, render: false });
+    await runNetherscrollsCompendiumDocumentBatches(
+      ItemClass, "deleteDocuments", uniqueSubclassDeleteIds, subclassPack
+    );
   }
 
   const classUpdates = classData.filter((item) => item._id);
@@ -5108,17 +5281,25 @@ async function importNetherscrollsClasses(classes) {
   const subclassUpdates = subclassData.filter((item) => item._id);
   const subclassCreates = subclassData.filter((item) => !item._id);
   if (classUpdates.length) {
-    await ItemClass.updateDocuments(classUpdates, { pack: classPack.collection, render: false });
+    await runNetherscrollsCompendiumDocumentBatches(
+      ItemClass, "updateDocuments", classUpdates, classPack
+    );
   }
   if (subclassUpdates.length) {
-    await ItemClass.updateDocuments(subclassUpdates, { pack: subclassPack.collection, render: false });
+    await runNetherscrollsCompendiumDocumentBatches(
+      ItemClass, "updateDocuments", subclassUpdates, subclassPack
+    );
   }
 
   const createdClasses = classCreates.length
-    ? await ItemClass.createDocuments(classCreates, { pack: classPack.collection, render: false })
+    ? await runNetherscrollsCompendiumDocumentBatches(
+      ItemClass, "createDocuments", classCreates, classPack
+    )
     : [];
   const createdSubclasses = subclassCreates.length
-    ? await ItemClass.createDocuments(subclassCreates, { pack: subclassPack.collection, render: false })
+    ? await runNetherscrollsCompendiumDocumentBatches(
+      ItemClass, "createDocuments", subclassCreates, subclassPack
+    )
     : [];
   return {
     created: createdClasses.length,
@@ -5142,6 +5323,7 @@ async function importNetherscrollsClassFeatureItems(classes, pack) {
   const uuidByKey = new Map();
   const folderCache = new Map();
   await ensureNetherscrollsClassFeatureFolderTree(pack, folderCache);
+  const preparationBudget = createNetherscrollsMainThreadBudget();
 
   for (const descriptor of descriptors) {
     if (descriptor.deleted) {
@@ -5149,6 +5331,7 @@ async function importNetherscrollsClassFeatureItems(classes, pack) {
         ? existingByNetherId.get(String(descriptor.netherscrollsId))
         : null;
       if (existing?.id) deleteIds.push(existing.id);
+      await yieldNetherscrollsMainThreadIfNeeded(preparationBudget);
       continue;
     }
 
@@ -5160,6 +5343,7 @@ async function importNetherscrollsClassFeatureItems(classes, pack) {
     const folder = await ensureNetherscrollsClassFeatureFolder(pack, descriptor, folderCache);
     if (folder?.id) prepared.folder = folder.id;
     featureData.push(prepared);
+    await yieldNetherscrollsMainThreadIfNeeded(preparationBudget);
   }
 
   deleteIds.push(...(await getStaleNetherscrollsClassFeatureDocumentIds(pack, classes, descriptors)));
@@ -5167,18 +5351,24 @@ async function importNetherscrollsClassFeatureItems(classes, pack) {
   const ItemClass = Item?.implementation ?? Item;
   const uniqueDeleteIds = Array.from(new Set(deleteIds));
   if (uniqueDeleteIds.length) {
-    await ItemClass.deleteDocuments(uniqueDeleteIds, { pack: pack.collection, render: false });
+    await runNetherscrollsCompendiumDocumentBatches(
+      ItemClass, "deleteDocuments", uniqueDeleteIds, pack
+    );
   }
 
   const updates = featureData.filter((item) => item._id);
   const creates = featureData.filter((item) => !item._id);
   if (updates.length) {
-    await ItemClass.updateDocuments(updates, { pack: pack.collection, render: false });
+    await runNetherscrollsCompendiumDocumentBatches(
+      ItemClass, "updateDocuments", updates, pack
+    );
   }
 
   let created = [];
   if (creates.length) {
-    created = await ItemClass.createDocuments(creates, { pack: pack.collection, render: false });
+    created = await runNetherscrollsCompendiumDocumentBatches(
+      ItemClass, "createDocuments", creates, pack
+    );
     for (const createdDocument of created) {
       const featureKey =
         createdDocument?.getFlag?.(MODULE_ID, "featureKey") ??
@@ -5213,6 +5403,7 @@ async function importNetherscrollsItems(items) {
   const deleteIds = [];
   const folderCache = new Map();
   await ensureNetherscrollsItemFolderTree(pack, folderCache);
+  const preparationBudget = createNetherscrollsMainThreadBudget();
 
   for (const item of items) {
     const netherscrollsId = getNetherscrollsSourceId(item);
@@ -5221,6 +5412,7 @@ async function importNetherscrollsItems(items) {
         ? existingByNetherId.get(String(netherscrollsId))
         : null;
       if (existing?.id) deleteIds.push(existing.id);
+      await yieldNetherscrollsMainThreadIfNeeded(preparationBudget);
       continue;
     }
 
@@ -5231,24 +5423,31 @@ async function importNetherscrollsItems(items) {
     const folder = await ensureNetherscrollsItemFolder(pack, prepared, folderCache);
     if (folder?.id) prepared.folder = folder.id;
     itemData.push(prepared);
+    await yieldNetherscrollsMainThreadIfNeeded(preparationBudget);
   }
 
   const ItemClass = Item?.implementation ?? Item;
   if (deleteIds.length) {
-    await ItemClass.deleteDocuments(deleteIds, { pack: pack.collection, render: false });
+    await runNetherscrollsCompendiumDocumentBatches(
+      ItemClass, "deleteDocuments", deleteIds, pack
+    );
   }
 
   const updates = itemData.filter((item) => item._id);
   const creates = itemData.filter((item) => !item._id);
   if (updates.length) {
-    await ItemClass.updateDocuments(updates, { pack: pack.collection, render: false });
+    await runNetherscrollsCompendiumDocumentBatches(
+      ItemClass, "updateDocuments", updates, pack
+    );
   }
 
   if (!creates.length) {
     return { created: 0, updated: updates.length, deleted: deleteIds.length };
   }
 
-  const created = await ItemClass.createDocuments(creates, { pack: pack.collection, render: false });
+  const created = await runNetherscrollsCompendiumDocumentBatches(
+    ItemClass, "createDocuments", creates, pack
+  );
   return {
     created: created.length,
     updated: updates.length,
@@ -5266,6 +5465,7 @@ async function importNetherscrollsFeats(feats) {
   const deleteIds = [];
   const folderCache = new Map();
   await ensureNetherscrollsFeatFolderTree(pack, folderCache);
+  const preparationBudget = createNetherscrollsMainThreadBudget();
 
   for (const feat of feats) {
     const netherscrollsId = getNetherscrollsSourceId(feat);
@@ -5274,6 +5474,7 @@ async function importNetherscrollsFeats(feats) {
         ? existingByNetherId.get(String(netherscrollsId))
         : null;
       if (existing?.id) deleteIds.push(existing.id);
+      await yieldNetherscrollsMainThreadIfNeeded(preparationBudget);
       continue;
     }
 
@@ -5284,24 +5485,31 @@ async function importNetherscrollsFeats(feats) {
     const folder = await ensureNetherscrollsFeatFolder(pack, prepared, folderCache);
     if (folder?.id) prepared.folder = folder.id;
     featData.push(prepared);
+    await yieldNetherscrollsMainThreadIfNeeded(preparationBudget);
   }
 
   const ItemClass = Item?.implementation ?? Item;
   if (deleteIds.length) {
-    await ItemClass.deleteDocuments(deleteIds, { pack: pack.collection, render: false });
+    await runNetherscrollsCompendiumDocumentBatches(
+      ItemClass, "deleteDocuments", deleteIds, pack
+    );
   }
 
   const updates = featData.filter((feat) => feat._id);
   const creates = featData.filter((feat) => !feat._id);
   if (updates.length) {
-    await ItemClass.updateDocuments(updates, { pack: pack.collection, render: false });
+    await runNetherscrollsCompendiumDocumentBatches(
+      ItemClass, "updateDocuments", updates, pack
+    );
   }
 
   if (!creates.length) {
     return { created: 0, updated: updates.length, deleted: deleteIds.length };
   }
 
-  const created = await ItemClass.createDocuments(creates, { pack: pack.collection, render: false });
+  const created = await runNetherscrollsCompendiumDocumentBatches(
+    ItemClass, "createDocuments", creates, pack
+  );
   return {
     created: created.length,
     updated: updates.length,
@@ -5319,6 +5527,7 @@ async function importNetherscrollsSpells(spells) {
   const deleteIds = [];
   const folderCache = new Map();
   await ensureNetherscrollsSpellFolderTree(pack, folderCache);
+  const preparationBudget = createNetherscrollsMainThreadBudget();
   for (const spell of spells) {
     const netherscrollsId = getNetherscrollsSourceId(spell);
     if (isNetherscrollsDeleted(spell)) {
@@ -5326,6 +5535,7 @@ async function importNetherscrollsSpells(spells) {
         ? existingByNetherId.get(String(netherscrollsId))
         : null;
       if (existing?.id) deleteIds.push(existing.id);
+      await yieldNetherscrollsMainThreadIfNeeded(preparationBudget);
       continue;
     }
 
@@ -5336,24 +5546,31 @@ async function importNetherscrollsSpells(spells) {
     const folder = await ensureNetherscrollsSpellFolder(pack, prepared, folderCache);
     if (folder?.id) prepared.folder = folder.id;
     spellData.push(prepared);
+    await yieldNetherscrollsMainThreadIfNeeded(preparationBudget);
   }
 
   const ItemClass = Item?.implementation ?? Item;
   if (deleteIds.length) {
-    await ItemClass.deleteDocuments(deleteIds, { pack: pack.collection, render: false });
+    await runNetherscrollsCompendiumDocumentBatches(
+      ItemClass, "deleteDocuments", deleteIds, pack
+    );
   }
 
   const updates = spellData.filter((spell) => spell._id);
   const creates = spellData.filter((spell) => !spell._id);
   if (updates.length) {
-    await ItemClass.updateDocuments(updates, { pack: pack.collection, render: false });
+    await runNetherscrollsCompendiumDocumentBatches(
+      ItemClass, "updateDocuments", updates, pack
+    );
   }
 
   if (!creates.length) {
     return { created: 0, updated: updates.length, deleted: deleteIds.length };
   }
 
-  const created = await ItemClass.createDocuments(creates, { pack: pack.collection, render: false });
+  const created = await runNetherscrollsCompendiumDocumentBatches(
+    ItemClass, "createDocuments", creates, pack
+  );
   return {
     created: created.length,
     updated: updates.length,
@@ -5369,11 +5586,13 @@ async function importNetherscrollsGenericFoundryItems(rows, typeKey) {
   const existingByNetherId = await getCompendiumDocumentsByNetherId(pack);
   const itemData = [];
   const deleteIds = [];
+  const preparationBudget = createNetherscrollsMainThreadBudget();
   for (const row of rows) {
     const netherscrollsId = getNetherscrollsSourceId(row);
     if (isNetherscrollsDeleted(row)) {
       const existing = netherscrollsId ? existingByNetherId.get(String(netherscrollsId)) : null;
       if (existing?.id) deleteIds.push(existing.id);
+      await yieldNetherscrollsMainThreadIfNeeded(preparationBudget);
       continue;
     }
 
@@ -5415,21 +5634,28 @@ async function importNetherscrollsGenericFoundryItems(rows, typeKey) {
       }
     }
     itemData.push(source);
+    await yieldNetherscrollsMainThreadIfNeeded(preparationBudget);
   }
 
   const ItemClass = Item?.implementation ?? Item;
   const uniqueDeleteIds = Array.from(new Set(deleteIds));
   if (uniqueDeleteIds.length) {
-    await ItemClass.deleteDocuments(uniqueDeleteIds, { pack: pack.collection, render: false });
+    await runNetherscrollsCompendiumDocumentBatches(
+      ItemClass, "deleteDocuments", uniqueDeleteIds, pack
+    );
   }
 
   const updates = itemData.filter((item) => item._id);
   const creates = itemData.filter((item) => !item._id);
   if (updates.length) {
-    await ItemClass.updateDocuments(updates, { pack: pack.collection, render: false });
+    await runNetherscrollsCompendiumDocumentBatches(
+      ItemClass, "updateDocuments", updates, pack
+    );
   }
   const created = creates.length
-    ? await ItemClass.createDocuments(creates, { pack: pack.collection, render: false })
+    ? await runNetherscrollsCompendiumDocumentBatches(
+      ItemClass, "createDocuments", creates, pack
+    )
     : [];
   return {
     created: created.length,
@@ -5486,7 +5712,21 @@ async function getNetherscrollsCompendiumDocumentsById(pack) {
 }
 
 async function getCompendiumDocumentsByNetherId(pack) {
-  return getNetherscrollsCompendiumDocumentsById(pack);
+  if (!pack) return new Map();
+  const index = await pack.getIndex({
+    fields: [
+      "flags.netherscrolls.id",
+      `flags.${MODULE_ID}.lastRev`,
+      "type",
+      "effects",
+    ],
+  });
+  const documentsById = new Map();
+  for (const entry of getPackIndexEntries(index)) {
+    const netherscrollsId = getItemNetherId(entry);
+    if (netherscrollsId) documentsById.set(String(netherscrollsId), entry);
+  }
+  return documentsById;
 }
 
 function getNetherscrollsResponseDataset(data, dataKey, requestTypeKey = null) {
@@ -8695,10 +8935,12 @@ function slugifyNetherscrollsIdentifier(value) {
 function buildNetherscrollsSpellSource(sourceName, source = {}) {
   const foundrySource = getNetherscrollsFoundrySourceValue(source);
   const foundrySourceBook = typeof foundrySource === "object" ? foundrySource?.book : foundrySource;
+  const book = getNetherscrollsSourceDisplayName(sourceName ?? foundrySourceBook) ?? "";
+  const custom = getNetherscrollsSourceDisplayName(source?.customSource ?? foundrySource?.custom) ?? "";
   return {
-    book: toTrimmedStringOrNull(sourceName ?? foundrySourceBook) ?? "",
+    book,
     page: String(source?.page ?? source?.sourcePage ?? foundrySource?.page ?? ""),
-    custom: String(source?.customSource ?? foundrySource?.custom ?? ""),
+    custom,
     license: String(source?.license ?? foundrySource?.license ?? ""),
     revision: toNumber(source?.revision ?? foundrySource?.revision, 1),
     rules: String(source?.rules ?? foundrySource?.rules ?? "2024"),
@@ -9435,6 +9677,44 @@ function yieldNetherscrollsMainThread() {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+function createNetherscrollsMainThreadBudget(maximumWorkMs = NETHERSCROLLS_IMPORT_PREPARATION_FRAME_BUDGET_MS) {
+  return {
+    maximumWorkMs,
+    startedAt: Date.now(),
+  };
+}
+
+async function yieldNetherscrollsMainThreadIfNeeded(budget) {
+  if (!budget || Date.now() - budget.startedAt < budget.maximumWorkMs) return;
+  await yieldNetherscrollsMainThread();
+  budget.startedAt = Date.now();
+}
+
+async function runNetherscrollsCompendiumDocumentBatches(
+  DocumentClass,
+  method,
+  entries,
+  pack,
+  options = {},
+  batchSize = NETHERSCROLLS_COMPENDIUM_WRITE_BATCH_SIZE
+) {
+  const rows = Array.from(entries ?? []);
+  const results = [];
+  if (!rows.length || typeof DocumentClass?.[method] !== "function") return results;
+  for (let offset = 0; offset < rows.length; offset += batchSize) {
+    const chunk = rows.slice(offset, offset + batchSize);
+    const result = await DocumentClass[method](chunk, {
+      pack: pack.collection,
+      render: false,
+      netherscrollsTransfer: true,
+      ...options,
+    });
+    if (Array.isArray(result)) results.push(...result);
+    if (offset + batchSize < rows.length) await yieldNetherscrollsMainThread();
+  }
+  return results;
+}
+
 async function runNetherscrollsEmbeddedDocumentBatches(
   actor,
   method,
@@ -9542,7 +9822,13 @@ async function ensureNetherscrollsClassFeatureFolder(pack, descriptor, folderCac
 }
 
 async function ensureNetherscrollsMainClassFeatureFolder(pack, classFolder, folderCache) {
-  await pack.getIndex({ fields: ["folder", "name", "type"] }).catch(() => null);
+  const cacheKey = getPackFolderCacheKey({
+    name: NETHERSCROLLS_MAIN_CLASS_FEATURE_FOLDER_NAME,
+    type: "Item",
+    parent: classFolder,
+  });
+  if (folderCache?.has(cacheKey)) return folderCache.get(cacheKey);
+  await prepareNetherscrollsPackFolderIndex(pack, folderCache);
 
   const existing = findPackFolder(pack, {
     name: NETHERSCROLLS_MAIN_CLASS_FEATURE_FOLDER_NAME,
@@ -9572,7 +9858,7 @@ async function ensureNetherscrollsMainClassFeatureFolder(pack, classFolder, fold
           sorting: "m",
           sort: 1000,
         },
-        { pack: pack.collection }
+        { pack: pack.collection, render: false, netherscrollsTransfer: true }
       );
       folderCache?.set(
         getPackFolderCacheKey({
@@ -9712,7 +9998,7 @@ async function findOrCreatePackFolder(pack, { cache, name, type, parent, sort = 
   const cacheKey = getPackFolderCacheKey({ name, type, parent });
   if (cache?.has(cacheKey)) return cache.get(cacheKey);
 
-  await pack.getIndex({ fields: ["folder", "name", "type"] }).catch(() => null);
+  await prepareNetherscrollsPackFolderIndex(pack, cache);
   const existing = findPackFolder(pack, { name, type, parent });
 
   if (existing) {
@@ -9730,10 +10016,16 @@ async function findOrCreatePackFolder(pack, { cache, name, type, parent, sort = 
       folder: parentId,
       sort: sort ?? 0,
     },
-    { pack: pack.collection }
+    { pack: pack.collection, render: false, netherscrollsTransfer: true }
   );
   cache?.set(cacheKey, created);
   return created;
+}
+
+async function prepareNetherscrollsPackFolderIndex(pack, cache) {
+  if (cache?.has(NETHERSCROLLS_PACK_FOLDER_INDEX_READY)) return;
+  await pack.getIndex({ fields: ["folder", "name", "type"] }).catch(() => null);
+  cache?.set(NETHERSCROLLS_PACK_FOLDER_INDEX_READY, true);
 }
 
 function getPackFolderCacheKey({ name, type, parent }) {
@@ -9783,7 +10075,9 @@ async function movePackFolderDocuments(pack, fromFolder, toFolder) {
   const DocumentClass = getPackDocumentClass(pack);
   if (typeof DocumentClass?.updateDocuments !== "function") return 0;
 
-  await DocumentClass.updateDocuments(updates, { pack: pack.collection, render: false });
+  await runNetherscrollsCompendiumDocumentBatches(
+    DocumentClass, "updateDocuments", updates, pack
+  );
   for (const entry of entries) {
     entry.folder = toFolderId;
   }
@@ -9807,7 +10101,7 @@ async function deletePackFolderIfEmpty(pack, folder) {
   const hasDocuments = getPackIndexEntries(pack).some((entry) => getDocumentId(entry.folder) === folderId);
   if (hasDocuments) return false;
 
-  await folder.delete({ pack: pack.collection });
+  await folder.delete({ pack: pack.collection, render: false, netherscrollsTransfer: true });
   return true;
 }
 
@@ -9822,7 +10116,7 @@ async function updatePackFolderSort(folder, pack, sort) {
       sort,
       sorting: "m",
     },
-    { pack: pack.collection }
+    { pack: pack.collection, render: false, netherscrollsTransfer: true }
   );
 }
 

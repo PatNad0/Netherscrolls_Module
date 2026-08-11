@@ -211,6 +211,8 @@ globalThis.__test = {
   normalizeNetherscrollsImagePath,
   normalizeNetherscrollsImportImagePath,
   sanitizeNetherscrollsImportResponseImages,
+  prepareNetherscrollsImportSourceNames,
+  buildNetherscrollsSpellSource,
   normalizeNetherscrollsItemData,
   normalizeNetherscrollsFoundryItemData,
   sortNetherscrollsSpellbookSections,
@@ -954,6 +956,101 @@ test("repairs stale spell methods and levels during an idempotent library update
   assert.equal(spellPack.documents[0].system.sourceItem, "");
 });
 
+test("shows a readable source for records created by Foundry Export", () => {
+  const { importer } = createHarness();
+  const source = importer.buildNetherscrollsSpellSource(
+    "6a4b21868f309c84b6cb7908",
+    {
+      system: {
+        source: {
+          book: "6a4b21868f309c84b6cb7908",
+          custom: "6a4b21868f309c84b6cb7908",
+          rules: "2014",
+        },
+      },
+    }
+  );
+
+  assert.equal(source.book, "Foundry Export");
+  assert.equal(source.custom, "Foundry Export");
+  assert.equal(source.rules, "2014");
+});
+
+test("loads source names only when an import contains an unresolved source id", async () => {
+  const { context, importer } = createHarness();
+  const sourceId = "64b21868f309c84b6cb79081";
+  let sourceRequests = 0;
+  context.fetch = async (url, options) => {
+    assert.equal(options.method, "GET");
+    assert.equal(url.endsWith("/import/sources"), true);
+    sourceRequests += 1;
+    return {
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({
+        data: {
+          sources: [{
+            _id: sourceId,
+            name: "The Adventurer's Handbook",
+            key: "adventurers-handbook",
+            abbreviation: "TAH",
+          }],
+        },
+      }),
+    };
+  };
+
+  const response = {
+    data: {
+      items: [{
+        id: "item-1",
+        source: sourceId,
+        foundryItem: {
+          system: {
+            source: { book: sourceId, custom: sourceId },
+          },
+        },
+      }],
+    },
+  };
+  await importer.prepareNetherscrollsImportSourceNames(response);
+  await importer.prepareNetherscrollsImportSourceNames(response);
+  const source = importer.buildNetherscrollsSpellSource(sourceId, response.data.items[0].foundryItem);
+
+  assert.equal(sourceRequests, 1);
+  assert.equal(source.book, "The Adventurer's Handbook");
+  assert.equal(source.custom, "The Adventurer's Handbook");
+});
+
+test("splits large compendium imports into responsive write batches", async () => {
+  const { context, importer } = createHarness();
+  const itemPack = makePack("world.netherscrolls-items");
+  context.game.packs.set(itemPack.collection, itemPack);
+  const batchSizes = [];
+  const createDocuments = context.Item.implementation.createDocuments;
+  context.Item.implementation.createDocuments = async (rows, options) => {
+    batchSizes.push(rows.length);
+    return createDocuments(rows, options);
+  };
+
+  const items = Array.from({ length: 121 }, (_entry, index) => ({
+    id: `bulk-item-${index + 1}`,
+    name: `Bulk Item ${index + 1}`,
+    type: "loot",
+    description: "Bulk import responsiveness test.",
+  }));
+  const result = await importer.applyNetherscrollsImportResponse(
+    { data: { items } },
+    null,
+    ["items"]
+  );
+
+  assert.deepEqual(batchSizes, [50, 50, 21]);
+  assert.equal(result.items.created, 121);
+  assert.equal(itemPack.documents.length, 121);
+});
+
 test("resolves targeted Import selections without using an invalid Foundry flag scope", async () => {
   const { context, importer } = createHarness();
   const cachePack = makePack("world.cache", [
@@ -1547,9 +1644,9 @@ test("does not embed nested high-level or optional features before repair", asyn
     ).sort(),
     ["class-1", "subclass-1"]
   );
-  assert.equal(classPack.documentLoads, 3);
-  assert.equal(subclassPack.documentLoads, 4);
-  assert.equal(featurePack.documentLoads, 3);
+  assert.equal(classPack.documentLoads, 2);
+  assert.equal(subclassPack.documentLoads, 2);
+  assert.equal(featurePack.documentLoads, 2);
 });
 
 test("class feature repair applies selected choices while filtering unselected/high/owned features", async () => {
