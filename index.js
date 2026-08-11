@@ -2754,6 +2754,7 @@ async function importNetherscrollsCampaignCharacter(importedCharacter, folder, {
     if (netherscrollsCharacterImportLocks.get(characterId) === importPromise) {
       netherscrollsCharacterImportLocks.delete(characterId);
     }
+    scheduleNetherscrollsActorSheetRender(findNetherscrollsActorByCharacterId(characterId));
   }
 }
 
@@ -2767,6 +2768,7 @@ async function applyNetherscrollsCampaignCharacter(importedCharacter, folder, { 
     character: importedCharacter.character,
     foundryItems: importedCharacter.foundryActor?.items,
   });
+  await yieldNetherscrollsMainThread();
 
   onProgress?.("preparing actor data...");
   const actorPayload = {
@@ -2812,6 +2814,7 @@ async function applyNetherscrollsCampaignCharacter(importedCharacter, folder, { 
   const content = await resolveNetherscrollsCharacterItemSources(itemSources, {
     onProgress: (completed, total) => onProgress?.(`looking up imported library content (${completed}/${total})...`),
   });
+  await yieldNetherscrollsMainThread();
   content.items.push(...buildNetherscrollsAdditionalResourceItems(
     importedCharacter.character,
     characterId
@@ -2833,7 +2836,7 @@ async function applyNetherscrollsCampaignCharacter(importedCharacter, folder, { 
     onProgress?.("updating existing Foundry actor...");
     debugNetherscrollsCharacterImport("Updating existing Foundry Actor.", { characterId, actorId: actor.id });
     delete actorPayload.type;
-    await actor.update(actorPayload);
+    await actor.update(actorPayload, { render: false });
   } else {
     const ActorDocumentClass = globalThis.Actor?.implementation ?? globalThis.Actor;
     if (typeof ActorDocumentClass?.create !== "function") {
@@ -2841,16 +2844,18 @@ async function applyNetherscrollsCampaignCharacter(importedCharacter, folder, { 
     }
     onProgress?.("creating Foundry actor...");
     debugNetherscrollsCharacterImport("Creating Foundry Actor.", { characterId, name: actorPayload.name });
-    actor = await ActorDocumentClass.create(actorPayload);
+    actor = await ActorDocumentClass.create(actorPayload, { renderSheet: false });
     debugNetherscrollsCharacterImport("Foundry Actor created.", { characterId, actorId: actor?.id });
   }
   onProgress?.("linking actor to Netherscrolls...");
   await setActorCharacterId(actor, characterId);
+  await yieldNetherscrollsMainThread();
 
   onProgress?.(`adding or updating ${content.items.length} item${content.items.length === 1 ? "" : "s"}...`);
   const itemResult = await reconcileNetherscrollsCharacterActorItems(actor, content.items, characterId, {
     replaceAll: true,
   });
+  await yieldNetherscrollsMainThread();
   debugNetherscrollsCharacterImport("Reconciled character items.", { characterId, itemResult });
   onProgress?.("linking background, race, and original class...");
   const documentLinks = await repairNetherscrollsCharacterActorDocumentLinks(
@@ -2864,6 +2869,7 @@ async function applyNetherscrollsCampaignCharacter(importedCharacter, folder, { 
   });
   onProgress?.(`adding or updating ${effectSources.length} effect${effectSources.length === 1 ? "" : "s"}...`);
   const effectResult = await reconcileNetherscrollsCharacterActorEffects(actor, effectSources, characterId);
+  await yieldNetherscrollsMainThread();
   debugNetherscrollsCharacterImport("Reconciled character effects.", { characterId, effectResult });
   let repairedFeatures = 0;
   try {
@@ -3737,7 +3743,7 @@ async function clearNetherscrollsCharacterLibraryDocuments(entries) {
       .map((id) => documentsById.get(String(id))?.id)
       .filter(Boolean);
     if (documentIds.length) {
-      await ItemClass.deleteDocuments(documentIds, { pack: pack.collection });
+      await ItemClass.deleteDocuments(documentIds, { pack: pack.collection, render: false });
     }
     invalidateNetherscrollsCompendiumDocumentIdCache(dataset);
   }
@@ -4154,10 +4160,16 @@ async function reconcileNetherscrollsCharacterActorItems(
     : [];
 
   if (staleEffectIds.length && actor?.deleteEmbeddedDocuments) {
-    await actor.deleteEmbeddedDocuments("ActiveEffect", staleEffectIds);
+    await runNetherscrollsEmbeddedDocumentBatches(
+      actor, "deleteEmbeddedDocuments", "ActiveEffect", staleEffectIds,
+      { render: false, netherscrollsTransfer: true }
+    );
   }
   if (existingItemIds.size && actor?.deleteEmbeddedDocuments) {
-    await actor.deleteEmbeddedDocuments("Item", Array.from(existingItemIds));
+    await runNetherscrollsEmbeddedDocumentBatches(
+      actor, "deleteEmbeddedDocuments", "Item", existingItemIds,
+      { render: false, netherscrollsTransfer: true }
+    );
   }
 
   for (const item of getNetherscrollsActorItems(actor)) {
@@ -4249,11 +4261,22 @@ async function reconcileNetherscrollsCharacterActorItems(
     ...replacedEffectIds,
   ]));
   if (deleteIds.length && actor?.deleteEmbeddedDocuments) {
-    await actor.deleteEmbeddedDocuments("Item", deleteIds);
+    await runNetherscrollsEmbeddedDocumentBatches(
+      actor, "deleteEmbeddedDocuments", "Item", deleteIds,
+      { render: false, netherscrollsTransfer: true }
+    );
   }
-  if (updates.length) await actor.updateEmbeddedDocuments("Item", updates);
+  if (updates.length) {
+    await runNetherscrollsEmbeddedDocumentBatches(
+      actor, "updateEmbeddedDocuments", "Item", updates,
+      { render: false, netherscrollsTransfer: true }
+    );
+  }
   const createdDocuments = creates.length
-    ? await actor.createEmbeddedDocuments("Item", creates, { renderSheet: false, keepId: true })
+    ? await runNetherscrollsEmbeddedDocumentBatches(
+      actor, "createEmbeddedDocuments", "Item", creates,
+      { render: false, renderSheet: false, keepId: true, netherscrollsTransfer: true }
+    )
     : [];
   const embeddedIds = {};
   for (const update of updates) {
@@ -4353,7 +4376,7 @@ async function repairNetherscrollsCharacterActorDocumentLinks(
     repaired[reference.path] = itemId;
   }
 
-  if (Object.keys(updates).length) await actor.update(updates);
+  if (Object.keys(updates).length) await actor.update(updates, { render: false });
   return repaired;
 }
 
@@ -4457,10 +4480,23 @@ async function reconcileNetherscrollsCharacterActorEffects(actor, effectSources,
     else creates.push(pending.data);
   }
   if (duplicateExistingIds.length && actor?.deleteEmbeddedDocuments) {
-    await actor.deleteEmbeddedDocuments("ActiveEffect", duplicateExistingIds);
+    await runNetherscrollsEmbeddedDocumentBatches(
+      actor, "deleteEmbeddedDocuments", "ActiveEffect", duplicateExistingIds,
+      { render: false, netherscrollsTransfer: true }
+    );
   }
-  if (updates.length) await actor.updateEmbeddedDocuments("ActiveEffect", updates);
-  if (creates.length) await actor.createEmbeddedDocuments("ActiveEffect", creates, { renderSheet: false });
+  if (updates.length) {
+    await runNetherscrollsEmbeddedDocumentBatches(
+      actor, "updateEmbeddedDocuments", "ActiveEffect", updates,
+      { render: false, netherscrollsTransfer: true }
+    );
+  }
+  if (creates.length) {
+    await runNetherscrollsEmbeddedDocumentBatches(
+      actor, "createEmbeddedDocuments", "ActiveEffect", creates,
+      { render: false, renderSheet: false, netherscrollsTransfer: true }
+    );
+  }
   return {
     created: creates.length,
     updated: updates.length,
@@ -4518,11 +4554,13 @@ Hooks.on("renderActorSheetV2", (app, html) => {
   injectFoundryExportButtonV2(app, html);
 });
 
-Hooks.on("createItem", (item) => {
+Hooks.on("createItem", (item, options) => {
+  if (options?.netherscrollsTransfer) return;
   queueNetherscrollsClassFeatureRepairForItem(item, { delay: 100 });
 });
 
-Hooks.on("updateItem", (item, changes) => {
+Hooks.on("updateItem", (item, changes, options) => {
+  if (options?.netherscrollsTransfer) return;
   if (!isNetherscrollsClassRepairUpdate(changes)) return;
   queueNetherscrollsClassFeatureRepairForItem(item, { delay: 100 });
 });
@@ -5059,10 +5097,10 @@ async function importNetherscrollsClasses(classes) {
   );
   const uniqueSubclassDeleteIds = Array.from(new Set(subclassDeleteIds));
   if (uniqueClassDeleteIds.length) {
-    await ItemClass.deleteDocuments(uniqueClassDeleteIds, { pack: classPack.collection });
+    await ItemClass.deleteDocuments(uniqueClassDeleteIds, { pack: classPack.collection, render: false });
   }
   if (uniqueSubclassDeleteIds.length) {
-    await ItemClass.deleteDocuments(uniqueSubclassDeleteIds, { pack: subclassPack.collection });
+    await ItemClass.deleteDocuments(uniqueSubclassDeleteIds, { pack: subclassPack.collection, render: false });
   }
 
   const classUpdates = classData.filter((item) => item._id);
@@ -5070,17 +5108,17 @@ async function importNetherscrollsClasses(classes) {
   const subclassUpdates = subclassData.filter((item) => item._id);
   const subclassCreates = subclassData.filter((item) => !item._id);
   if (classUpdates.length) {
-    await ItemClass.updateDocuments(classUpdates, { pack: classPack.collection });
+    await ItemClass.updateDocuments(classUpdates, { pack: classPack.collection, render: false });
   }
   if (subclassUpdates.length) {
-    await ItemClass.updateDocuments(subclassUpdates, { pack: subclassPack.collection });
+    await ItemClass.updateDocuments(subclassUpdates, { pack: subclassPack.collection, render: false });
   }
 
   const createdClasses = classCreates.length
-    ? await ItemClass.createDocuments(classCreates, { pack: classPack.collection })
+    ? await ItemClass.createDocuments(classCreates, { pack: classPack.collection, render: false })
     : [];
   const createdSubclasses = subclassCreates.length
-    ? await ItemClass.createDocuments(subclassCreates, { pack: subclassPack.collection })
+    ? await ItemClass.createDocuments(subclassCreates, { pack: subclassPack.collection, render: false })
     : [];
   return {
     created: createdClasses.length,
@@ -5129,18 +5167,18 @@ async function importNetherscrollsClassFeatureItems(classes, pack) {
   const ItemClass = Item?.implementation ?? Item;
   const uniqueDeleteIds = Array.from(new Set(deleteIds));
   if (uniqueDeleteIds.length) {
-    await ItemClass.deleteDocuments(uniqueDeleteIds, { pack: pack.collection });
+    await ItemClass.deleteDocuments(uniqueDeleteIds, { pack: pack.collection, render: false });
   }
 
   const updates = featureData.filter((item) => item._id);
   const creates = featureData.filter((item) => !item._id);
   if (updates.length) {
-    await ItemClass.updateDocuments(updates, { pack: pack.collection });
+    await ItemClass.updateDocuments(updates, { pack: pack.collection, render: false });
   }
 
   let created = [];
   if (creates.length) {
-    created = await ItemClass.createDocuments(creates, { pack: pack.collection });
+    created = await ItemClass.createDocuments(creates, { pack: pack.collection, render: false });
     for (const createdDocument of created) {
       const featureKey =
         createdDocument?.getFlag?.(MODULE_ID, "featureKey") ??
@@ -5197,20 +5235,20 @@ async function importNetherscrollsItems(items) {
 
   const ItemClass = Item?.implementation ?? Item;
   if (deleteIds.length) {
-    await ItemClass.deleteDocuments(deleteIds, { pack: pack.collection });
+    await ItemClass.deleteDocuments(deleteIds, { pack: pack.collection, render: false });
   }
 
   const updates = itemData.filter((item) => item._id);
   const creates = itemData.filter((item) => !item._id);
   if (updates.length) {
-    await ItemClass.updateDocuments(updates, { pack: pack.collection });
+    await ItemClass.updateDocuments(updates, { pack: pack.collection, render: false });
   }
 
   if (!creates.length) {
     return { created: 0, updated: updates.length, deleted: deleteIds.length };
   }
 
-  const created = await ItemClass.createDocuments(creates, { pack: pack.collection });
+  const created = await ItemClass.createDocuments(creates, { pack: pack.collection, render: false });
   return {
     created: created.length,
     updated: updates.length,
@@ -5250,20 +5288,20 @@ async function importNetherscrollsFeats(feats) {
 
   const ItemClass = Item?.implementation ?? Item;
   if (deleteIds.length) {
-    await ItemClass.deleteDocuments(deleteIds, { pack: pack.collection });
+    await ItemClass.deleteDocuments(deleteIds, { pack: pack.collection, render: false });
   }
 
   const updates = featData.filter((feat) => feat._id);
   const creates = featData.filter((feat) => !feat._id);
   if (updates.length) {
-    await ItemClass.updateDocuments(updates, { pack: pack.collection });
+    await ItemClass.updateDocuments(updates, { pack: pack.collection, render: false });
   }
 
   if (!creates.length) {
     return { created: 0, updated: updates.length, deleted: deleteIds.length };
   }
 
-  const created = await ItemClass.createDocuments(creates, { pack: pack.collection });
+  const created = await ItemClass.createDocuments(creates, { pack: pack.collection, render: false });
   return {
     created: created.length,
     updated: updates.length,
@@ -5302,20 +5340,20 @@ async function importNetherscrollsSpells(spells) {
 
   const ItemClass = Item?.implementation ?? Item;
   if (deleteIds.length) {
-    await ItemClass.deleteDocuments(deleteIds, { pack: pack.collection });
+    await ItemClass.deleteDocuments(deleteIds, { pack: pack.collection, render: false });
   }
 
   const updates = spellData.filter((spell) => spell._id);
   const creates = spellData.filter((spell) => !spell._id);
   if (updates.length) {
-    await ItemClass.updateDocuments(updates, { pack: pack.collection });
+    await ItemClass.updateDocuments(updates, { pack: pack.collection, render: false });
   }
 
   if (!creates.length) {
     return { created: 0, updated: updates.length, deleted: deleteIds.length };
   }
 
-  const created = await ItemClass.createDocuments(creates, { pack: pack.collection });
+  const created = await ItemClass.createDocuments(creates, { pack: pack.collection, render: false });
   return {
     created: created.length,
     updated: updates.length,
@@ -5382,16 +5420,16 @@ async function importNetherscrollsGenericFoundryItems(rows, typeKey) {
   const ItemClass = Item?.implementation ?? Item;
   const uniqueDeleteIds = Array.from(new Set(deleteIds));
   if (uniqueDeleteIds.length) {
-    await ItemClass.deleteDocuments(uniqueDeleteIds, { pack: pack.collection });
+    await ItemClass.deleteDocuments(uniqueDeleteIds, { pack: pack.collection, render: false });
   }
 
   const updates = itemData.filter((item) => item._id);
   const creates = itemData.filter((item) => !item._id);
   if (updates.length) {
-    await ItemClass.updateDocuments(updates, { pack: pack.collection });
+    await ItemClass.updateDocuments(updates, { pack: pack.collection, render: false });
   }
   const created = creates.length
-    ? await ItemClass.createDocuments(creates, { pack: pack.collection })
+    ? await ItemClass.createDocuments(creates, { pack: pack.collection, render: false })
     : [];
   return {
     created: created.length,
@@ -9393,6 +9431,42 @@ function duplicateNetherscrollsData(value) {
   return JSON.parse(JSON.stringify(value ?? {}));
 }
 
+function yieldNetherscrollsMainThread() {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+async function runNetherscrollsEmbeddedDocumentBatches(
+  actor,
+  method,
+  documentType,
+  entries,
+  options = {},
+  batchSize = 25
+) {
+  const rows = Array.from(entries ?? []);
+  const results = [];
+  if (!rows.length || typeof actor?.[method] !== "function") return results;
+  for (let offset = 0; offset < rows.length; offset += batchSize) {
+    const chunk = rows.slice(offset, offset + batchSize);
+    const result = await actor[method](documentType, chunk, options);
+    if (Array.isArray(result)) results.push(...result);
+    if (offset + batchSize < rows.length) await yieldNetherscrollsMainThread();
+  }
+  return results;
+}
+
+function scheduleNetherscrollsActorSheetRender(actor) {
+  const sheet = actor?.sheet;
+  if (!sheet?.rendered || typeof sheet.render !== "function") return;
+  setTimeout(() => {
+    try {
+      sheet.render(false);
+    } catch (err) {
+      console.warn(`${MODULE_ID} | Unable to refresh the Actor sheet after transfer.`, err);
+    }
+  }, 0);
+}
+
 async function ensureNetherscrollsClassFolderTree(pack, folderCache) {
   await findOrCreatePackFolder(pack, {
     cache: folderCache,
@@ -9709,7 +9783,7 @@ async function movePackFolderDocuments(pack, fromFolder, toFolder) {
   const DocumentClass = getPackDocumentClass(pack);
   if (typeof DocumentClass?.updateDocuments !== "function") return 0;
 
-  await DocumentClass.updateDocuments(updates, { pack: pack.collection });
+  await DocumentClass.updateDocuments(updates, { pack: pack.collection, render: false });
   for (const entry of entries) {
     entry.folder = toFolderId;
   }
@@ -11635,7 +11709,9 @@ async function exportActorToNetherscrolls(actor) {
     console.warn(`${MODULE_ID} | Unable to repair class features before Foundry Export.`, err);
   }
 
+  await yieldNetherscrollsMainThread();
   const exportPayload = buildFoundryExportPayload(actor);
+  await yieldNetherscrollsMainThread();
   const imageJobs = collectNetherscrollsFoundryExportImageJobs(exportPayload);
   if (imageJobs.length) {
     ui?.notifications?.info?.(`${actorName}: ${imageJobs.length} image${imageJobs.length === 1 ? "" : "s"} to move to Netherscrolls.`);
@@ -11723,6 +11799,8 @@ function queueNetherscrollsClassFeatureRepairForItem(item, { delay = 150 } = {})
   if (!isNetherscrollsClassLikeActorItem(item)) return;
   const actor = getNetherscrollsOwnedItemActor(item);
   if (!actor) return;
+  const characterId = getActorCharacterId(actor);
+  if (characterId && netherscrollsCharacterImportLocks.has(characterId)) return;
   queueNetherscrollsActorClassFeatureRepair(actor, { delay });
 }
 
@@ -11824,7 +11902,13 @@ async function repairNetherscrollsActorClassFeatures(actor, { notify = false } =
   }
 
   if (!createData.length) return result;
-  const created = await actor.createEmbeddedDocuments("Item", createData, { renderSheet: false });
+  const created = await runNetherscrollsEmbeddedDocumentBatches(
+    actor,
+    "createEmbeddedDocuments",
+    "Item",
+    createData,
+    { render: false, renderSheet: false, netherscrollsTransfer: true }
+  );
   result.created = Array.isArray(created) ? created.length : createData.length;
   if (notify && result.created > 0) {
     ui?.notifications?.info?.(`Netherscrolls added ${result.created} missing class feature${result.created === 1 ? "" : "s"}.`);
@@ -12092,7 +12176,11 @@ function getNetherscrollsDocumentFlag(document, key) {
 }
 
 function renderFoundryTransferPayload(payload) {
-  const json = JSON.stringify(payload, null, 2);
+  const maximumLength = 50_000;
+  const serialized = JSON.stringify(payload, null, 2);
+  const json = serialized.length > maximumLength
+    ? `${serialized.slice(0, maximumLength)}\n\n… debug payload truncated (${serialized.length - maximumLength} characters omitted)`
+    : serialized;
   const escaped = escapeHtml(json);
   return `<pre class="ns-foundry-transfer-data">${escaped}</pre>`;
 }
@@ -12103,7 +12191,9 @@ function buildFoundryExportPayload(actor) {
   }
 
   const sourceActor = actor.toObject();
-  const preparedActor = actor.toObject(false);
+  const preparedPrototypeToken = typeof actor?.prototypeToken?.toObject === "function"
+    ? actor.prototypeToken.toObject(false)
+    : sourceActor?.prototypeToken;
   const characterId = getActorCharacterId(sourceActor);
   const activeBonuses = extractNetherscrollsPortableActiveBonuses(sourceActor.effects);
   const items = (sourceActor?.items ?? []).filter((item) => (
@@ -12125,7 +12215,7 @@ function buildFoundryExportPayload(actor) {
       // Preserve the pulled export behavior: Active Effects are sent through
       // native activeBonuses, never baked into prepared Actor statistics.
       system: buildNetherscrollsCharacterSystemProjection(sourceActor?.system),
-      prototypeToken: duplicateNetherscrollsData(preparedActor?.prototypeToken ?? {}),
+      prototypeToken: duplicateNetherscrollsData(preparedPrototypeToken ?? {}),
     },
     ...(activeBonuses.length ? { netherscrolls: { activeBonuses } } : {}),
   };
@@ -12251,7 +12341,9 @@ function extractNetherscrollsPortableActiveBonuses(effects) {
 }
 
 async function buildNetherscrollsImageReadyFoundryExportPayload(actor, options = {}) {
+  await yieldNetherscrollsMainThread();
   const payload = buildFoundryExportPayload(actor);
+  await yieldNetherscrollsMainThread();
   return prepareNetherscrollsFoundryExportImages(actor, payload, options);
 }
 
@@ -12293,6 +12385,7 @@ async function prepareNetherscrollsFoundryExportImages(
       label: itemData.name ?? itemData.type ?? "item",
       onImageProgress,
     });
+    await yieldNetherscrollsMainThread();
   }
 
   return payload;
@@ -12384,7 +12477,10 @@ async function cacheNetherscrollsExportActorTokenImage(actor, source, uploadedIm
       exportedTokenImageUrl: uploadedImage.url ?? "",
       exportedTokenImageSha256: uploadedImage.sha256 ?? "",
     };
-    await actor.update({ flags, "prototypeToken.texture.src": uploadedImage.url });
+    await actor.update(
+      { flags, "prototypeToken.texture.src": uploadedImage.url },
+      { render: false, netherscrollsTransfer: true }
+    );
   } catch (err) {
     console.warn(`${MODULE_ID} | Unable to cache the Netherscrolls token image export reference.`, err);
     throw err;
@@ -12514,7 +12610,7 @@ async function cacheNetherscrollsExportImage(document, source, uploadedImage, { 
     if (isCharacter && uploadedImage.url && tokenImage === source) {
       changes["prototypeToken.texture.src"] = uploadedImage.url;
     }
-    await document.update(changes);
+    await document.update(changes, { render: false, netherscrollsTransfer: true });
   } catch (err) {
     console.warn(`${MODULE_ID} | Unable to cache the Netherscrolls image export reference.`, err);
     if (isCharacter) throw err;
@@ -12566,7 +12662,7 @@ async function setNetherscrollsItemIdentifiers(item, { id = null, classId = null
       ...(needsId ? { id: canonicalId } : {}),
       ...(needsClassId ? { classId: canonicalClassId } : {}),
     };
-    await item.update({ flags });
+    await item.update({ flags }, { render: false, netherscrollsTransfer: true });
   } catch (err) {
     console.warn(`${MODULE_ID} | Unable to write canonical Netherscrolls Item flags.`, err);
     throw err;
@@ -12612,14 +12708,14 @@ async function setActorCharacterId(actor, characterId) {
       ...(flags.netherscrolls ?? {}),
       characterId: canonicalId,
     };
-    await actor.update({ flags });
+    await actor.update({ flags }, { render: false });
   } catch (err) {
     console.warn(`${MODULE_ID} | Unable to set actor flags.netherscrolls.characterId.`, err);
     throw err;
   }
 }
 
-async function sendFoundryActorExport(actor, payload = buildFoundryExportPayload(actor)) {
+async function sendFoundryActorExport(actor, payload = null) {
   const apiKey = getNetherscrollsApiKey();
   if (!apiKey) {
     ui?.notifications?.warn?.(
@@ -12628,7 +12724,14 @@ async function sendFoundryActorExport(actor, payload = buildFoundryExportPayload
     throw new Error("Netherscrolls API Key is missing.");
   }
 
+  if (!payload) {
+    await yieldNetherscrollsMainThread();
+    payload = buildFoundryExportPayload(actor);
+    await yieldNetherscrollsMainThread();
+  }
+
   try {
+    await yieldNetherscrollsMainThread();
     const data = await requestNetherscrollsJson(NETHERSCROLLS_EXPORT_ENDPOINT, {
       method: "POST",
       apiKey,
@@ -12644,6 +12747,7 @@ async function sendFoundryActorExport(actor, payload = buildFoundryExportPayload
       });
     }
     await applyFoundryExportCanonicalIds(actor, data);
+    scheduleNetherscrollsActorSheetRender(actor);
     const name = data?.data?.name ?? actor?.name ?? "actor";
     ui?.notifications?.info?.(`${name} has arrived safely in Netherscrolls!`);
     return data;
@@ -12672,17 +12776,17 @@ async function exportNetherscrollsCampaignActors(campaignId, actors, { retryFail
   const maximumAttempts = retryFailedOnce ? 2 : 1;
   for (let attempt = 1; attempt <= maximumAttempts && pending.length; attempt += 1) {
     const endpoint = `${NETHERSCROLLS_CAMPAIGNS_ENDPOINT}/${encodeURIComponent(canonicalCampaignId)}/characters/export`;
-    const requestPayload = {
-      characters: await Promise.all(
-        pending.map(async (entry) => {
-          entry.payload ??= await buildNetherscrollsImageReadyFoundryExportPayload(entry.actor, {
-            apiKey,
-            cache: imageUploadCache,
-          });
-          return entry.payload;
-        })
-      ),
-    };
+    const characters = [];
+    for (const entry of pending) {
+      entry.payload ??= await buildNetherscrollsImageReadyFoundryExportPayload(entry.actor, {
+        apiKey,
+        cache: imageUploadCache,
+      });
+      characters.push(entry.payload);
+      await yieldNetherscrollsMainThread();
+    }
+    const requestPayload = { characters };
+    await yieldNetherscrollsMainThread();
     const { data: responseBody, status } = await requestNetherscrollsJson(endpoint, {
       method: "POST",
       apiKey,
@@ -12712,6 +12816,7 @@ async function exportNetherscrollsCampaignActors(campaignId, actors, { retryFail
         continue;
       }
       await applyFoundryExportCanonicalIds(pendingEntry.actor, result);
+      scheduleNetherscrollsActorSheetRender(pendingEntry.actor);
       succeeded.push({
         actor: pendingEntry.actor,
         originalIndex: pendingEntry.originalIndex,
@@ -12882,7 +12987,7 @@ async function applyFoundryExportCanonicalIds(actor, response) {
     ...collectFoundryExportItemRepairs(response?.resolved),
   ];
   const appliedKeys = new Set();
-  for (const repair of repairs) {
+  for (const [repairIndex, repair] of repairs.entries()) {
     const canonicalId = normalizeNetherscrollsReferenceValue(repair.id);
     if (!canonicalId) continue;
     const item = findFoundryExportRepairItem(actor, repair);
@@ -12897,6 +13002,7 @@ async function applyFoundryExportCanonicalIds(actor, response) {
       id: canonicalId,
       classId: repair.classId,
     });
+    if ((repairIndex + 1) % 10 === 0) await yieldNetherscrollsMainThread();
   }
 }
 

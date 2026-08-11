@@ -2114,6 +2114,11 @@ test("exports only native Character fields while preserving complete embedded co
     prototypeToken: { disposition: 1, sight: { enabled: true } },
   };
   const actor = {
+    prototypeToken: {
+      toObject() {
+        return clone(transformedActor.prototypeToken);
+      },
+    },
     toObject(source = true) {
       calls.push(source);
       return clone(source === false ? transformedActor : sourceActor);
@@ -2121,7 +2126,7 @@ test("exports only native Character fields while preserving complete embedded co
   };
 
   const payload = importer.buildFoundryExportPayload(actor);
-  assert.deepEqual(calls, [true, false]);
+  assert.deepEqual(calls, [true]);
   assert.equal(payload.schemaVersion, 2);
   assert.equal("systemVersion" in payload, false);
   assert.equal("_id" in payload.actor, false);
