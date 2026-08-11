@@ -1461,8 +1461,8 @@ Hooks.once("init", () => {
   });
 
   game.settings.register(MODULE_ID, SETTINGS.importQueuePolling, {
-    name: "EXPERIMENTAL: Poll the Foundry Import queue",
-    hint: "Experimental: periodically apply queued campaign characters using the DM or administrator API key.",
+    name: "EXPERIMENTAL: Poll the Foundry sync queues",
+    hint: "Experimental: periodically apply queued imports and send queued exports using the DM or administrator API key.",
     scope: "world",
     config: true,
     restricted: true,
@@ -2431,11 +2431,11 @@ function toggleNetherscrollsImportQueuePolling(enabled) {
     let nextPollDelay = NETHERSCROLLS_IMPORT_QUEUE_IDLE_POLL_INTERVAL_MS;
     try {
       const result = await pollNetherscrollsImportQueues();
-      if ((result?.imported ?? 0) > 0) {
+      if ((result?.imported ?? 0) > 0 || (result?.exported ?? 0) > 0) {
         nextPollDelay = NETHERSCROLLS_IMPORT_QUEUE_POLL_INTERVAL_MS;
       }
     } catch (err) {
-      console.error(`${MODULE_ID} | Foundry Import queue poll failed.`, err);
+      console.error(`${MODULE_ID} | Foundry sync queue poll failed.`, err);
     } finally {
       if (
         generation === netherscrollsImportQueuePollGeneration &&
@@ -2455,40 +2455,68 @@ function toggleNetherscrollsImportQueuePolling(enabled) {
 async function pollNetherscrollsImportQueues() {
   if (netherscrollsImportQueuePollRunning || !isPrimaryNetherscrollsQueuePoller()) return {
     imported: 0,
+    exported: 0,
     failed: 0,
   };
   const apiKey = getNetherscrollsApiKey();
-  if (!apiKey) return { imported: 0, failed: 0 };
+  if (!apiKey) return { imported: 0, exported: 0, failed: 0 };
 
   netherscrollsImportQueuePollRunning = true;
   let imported = 0;
+  let exported = 0;
   let failed = 0;
   try {
     const campaignIds = await getNetherscrollsImportQueueCampaignIds(apiKey);
-    if (!campaignIds.length) return { imported, failed };
+    if (!campaignIds.length) return { imported, exported, failed };
     const validCampaignIds = new Set(campaignIds);
-    const folder = await findOrCreateNetherscrollsCharacterFolder();
-    if (!folder?.id) throw new Error("Foundry could not create the NS-Character Actor folder.");
+    let folder = null;
 
     for (const campaignId of campaignIds) {
-      let queuedCharacters;
+      let queuedImports = [];
+      let importCampaignAccessRejected = false;
       try {
-        queuedCharacters = await fetchNetherscrollsCampaignImports(campaignId);
+        queuedImports = await fetchNetherscrollsCampaignImports(campaignId);
       } catch (err) {
         if (err?.status === 403 || err?.status === 404) {
-          validCampaignIds.delete(campaignId);
-          await persistNetherscrollsImportQueueCampaignIds(
-            Array.from(validCampaignIds),
-            apiKey
-          );
+          importCampaignAccessRejected = true;
         }
         console.warn(`${MODULE_ID} | Unable to read a Foundry Import campaign queue.`, {
           campaignId,
           error: err,
         });
+      }
+
+      let queuedExports = [];
+      let exportCampaignAccessRejected = false;
+      try {
+        queuedExports = await fetchNetherscrollsCampaignExports(campaignId);
+      } catch (err) {
+        if (err?.status === 403 || err?.status === 404) {
+          exportCampaignAccessRejected = true;
+        }
+        console.warn(`${MODULE_ID} | Unable to read a Foundry Export campaign queue.`, {
+          campaignId,
+          error: err,
+        });
+      }
+      if (importCampaignAccessRejected && exportCampaignAccessRejected) {
+        validCampaignIds.delete(campaignId);
+        await persistNetherscrollsImportQueueCampaignIds(
+          Array.from(validCampaignIds),
+          apiKey
+        );
         continue;
       }
-      for (const importedCharacter of queuedCharacters) {
+      if (queuedImports.length && queuedExports.length) {
+        const exportCharacterIds = new Set(queuedExports.map((entry) => entry.id).filter(Boolean));
+        queuedImports = queuedImports.filter((entry) => !exportCharacterIds.has(entry.id));
+      }
+
+      if (queuedImports.length && !folder) {
+        folder = await findOrCreateNetherscrollsCharacterFolder();
+        if (!folder?.id) throw new Error("Foundry could not create the NS-Character Actor folder.");
+      }
+      for (const importedCharacter of queuedImports) {
         const acknowledgementKey = getNetherscrollsImportAcknowledgementKey(
           campaignId,
           importedCharacter
@@ -2537,13 +2565,70 @@ async function pollNetherscrollsImportQueues() {
           });
         }
       }
+
+      const exportEntries = [];
+      for (const queuedExport of queuedExports) {
+        const syncToken = normalizeNetherscrollsReferenceValue(queuedExport?.raw?.queue?.syncToken);
+        const actor = findNetherscrollsActorForQueuedExport(queuedExport);
+        if (!syncToken || !actor) {
+          failed += 1;
+          console.error(`${MODULE_ID} | Foundry Export queue entry remains queued because its Actor or sync token is unavailable.`, {
+            campaignId,
+            characterId: queuedExport?.id,
+            actorFound: Boolean(actor),
+            syncTokenFound: Boolean(syncToken),
+          });
+          continue;
+        }
+        exportEntries.push({ actor, syncToken });
+      }
+      for (let offset = 0; offset < exportEntries.length; offset += 100) {
+        const chunk = exportEntries.slice(offset, offset + 100);
+        let result;
+        try {
+          result = await exportNetherscrollsCampaignActors(
+            campaignId,
+            chunk,
+            { retryFailedOnce: true }
+          );
+        } catch (err) {
+          failed += chunk.length;
+          console.error(`${MODULE_ID} | Foundry Export queue batch remains queued after a failed request.`, {
+            campaignId,
+            characterIds: chunk.map((entry) => getActorCharacterId(entry.actor)).filter(Boolean),
+            error: err,
+          });
+          continue;
+        }
+        exported += result.succeeded.length;
+        failed += result.failed.length;
+        for (const entry of result.failed) {
+          const stale = entry?.error?.code === "FOUNDRY_EXPORT_SYNC_STALE";
+          const details = {
+            campaignId,
+            characterId: getActorCharacterId(entry.actor),
+            stale,
+            error: entry.error,
+          };
+          if (stale) {
+            console.warn(`${MODULE_ID} | Foundry Export queue entry was replaced before it could be applied.`, details);
+          } else {
+            console.error(`${MODULE_ID} | Foundry Export queue entry was not applied.`, details);
+          }
+        }
+      }
     }
     if (imported) {
       ui?.notifications?.info?.(
         `Foundry Import queue: ${imported} character${imported === 1 ? "" : "s"} applied.`
       );
     }
-    return { imported, failed };
+    if (exported) {
+      ui?.notifications?.info?.(
+        `Foundry Export queue: ${exported} character${exported === 1 ? "" : "s"} sent.`
+      );
+    }
+    return { imported, exported, failed };
   } finally {
     netherscrollsImportQueuePollRunning = false;
   }
@@ -2574,6 +2659,32 @@ async function fetchNetherscrollsCampaignImports(campaignId) {
   return getNetherscrollsApiRows(data)
     .map(normalizeNetherscrollsImportedCharacter)
     .filter(Boolean);
+}
+
+async function fetchNetherscrollsCampaignExports(campaignId) {
+  const apiKey = getNetherscrollsApiKey();
+  const endpoint = `${NETHERSCROLLS_CAMPAIGNS_ENDPOINT}/${encodeURIComponent(campaignId)}/exports`;
+  const data = await requestNetherscrollsJson(endpoint, {
+    method: "GET",
+    apiKey,
+    cache: "no-store",
+    operation: "Foundry Export queue read",
+  });
+  return getNetherscrollsApiRows(data)
+    .map(normalizeNetherscrollsImportedCharacter)
+    .filter(Boolean);
+}
+
+function findNetherscrollsActorForQueuedExport(queuedExport) {
+  const byCharacterId = findNetherscrollsActorByCharacterId(queuedExport?.id);
+  if (byCharacterId) return byCharacterId;
+  const foundryActorId = normalizeNetherscrollsReferenceValue(
+    queuedExport?.character?.foundryFlag ?? queuedExport?.raw?.character?.foundryFlag
+  );
+  if (!foundryActorId) return null;
+  return getWorldActors().find(
+    (actor) => String(actor?.id ?? actor?._id ?? "") === foundryActorId
+  ) ?? null;
 }
 
 async function acknowledgeNetherscrollsCampaignImport(campaignId, characterId) {
@@ -13059,13 +13170,25 @@ async function exportNetherscrollsCampaignActors(campaignId, actors, { retryFail
   if (!apiKey) throw new Error("Netherscrolls API Key is missing. Set it in Module Settings.");
 
   let pending = Array.from(actors ?? [])
-    .filter((actor) => actor?.type === "character")
-    .map((actor, originalIndex) => ({ actor, originalIndex }));
+    .map((candidate, originalIndex) => {
+      const descriptor = candidate?.type === "character"
+        ? { actor: candidate }
+        : candidate;
+      const actor = descriptor?.actor;
+      if (actor?.type !== "character") return null;
+      return {
+        actor,
+        originalIndex,
+        syncToken: normalizeNetherscrollsReferenceValue(descriptor?.syncToken),
+      };
+    })
+    .filter(Boolean);
   if (!pending.length) throw new Error("No Foundry character Actors were selected for Export.");
   if (pending.length > 100) throw new Error("Foundry Export supports at most 100 characters per campaign batch.");
 
   const succeeded = [];
   let failed = [];
+  const nonRetryableFailures = [];
   const imageUploadCache = new Map();
   const maximumAttempts = retryFailedOnce ? 2 : 1;
   for (let attempt = 1; attempt <= maximumAttempts && pending.length; attempt += 1) {
@@ -13076,6 +13199,7 @@ async function exportNetherscrollsCampaignActors(campaignId, actors, { retryFail
         apiKey,
         cache: imageUploadCache,
       });
+      if (entry.syncToken) entry.payload.syncToken = entry.syncToken;
       characters.push(entry.payload);
       await yieldNetherscrollsMainThread();
     }
@@ -13099,14 +13223,19 @@ async function exportNetherscrollsCampaignActors(campaignId, actors, { retryFail
       const result = resultsByIndex.get(requestIndex);
       const ok = status === 200 ? result?.ok !== false : result?.ok === true;
       if (!result || !ok) {
-        failed.push({
+        const failure = {
           ...pendingEntry,
           error: result?.error ?? {
             status,
             code: "FOUNDRY_EXPORT_RESULT_MISSING",
             message: "The API did not return a successful result for this entry.",
           },
-        });
+        };
+        if (failure.error?.code === "FOUNDRY_EXPORT_SYNC_STALE") {
+          nonRetryableFailures.push(failure);
+        } else {
+          failed.push(failure);
+        }
         continue;
       }
       await applyFoundryExportCanonicalIds(pendingEntry.actor, result);
@@ -13121,12 +13250,17 @@ async function exportNetherscrollsCampaignActors(campaignId, actors, { retryFail
     if (status === 200 && failed.length) {
       throw new Error("A 200 campaign Foundry Export response contained a failed or missing entry.");
     }
-    pending = failed.map(({ actor, originalIndex }) => ({ actor, originalIndex }));
+    pending = failed.map(({ actor, originalIndex, syncToken, payload }) => ({
+      actor,
+      originalIndex,
+      syncToken,
+      payload,
+    }));
   }
 
   return {
     succeeded,
-    failed,
+    failed: [...nonRetryableFailures, ...failed],
   };
 }
 

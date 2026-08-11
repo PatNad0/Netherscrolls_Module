@@ -2410,6 +2410,47 @@ test("retries only failed entries from a 207 campaign Foundry Export", async () 
   assert.equal(result.failed.length, 0);
 });
 
+test("does not retry a queued Foundry Export whose sync token became stale", async () => {
+  const { context, importer } = createHarness();
+  const actor = makeActor(context, {
+    name: "Stale Hero",
+    type: "character",
+    flags: { netherscrolls: { characterId: "character-stale" } },
+  });
+  let requests = 0;
+  context.fetch = async (_url, options) => {
+    requests += 1;
+    const body = JSON.parse(options.body);
+    assert.equal(body.characters[0].syncToken, "697412a366e5e9513cbadf82");
+    return {
+      ok: true,
+      status: 207,
+      statusText: "Multi-Status",
+      json: async () => ({
+        data: [{
+          index: 0,
+          ok: false,
+          error: {
+            status: 409,
+            code: "FOUNDRY_EXPORT_SYNC_STALE",
+            message: "Replaced",
+          },
+        }],
+      }),
+    };
+  };
+
+  const result = await importer.exportNetherscrollsCampaignActors(
+    "campaign-1",
+    [{ actor, syncToken: "697412a366e5e9513cbadf82" }]
+  );
+
+  assert.equal(requests, 1);
+  assert.equal(result.succeeded.length, 0);
+  assert.equal(result.failed.length, 1);
+  assert.equal(result.failed[0].error.code, "FOUNDRY_EXPORT_SYNC_STALE");
+});
+
 test("shares and briefly caches the campaign list while allowing a forced refresh", async () => {
   const { context, importer } = createHarness();
   let requests = 0;
@@ -2456,7 +2497,10 @@ test("polls a remembered empty queue once without campaigns or selection", async
   const requests = [];
   context.fetch = async (url, options) => {
     requests.push({ url, method: options.method, cache: options.cache });
-    if (url.endsWith("/campaigns/campaign-1/imports")) {
+    if (
+      url.endsWith("/campaigns/campaign-1/imports") ||
+      url.endsWith("/campaigns/campaign-1/exports")
+    ) {
       return {
         ok: true,
         status: 200,
@@ -2468,11 +2512,98 @@ test("polls a remembered empty queue once without campaigns or selection", async
   };
 
   const result = await importer.pollNetherscrollsImportQueues();
-  assert.deepEqual(clone(result), { imported: 0, failed: 0 });
-  assert.equal(requests.length, 1);
+  assert.deepEqual(clone(result), { imported: 0, exported: 0, failed: 0 });
+  assert.equal(requests.length, 2);
   assert.equal(requests[0].url.endsWith("/campaigns/campaign-1/imports"), true);
+  assert.equal(requests[1].url.endsWith("/campaigns/campaign-1/exports"), true);
   assert.equal(requests[0].method, "GET");
   assert.equal(requests[0].cache, "no-store");
+  assert.equal(requests[1].method, "GET");
+  assert.equal(requests[1].cache, "no-store");
+});
+
+test("polls the Foundry Export queue and echoes its sync token", async () => {
+  const { context, importer } = createHarness();
+  let rememberedCampaigns = "";
+  context.game.settings.get = (_module, key) => {
+    if (key === "nsApiKey") return "test-key";
+    if (key === "foundryImportQueueCampaignIdsV1") return rememberedCampaigns;
+    return false;
+  };
+  context.game.settings.set = async (_module, key, value) => {
+    if (key === "foundryImportQueueCampaignIdsV1") rememberedCampaigns = value;
+    return value;
+  };
+  await importer.persistNetherscrollsImportQueueCampaignIds(["campaign-1"]);
+  const actor = makeActor(context, {
+    name: "Queued Hero",
+    type: "character",
+    system: {},
+    flags: { netherscrolls: { characterId: "character-1" } },
+  });
+  context.game.actors.push(actor);
+  const requests = [];
+  context.fetch = async (url, options) => {
+    requests.push({ url, method: options.method, body: options.body });
+    if (url.endsWith("/campaigns/campaign-1/imports")) {
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({ data: [] }),
+      };
+    }
+    if (url.endsWith("/campaigns/campaign-1/exports")) {
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({
+          data: [{
+            character: { _id: "character-1", name: "Queued Hero" },
+            queue: {
+              id: "queue-1",
+              direction: "export",
+              syncToken: "697412a366e5e9513cbadf82",
+            },
+          }],
+        }),
+      };
+    }
+    if (url.endsWith("/campaigns/campaign-1/characters/export")) {
+      const body = JSON.parse(options.body);
+      assert.equal(body.characters.length, 1);
+      assert.equal(body.characters[0].syncToken, "697412a366e5e9513cbadf82");
+      assert.equal(body.characters[0].actor.name, "Queued Hero");
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({
+          data: [{
+            index: 0,
+            ok: true,
+            data: { characterId: "character-1" },
+            linked: {},
+            resolved: {},
+          }],
+        }),
+      };
+    }
+    throw new Error(`Unexpected request: ${options.method} ${url}`);
+  };
+
+  const result = await importer.pollNetherscrollsImportQueues();
+
+  assert.deepEqual(clone(result), { imported: 0, exported: 1, failed: 0 });
+  assert.deepEqual(
+    requests.map((entry) => `${entry.method} ${new URL(entry.url).pathname}`),
+    [
+      "GET /api/foundry/campaigns/campaign-1/imports",
+      "GET /api/foundry/campaigns/campaign-1/exports",
+      "POST /api/foundry/campaigns/campaign-1/characters/export",
+    ]
+  );
 });
 
 test("does not burst-poll every campaign when campaign discovery returns several", async () => {
@@ -2498,7 +2629,7 @@ test("does not burst-poll every campaign when campaign discovery returns several
   };
 
   const result = await importer.pollNetherscrollsImportQueues();
-  assert.deepEqual(clone(result), { imported: 0, failed: 0 });
+  assert.deepEqual(clone(result), { imported: 0, exported: 0, failed: 0 });
   assert.equal(requests.length, 1);
   assert.equal(requests[0].url.endsWith("/campaigns"), true);
 });
@@ -2522,6 +2653,14 @@ test("invalidates an older queue-poll schedule when polling is toggled again", a
 
   let resolveQueue;
   context.fetch = async (url) => {
+    if (url.endsWith("/campaigns/campaign-1/exports")) {
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({ data: [] }),
+      };
+    }
     assert.equal(url.endsWith("/campaigns/campaign-1/imports"), true);
     return new Promise((resolve) => {
       resolveQueue = resolve;
@@ -2610,6 +2749,14 @@ test("acknowledges a completed import and retries a transient queue deletion", a
         }),
       };
     }
+    if (url.endsWith("/campaigns/campaign-1/exports") && options.method === "GET") {
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({ data: [] }),
+      };
+    }
     if (url.endsWith("/campaigns/campaign-1/imports/character-1") && options.method === "DELETE") {
       deleteAttempts += 1;
       if (deleteAttempts === 1) {
@@ -2631,7 +2778,7 @@ test("acknowledges a completed import and retries a transient queue deletion", a
   };
 
   const result = await importer.pollNetherscrollsImportQueues();
-  assert.deepEqual(clone(result), { imported: 1, failed: 0 });
+  assert.deepEqual(clone(result), { imported: 1, exported: 0, failed: 0 });
   assert.equal(deleteAttempts, 2);
   assert.equal(
     methods.some((entry) => entry.method === "DELETE" && entry.url.endsWith("/imports/character-1")),
@@ -2699,6 +2846,14 @@ test("leaves a Foundry Import queued when a required library document is unavail
         }),
       };
     }
+    if (url.endsWith("/campaigns/campaign-1/exports") && options.method === "GET") {
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({ data: [] }),
+      };
+    }
     if (url.endsWith("/import/selection") && options.method === "POST") {
       return {
         ok: true,
@@ -2718,6 +2873,6 @@ test("leaves a Foundry Import queued when a required library document is unavail
   };
 
   const result = await importer.pollNetherscrollsImportQueues();
-  assert.deepEqual(clone(result), { imported: 0, failed: 1 });
+  assert.deepEqual(clone(result), { imported: 0, exported: 0, failed: 1 });
   assert.equal(acknowledged, false);
 });
