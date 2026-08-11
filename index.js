@@ -133,6 +133,10 @@ const NETHERSCROLLS_SOURCES_ENDPOINT = `${NETHERSCROLLS_API_BASE}/import/sources
 const NETHERSCROLLS_CAMPAIGNS_ENDPOINT = `${NETHERSCROLLS_API_BASE}/campaigns`;
 const NETHERSCROLLS_SOURCE_IMPORT_ENDPOINT = `${NETHERSCROLLS_API_BASE}/import/source`;
 const NETHERSCROLLS_IMPORT_QUEUE_POLL_INTERVAL_MS = 60_000;
+const NETHERSCROLLS_CAMPAIGN_CACHE_TTL_MS = 5 * 60_000;
+const NETHERSCROLLS_CHARACTER_SELECTION_CACHE_TTL_MS = 5 * 60_000;
+const NETHERSCROLLS_IMAGE_VALIDATION_CONCURRENCY = 6;
+const NETHERSCROLLS_IMAGE_VALIDATION_TIMEOUT_MS = 15_000;
 const NETHERSCROLLS_EXCLUDED_IMPORT_SOURCE_IDS = new Set(["6a4b21868f309c84b6cb7908"]);
 const NETHERSCROLLS_IMPORT_ENDPOINTS = {
   classes: `${NETHERSCROLLS_API_BASE}/import/classes`,
@@ -152,6 +156,16 @@ const NETHERSCROLLS_DEFAULT_IMAGE = "https://i.postimg.cc/wBj0LZyj/image.png";
 const NETHERSCROLLS_IMPORT_IMAGE = NETHERSCROLLS_DEFAULT_IMAGE;
 const netherscrollsCharacterImportState = new WeakMap();
 const netherscrollsCharacterImportLocks = new Map();
+const netherscrollsCharacterSelectionRefreshes = new Map();
+const netherscrollsValidImageReferences = new Set();
+const netherscrollsDeadImageReferences = new Set();
+const netherscrollsPendingImageValidations = new Map();
+const netherscrollsCampaignCache = {
+  apiKey: null,
+  campaigns: null,
+  expiresAt: 0,
+  pending: null,
+};
 const NETHERSCROLLS_MAX_SPELL_LEVEL = 15;
 const NETHERSCROLLS_ITEM_FOLDERS = [
   { type: "weapon", label: "Weapons", sort: 1000 },
@@ -848,6 +862,7 @@ const SETTINGS = {
   exportButton: "showFoundryExportButton",
   importQueuePolling: "pollFoundryImportQueue",
   importQueuePollingSafetyReset: "pollFoundryImportQueueSafetyResetV1",
+  importQueueCampaignIds: "foundryImportQueueCampaignIdsV1",
   debug: "debugMode",
   devEnhancedDamage: "devEnhancedDamage",
   hardVision: "enableHardVision",
@@ -1446,6 +1461,13 @@ Hooks.once("init", () => {
     type: Boolean,
     default: false,
   });
+  game.settings.register(MODULE_ID, SETTINGS.importQueueCampaignIds, {
+    scope: "world",
+    config: false,
+    restricted: true,
+    type: String,
+    default: "",
+  });
 
 
   game.settings.register(MODULE_ID, SETTINGS.debug, {
@@ -1918,6 +1940,7 @@ function activateNetherscrollsCharacterImportListeners(root) {
     loadNetherscrollsCampaignsIntoForm(root, { force: true });
   });
   campaignSelect?.addEventListener("change", () => {
+    rememberNetherscrollsImportQueueCampaignId(campaignSelect.value);
     loadNetherscrollsCampaignCharactersIntoForm(root, campaignSelect.value);
   });
   panel.querySelector('[data-ns-character-action="select-all"]')?.addEventListener("click", () => {
@@ -2032,7 +2055,7 @@ async function refreshNetherscrollsCharacterImportAvailability(root) {
       ? "Select a campaign, then choose the Netherscrolls characters to create or update in Foundry."
       : "Select a campaign. Missing linked records will be fetched through targeted Foundry Import selection.";
   }
-  await loadNetherscrollsCampaignsIntoForm(root, { force: true });
+  await loadNetherscrollsCampaignsIntoForm(root);
 }
 
 async function loadNetherscrollsCampaignsIntoForm(root, { force = false } = {}) {
@@ -2046,7 +2069,7 @@ async function loadNetherscrollsCampaignsIntoForm(root, { force = false } = {}) 
   setNetherscrollsCharacterImportMessage(root, "Loading campaigns available to this API key…");
   select.disabled = true;
   try {
-    const campaigns = await fetchNetherscrollsCampaigns();
+    const campaigns = await fetchNetherscrollsCampaigns({ force });
     state.campaigns = campaigns;
     const previousValue = select.value;
     select.replaceChildren();
@@ -2081,23 +2104,142 @@ async function loadNetherscrollsCampaignsIntoForm(root, { force = false } = {}) 
   }
 }
 
-async function fetchNetherscrollsCampaigns() {
+async function fetchNetherscrollsCampaigns({ force = false } = {}) {
   const apiKey = getNetherscrollsApiKey();
   if (!apiKey) throw new Error("Netherscrolls API Key is missing. Set it in Module Settings.");
-  const data = await fetchNetherscrollsApiJson(NETHERSCROLLS_CAMPAIGNS_ENDPOINT, apiKey);
-  const rows = getNetherscrollsApiRows(data);
-  return rows
-    .map((campaign) => {
-      const id = normalizeNetherscrollsReferenceValue(
-        campaign?._id ?? campaign?.id ?? campaign?.campaignId ?? campaign?.netherscrollsId
-      );
-      if (!id) return null;
-      const name = toTrimmedStringOrNull(campaign?.name ?? campaign?.title) ?? id;
-      const detail = toTrimmedStringOrNull(campaign?.system ?? campaign?.description ?? campaign?.code);
-      return { id, label: detail ? `${name} — ${detail}` : name };
-    })
-    .filter(Boolean)
-    .sort((a, b) => a.label.localeCompare(b.label));
+  const now = Date.now();
+  if (
+    !force &&
+    netherscrollsCampaignCache.apiKey === apiKey &&
+    Array.isArray(netherscrollsCampaignCache.campaigns) &&
+    netherscrollsCampaignCache.expiresAt > now
+  ) {
+    return netherscrollsCampaignCache.campaigns;
+  }
+  if (netherscrollsCampaignCache.apiKey === apiKey && netherscrollsCampaignCache.pending) {
+    return netherscrollsCampaignCache.pending;
+  }
+
+  const pending = (async () => {
+    const data = await fetchNetherscrollsApiJson(NETHERSCROLLS_CAMPAIGNS_ENDPOINT, apiKey);
+    const rows = getNetherscrollsApiRows(data);
+    const campaigns = rows
+      .map((campaign) => {
+        const id = normalizeNetherscrollsReferenceValue(
+          campaign?._id ?? campaign?.id ?? campaign?.campaignId ?? campaign?.netherscrollsId
+        );
+        if (!id) return null;
+        const name = toTrimmedStringOrNull(campaign?.name ?? campaign?.title) ?? id;
+        const detail = toTrimmedStringOrNull(campaign?.system ?? campaign?.description ?? campaign?.code);
+        return { id, label: detail ? `${name} — ${detail}` : name };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.label.localeCompare(b.label));
+    if (netherscrollsCampaignCache.apiKey === apiKey) {
+      netherscrollsCampaignCache.campaigns = campaigns;
+      netherscrollsCampaignCache.expiresAt = Date.now() + NETHERSCROLLS_CAMPAIGN_CACHE_TTL_MS;
+    }
+    if (campaigns.length === 1) {
+      await persistNetherscrollsImportQueueCampaignIds([campaigns[0].id], apiKey);
+    }
+    return campaigns;
+  })();
+  netherscrollsCampaignCache.apiKey = apiKey;
+  netherscrollsCampaignCache.pending = pending;
+  try {
+    return await pending;
+  } finally {
+    if (netherscrollsCampaignCache.pending === pending) {
+      netherscrollsCampaignCache.pending = null;
+    }
+  }
+}
+
+function getPersistedNetherscrollsImportQueueCampaignIds(apiKey = getNetherscrollsApiKey()) {
+  if (!apiKey) return [];
+  const raw = game?.settings?.get?.(MODULE_ID, SETTINGS.importQueueCampaignIds);
+  if (typeof raw !== "string" || !raw.trim()) return [];
+  try {
+    const stored = JSON.parse(raw);
+    if (stored?.apiKeyFingerprint !== buildNetherscrollsStableId(apiKey)) return [];
+    return Array.from(new Set(
+      (Array.isArray(stored?.campaignIds) ? stored.campaignIds : [])
+        .map(normalizeNetherscrollsReferenceValue)
+        .filter(Boolean)
+    ));
+  } catch (_err) {
+    return [];
+  }
+}
+
+async function persistNetherscrollsImportQueueCampaignIds(
+  campaignIds,
+  apiKey = getNetherscrollsApiKey()
+) {
+  if (!apiKey || typeof game?.settings?.set !== "function") return;
+  const ids = Array.from(new Set(
+    (Array.isArray(campaignIds) ? campaignIds : [])
+      .map(normalizeNetherscrollsReferenceValue)
+      .filter(Boolean)
+  ));
+  const value = JSON.stringify({
+    apiKeyFingerprint: buildNetherscrollsStableId(apiKey),
+    campaignIds: ids,
+  });
+  try {
+    await game.settings.set(MODULE_ID, SETTINGS.importQueueCampaignIds, value);
+  } catch (err) {
+    console.warn(`${MODULE_ID} | Unable to remember Foundry Import queue campaign ids.`, err);
+  }
+}
+
+function rememberNetherscrollsImportQueueCampaignId(campaignId) {
+  const id = normalizeNetherscrollsReferenceValue(campaignId);
+  if (!id) return;
+  persistNetherscrollsImportQueueCampaignIds([id]);
+}
+
+function getNetherscrollsActorCampaignIds() {
+  const ids = [];
+  for (const actor of getWorldActors()) {
+    const nativeCharacter =
+      actor?.getFlag?.(MODULE_ID, "nativeCharacter") ??
+      actor?.flags?.[MODULE_ID]?.nativeCharacter;
+    const id = normalizeNetherscrollsReferenceValue(nativeCharacter?.campaignId);
+    if (id) ids.push(id);
+  }
+  return Array.from(new Set(ids));
+}
+
+async function getNetherscrollsImportQueueCampaignIds(apiKey = getNetherscrollsApiKey()) {
+  const persisted = getPersistedNetherscrollsImportQueueCampaignIds(apiKey);
+  if (persisted.length === 1) return persisted;
+
+  const actorCampaignIds = getNetherscrollsActorCampaignIds();
+  if (actorCampaignIds.length === 1) {
+    await persistNetherscrollsImportQueueCampaignIds(actorCampaignIds, apiKey);
+    return actorCampaignIds;
+  }
+  if (persisted.length > 1 && actorCampaignIds.length) {
+    const matchingActorCampaignIds = actorCampaignIds.filter((id) => persisted.includes(id));
+    if (matchingActorCampaignIds.length === 1) {
+      await persistNetherscrollsImportQueueCampaignIds(matchingActorCampaignIds, apiKey);
+      return matchingActorCampaignIds;
+    }
+  }
+
+  const campaigns = await fetchNetherscrollsCampaigns();
+  if (campaigns.length === 1) {
+    await persistNetherscrollsImportQueueCampaignIds([campaigns[0].id], apiKey);
+    return [campaigns[0].id];
+  }
+  if (campaigns.length > 1) {
+    console.warn(
+      `${MODULE_ID} | Foundry Import queue polling needs one campaign. ` +
+      "Select the campaign once in Foundry Import; its id will then be remembered."
+    );
+  }
+  return [];
 }
 
 async function disableLegacyNetherscrollsImportQueuePolling() {
@@ -2111,6 +2253,7 @@ async function disableLegacyNetherscrollsImportQueuePolling() {
 }
 
 function toggleNetherscrollsImportQueuePolling(enabled) {
+  const generation = ++netherscrollsImportQueuePollGeneration;
   if (netherscrollsImportQueuePollTimer) {
     clearTimeout(netherscrollsImportQueuePollTimer);
     netherscrollsImportQueuePollTimer = null;
@@ -2118,12 +2261,14 @@ function toggleNetherscrollsImportQueuePolling(enabled) {
   if (!enabled || !game?.ready || !isPrimaryNetherscrollsQueuePoller()) return;
 
   const run = async () => {
+    if (generation !== netherscrollsImportQueuePollGeneration) return;
     try {
       await pollNetherscrollsImportQueues();
     } catch (err) {
       console.error(`${MODULE_ID} | Foundry Import queue poll failed.`, err);
     } finally {
       if (
+        generation === netherscrollsImportQueuePollGeneration &&
         game?.settings?.get(MODULE_ID, SETTINGS.importQueuePolling) === true &&
         isPrimaryNetherscrollsQueuePoller()
       ) {
@@ -2149,24 +2294,41 @@ async function pollNetherscrollsImportQueues() {
   let imported = 0;
   let failed = 0;
   try {
-    const campaigns = await fetchNetherscrollsCampaigns();
-    if (!campaigns.length) return { imported, failed };
+    const campaignIds = await getNetherscrollsImportQueueCampaignIds(apiKey);
+    if (!campaignIds.length) return { imported, failed };
+    const validCampaignIds = new Set(campaignIds);
     const folder = await findOrCreateNetherscrollsCharacterFolder();
     if (!folder?.id) throw new Error("Foundry could not create the NS-Character Actor folder.");
 
-    for (const campaign of campaigns) {
-      const queuedCharacters = await fetchNetherscrollsCampaignImports(campaign.id);
+    for (const campaignId of campaignIds) {
+      let queuedCharacters;
+      try {
+        queuedCharacters = await fetchNetherscrollsCampaignImports(campaignId);
+      } catch (err) {
+        if (err?.status === 403 || err?.status === 404) {
+          validCampaignIds.delete(campaignId);
+          await persistNetherscrollsImportQueueCampaignIds(
+            Array.from(validCampaignIds),
+            apiKey
+          );
+        }
+        console.warn(`${MODULE_ID} | Unable to read a Foundry Import campaign queue.`, {
+          campaignId,
+          error: err,
+        });
+        continue;
+      }
       for (const importedCharacter of queuedCharacters) {
         try {
           await importNetherscrollsCampaignCharacter(importedCharacter, folder);
-          await acknowledgeNetherscrollsCampaignImport(campaign.id, importedCharacter.id);
+          await acknowledgeNetherscrollsCampaignImport(campaignId, importedCharacter.id);
           imported += 1;
         } catch (err) {
           failed += 1;
           console.error(
             `${MODULE_ID} | Foundry Import queue entry remains queued after a failed apply.`,
             {
-              campaignId: campaign.id,
+              campaignId,
               characterId: importedCharacter.id,
               error: err,
             }
@@ -2530,6 +2692,11 @@ async function applyNetherscrollsCampaignCharacter(importedCharacter, folder, { 
   if (!importedCharacter?.character || typeof importedCharacter.character !== "object") {
     throw new Error("The Foundry Import response has no native character payload.");
   }
+
+  await sanitizeNetherscrollsImportResponseImages({
+    character: importedCharacter.character,
+    foundryItems: importedCharacter.foundryActor?.items,
+  });
 
   onProgress?.("preparing actor data...");
   const actorPayload = {
@@ -3412,16 +3579,38 @@ async function importMissingNetherscrollsCharacterDocuments(sources) {
     const dataset = descriptor?.dataset;
     const id = normalizeNetherscrollsReferenceValue(descriptor?.netherscrollsId);
     if (!id || !supportedDatasets.has(dataset)) continue;
-    // Character imports must not embed an old local compendium version. Refresh
-    // every linked record from the API, even when its Netherscrolls id already
-    // exists in Foundry, so imported effects and configuration are authoritative.
+    // Refresh linked records from the API unless this client just refreshed the
+    // same healthy canonical document. This preserves authoritative content
+    // while avoiding identical selection requests across adjacent characters.
     refresh.push({ dataset, id });
   }
   if (!refresh.length) return 0;
 
-  const unique = Array.from(
+  const candidates = Array.from(
     new Map(refresh.map((entry) => [`${entry.dataset}:${entry.id}`, entry])).values()
   );
+  const now = Date.now();
+  for (const [cacheKey, refreshedAt] of netherscrollsCharacterSelectionRefreshes) {
+    if (now - refreshedAt >= NETHERSCROLLS_CHARACTER_SELECTION_CACHE_TTL_MS) {
+      netherscrollsCharacterSelectionRefreshes.delete(cacheKey);
+    }
+  }
+  const unique = [];
+  for (const entry of candidates) {
+    const cacheKey = `${entry.dataset}:${entry.id}`;
+    const refreshedAt = netherscrollsCharacterSelectionRefreshes.get(cacheKey) ?? 0;
+    if (now - refreshedAt >= NETHERSCROLLS_CHARACTER_SELECTION_CACHE_TTL_MS) {
+      unique.push(entry);
+      continue;
+    }
+    const document = await findNetherscrollsCompendiumDocumentById(entry.dataset, entry.id);
+    if (!document || isStaleNetherscrollsCharacterLibraryDocument(document, entry.dataset)) {
+      netherscrollsCharacterSelectionRefreshes.delete(cacheKey);
+      unique.push(entry);
+    }
+  }
+  if (!unique.length) return 0;
+
   let importedCount = 0;
   for (let offset = 0; offset < unique.length; offset += 100) {
     const chunk = unique.slice(offset, offset + 100);
@@ -3441,6 +3630,15 @@ async function importMissingNetherscrollsCharacterDocuments(sources) {
     // documents while updating the outer Item.
     await clearNetherscrollsCharacterLibraryDocuments(chunk);
     await applyNetherscrollsImportResponse(response, null, Object.keys(selection));
+    for (const entry of chunk) {
+      const document = await findNetherscrollsCompendiumDocumentById(entry.dataset, entry.id);
+      const cacheKey = `${entry.dataset}:${entry.id}`;
+      if (document && !isStaleNetherscrollsCharacterLibraryDocument(document, entry.dataset)) {
+        netherscrollsCharacterSelectionRefreshes.set(cacheKey, Date.now());
+      } else {
+        netherscrollsCharacterSelectionRefreshes.delete(cacheKey);
+      }
+    }
     importedCount += Object.values(response?.data ?? {})
       .filter(Array.isArray)
       .reduce((count, rows) => count + rows.length, 0);
@@ -4285,6 +4483,7 @@ const netherscrollsClassFeatureRepairTimers = new Map();
 const netherscrollsSpellbookPatchedClasses = new WeakSet();
 let netherscrollsImportQueuePollTimer = null;
 let netherscrollsImportQueuePollRunning = false;
+let netherscrollsImportQueuePollGeneration = 0;
 
 function installNetherscrollsSpellbookSectionOrdering() {
   const characterSheets = globalThis.CONFIG?.Actor?.sheetClasses?.character ?? {};
@@ -4603,6 +4802,7 @@ async function sendNetherscrollsImportRequest(importRequest) {
 }
 
 async function applyNetherscrollsImportResponse(data, requestTypeKey = null, allowedTypeKeys = null) {
+  await sanitizeNetherscrollsImportResponseImages(data);
   const result = {};
   const allowedTypes = Array.isArray(allowedTypeKeys) ? new Set(allowedTypeKeys) : null;
   const shouldImportType = (typeKey) => !allowedTypes || allowedTypes.has(typeKey);
@@ -5253,6 +5453,7 @@ function normalizeNetherscrollsPersistentImageValues(values, fallback) {
 
 function normalizeNetherscrollsPersistentImagePath(value, fallback = NETHERSCROLLS_DEFAULT_IMAGE) {
   const img = String(value ?? "").trim();
+  if (netherscrollsDeadImageReferences.has(img)) return fallback;
   if (/^https?:\/\//i.test(img)) return img;
   if (isNetherscrollsUnresolvedImageKey(img)) {
     console.error(
@@ -5263,6 +5464,116 @@ function normalizeNetherscrollsPersistentImagePath(value, fallback = NETHERSCROL
     return fallback;
   }
   return img || fallback;
+}
+
+function isNetherscrollsHostedAssetImage(value) {
+  const raw = toTrimmedStringOrNull(value);
+  if (!raw || !/^https?:\/\//i.test(raw)) return false;
+  try {
+    const url = new URL(raw);
+    return (
+      url.hostname.toLowerCase() === "images.netherscrolls.ca" &&
+      /^\/assets\//i.test(url.pathname)
+    );
+  } catch (_err) {
+    return false;
+  }
+}
+
+function collectNetherscrollsHostedAssetImages(value, found = new Set()) {
+  if (typeof value === "string") {
+    if (isNetherscrollsHostedAssetImage(value)) found.add(value.trim());
+    return found;
+  }
+  if (!value || typeof value !== "object") return found;
+  if (Array.isArray(value)) {
+    for (const entry of value) collectNetherscrollsHostedAssetImages(entry, found);
+    return found;
+  }
+  for (const entry of Object.values(value)) {
+    collectNetherscrollsHostedAssetImages(entry, found);
+  }
+  return found;
+}
+
+function validateNetherscrollsHostedAssetImage(url) {
+  if (netherscrollsValidImageReferences.has(url)) return Promise.resolve(true);
+  if (netherscrollsDeadImageReferences.has(url)) return Promise.resolve(false);
+  const pending = netherscrollsPendingImageValidations.get(url);
+  if (pending) return pending;
+
+  const ImageClass = globalThis.Image;
+  if (typeof ImageClass !== "function") return Promise.resolve(null);
+  const validation = new Promise((resolve) => {
+    const image = new ImageClass();
+    let complete = false;
+    const finish = (valid) => {
+      if (complete) return;
+      complete = true;
+      clearTimeout(timeout);
+      image.onload = null;
+      image.onerror = null;
+      resolve(valid);
+    };
+    const timeout = setTimeout(
+      () => finish(null),
+      NETHERSCROLLS_IMAGE_VALIDATION_TIMEOUT_MS
+    );
+    image.onload = () => finish(true);
+    image.onerror = () => finish(false);
+    image.src = url;
+  }).then((valid) => {
+    if (valid === true) netherscrollsValidImageReferences.add(url);
+    if (valid === false) {
+      netherscrollsDeadImageReferences.add(url);
+      console.warn(`${MODULE_ID} | Replacing an unavailable Netherscrolls image reference.`, url);
+    }
+    return valid;
+  }).finally(() => {
+    netherscrollsPendingImageValidations.delete(url);
+  });
+  netherscrollsPendingImageValidations.set(url, validation);
+  return validation;
+}
+
+function replaceDeadNetherscrollsImageReferences(value) {
+  if (!value || typeof value !== "object") return value;
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      const entry = value[index];
+      if (typeof entry === "string" && netherscrollsDeadImageReferences.has(entry.trim())) {
+        value[index] = NETHERSCROLLS_IMPORT_IMAGE;
+      } else {
+        replaceDeadNetherscrollsImageReferences(entry);
+      }
+    }
+    return value;
+  }
+  for (const [key, entry] of Object.entries(value)) {
+    if (typeof entry === "string" && netherscrollsDeadImageReferences.has(entry.trim())) {
+      value[key] = NETHERSCROLLS_IMPORT_IMAGE;
+    } else {
+      replaceDeadNetherscrollsImageReferences(entry);
+    }
+  }
+  return value;
+}
+
+async function sanitizeNetherscrollsImportResponseImages(data) {
+  const urls = Array.from(collectNetherscrollsHostedAssetImages(data));
+  if (!urls.length || typeof globalThis.Image !== "function") return data;
+
+  let nextIndex = 0;
+  const worker = async () => {
+    while (nextIndex < urls.length) {
+      const url = urls[nextIndex];
+      nextIndex += 1;
+      await validateNetherscrollsHostedAssetImage(url);
+    }
+  };
+  const workerCount = Math.min(NETHERSCROLLS_IMAGE_VALIDATION_CONCURRENCY, urls.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return replaceDeadNetherscrollsImageReferences(data);
 }
 
 function isNetherscrollsUnresolvedImageKey(value) {

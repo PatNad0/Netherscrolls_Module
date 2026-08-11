@@ -210,6 +210,7 @@ globalThis.__test = {
   buildNetherscrollsAdditionalResourceItems,
   normalizeNetherscrollsImagePath,
   normalizeNetherscrollsImportImagePath,
+  sanitizeNetherscrollsImportResponseImages,
   normalizeNetherscrollsItemData,
   normalizeNetherscrollsFoundryItemData,
   sortNetherscrollsSpellbookSections,
@@ -236,6 +237,9 @@ globalThis.__test = {
   applyFoundryExportCanonicalIds,
   exportNetherscrollsCampaignActors,
   importMissingNetherscrollsCharacterDocuments,
+  fetchNetherscrollsCampaigns,
+  persistNetherscrollsImportQueueCampaignIds,
+  toggleNetherscrollsImportQueuePolling,
   pollNetherscrollsImportQueues
 };`, context, { filename: "index.js" });
 
@@ -1040,7 +1044,7 @@ test("resolves targeted Import selections without using an invalid Foundry flag 
       embed: true,
     },
   ]);
-  assert.equal(fetches, 2);
+  assert.equal(fetches, 1);
 
   const items = makePack("world.netherscrolls-items");
   context.game.packs.set(items.collection, items);
@@ -1725,6 +1729,45 @@ test("creates then updates one Actor with canonical identity and progress feedba
   );
 });
 
+test("validates each hosted import image once and replaces dead references", async () => {
+  const { context, importer } = createHarness();
+  const dead = "https://images.netherscrolls.ca/assets/source/foundry/feats/dead.webp";
+  const valid = "https://images.netherscrolls.ca/assets/source/foundry/feats/valid.webp";
+  const loaded = [];
+  context.Image = class {
+    set src(value) {
+      loaded.push(value);
+      Promise.resolve().then(() => {
+        if (value === dead) this.onerror?.(new Error("404"));
+        else this.onload?.();
+      });
+    }
+  };
+
+  const response = {
+    data: {
+      feats: [
+        { foundryItem: { img: dead, system: { description: { value: `<img src="${dead}">` } } } },
+        { foundryItem: { img: dead } },
+        { foundryItem: { img: valid } },
+      ],
+    },
+  };
+  await importer.sanitizeNetherscrollsImportResponseImages(response);
+
+  assert.equal(loaded.length, 2);
+  assert.equal(response.data.feats[0].foundryItem.img, "https://i.postimg.cc/wBj0LZyj/image.png");
+  assert.equal(response.data.feats[1].foundryItem.img, "https://i.postimg.cc/wBj0LZyj/image.png");
+  assert.equal(response.data.feats[2].foundryItem.img, valid);
+  assert.equal(
+    importer.normalizeNetherscrollsImportImagePath(dead),
+    "https://i.postimg.cc/wBj0LZyj/image.png"
+  );
+
+  await importer.sanitizeNetherscrollsImportResponseImages({ img: dead });
+  assert.equal(loaded.length, 2);
+});
+
 test("creates a complete Character Actor when foundryActor is entirely absent", async () => {
   const { context, importer } = createHarness();
   context.Actor = {
@@ -2263,6 +2306,147 @@ test("retries only failed entries from a 207 campaign Foundry Export", async () 
   assert.equal(requestBodies[1].characters[0].actor.name, "Second");
   assert.equal(result.succeeded.length, 2);
   assert.equal(result.failed.length, 0);
+});
+
+test("shares and briefly caches the campaign list while allowing a forced refresh", async () => {
+  const { context, importer } = createHarness();
+  let requests = 0;
+  context.fetch = async (url, options) => {
+    assert.equal(url.endsWith("/campaigns"), true);
+    assert.equal(options.method, "GET");
+    requests += 1;
+    return {
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({ data: [{ _id: "campaign-1", name: "Campaign" }] }),
+    };
+  };
+
+  const [first, second] = await Promise.all([
+    importer.fetchNetherscrollsCampaigns(),
+    importer.fetchNetherscrollsCampaigns(),
+  ]);
+  const third = await importer.fetchNetherscrollsCampaigns();
+  assert.equal(requests, 1);
+  assert.deepEqual(clone(first), clone(second));
+  assert.deepEqual(clone(second), clone(third));
+
+  await importer.fetchNetherscrollsCampaigns({ force: true });
+  assert.equal(requests, 2);
+});
+
+test("polls a remembered campaign queue without requesting the campaign list", async () => {
+  const { context, importer } = createHarness();
+  let rememberedCampaigns = "";
+  context.game.settings.get = (_module, key) => {
+    if (key === "nsApiKey") return "test-key";
+    if (key === "foundryImportQueueCampaignIdsV1") return rememberedCampaigns;
+    return false;
+  };
+  context.game.settings.set = async (_module, key, value) => {
+    if (key === "foundryImportQueueCampaignIdsV1") rememberedCampaigns = value;
+    return value;
+  };
+  await importer.persistNetherscrollsImportQueueCampaignIds(["campaign-1"]);
+  context.game.folders.push({ id: "ns-character-folder", name: "NS-Character", type: "Actor" });
+
+  const requests = [];
+  context.fetch = async (url, options) => {
+    requests.push({ url, method: options.method });
+    if (url.endsWith("/campaigns/campaign-1/imports")) {
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({ data: [] }),
+      };
+    }
+    throw new Error(`Unexpected request: ${options.method} ${url}`);
+  };
+
+  const result = await importer.pollNetherscrollsImportQueues();
+  assert.deepEqual(clone(result), { imported: 0, failed: 0 });
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url.endsWith("/campaigns/campaign-1/imports"), true);
+});
+
+test("does not burst-poll every campaign when campaign discovery returns several", async () => {
+  const { context, importer } = createHarness();
+  const requests = [];
+  context.fetch = async (url, options) => {
+    requests.push({ url, method: options.method });
+    if (url.endsWith("/campaigns")) {
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({
+          data: [
+            { _id: "campaign-1", name: "One" },
+            { _id: "campaign-2", name: "Two" },
+            { _id: "campaign-3", name: "Three" },
+          ],
+        }),
+      };
+    }
+    throw new Error(`Unexpected request: ${options.method} ${url}`);
+  };
+
+  const result = await importer.pollNetherscrollsImportQueues();
+  assert.deepEqual(clone(result), { imported: 0, failed: 0 });
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url.endsWith("/campaigns"), true);
+});
+
+test("invalidates an older queue-poll schedule when polling is toggled again", async () => {
+  const { context, importer } = createHarness();
+  let rememberedCampaigns = "";
+  context.game.settings.get = (_module, key) => {
+    if (key === "nsApiKey") return "test-key";
+    if (key === "pollFoundryImportQueue") return true;
+    if (key === "foundryImportQueueCampaignIdsV1") return rememberedCampaigns;
+    return false;
+  };
+  context.game.settings.set = async (_module, key, value) => {
+    if (key === "foundryImportQueueCampaignIdsV1") rememberedCampaigns = value;
+    return value;
+  };
+  await importer.persistNetherscrollsImportQueueCampaignIds(["campaign-1"]);
+  context.game.ready = true;
+  context.game.folders.push({ id: "ns-character-folder", name: "NS-Character", type: "Actor" });
+
+  let resolveQueue;
+  context.fetch = async (url) => {
+    assert.equal(url.endsWith("/campaigns/campaign-1/imports"), true);
+    return new Promise((resolve) => {
+      resolveQueue = resolve;
+    });
+  };
+  const scheduled = [];
+  context.setTimeout = (callback, delay) => {
+    scheduled.push({ callback, delay });
+    return scheduled.length;
+  };
+  context.clearTimeout = () => {};
+
+  importer.toggleNetherscrollsImportQueuePolling(true);
+  await Promise.resolve();
+  await Promise.resolve();
+  importer.toggleNetherscrollsImportQueuePolling(true);
+  await Promise.resolve();
+  resolveQueue({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    json: async () => ({ data: [] }),
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.equal(scheduled.length, 1);
+  assert.equal(scheduled[0].delay, 60_000);
 });
 
 test("acknowledges Foundry Import queue entries only after a complete apply", async () => {
