@@ -133,6 +133,7 @@ const NETHERSCROLLS_SOURCES_ENDPOINT = `${NETHERSCROLLS_API_BASE}/import/sources
 const NETHERSCROLLS_CAMPAIGNS_ENDPOINT = `${NETHERSCROLLS_API_BASE}/campaigns`;
 const NETHERSCROLLS_SOURCE_IMPORT_ENDPOINT = `${NETHERSCROLLS_API_BASE}/import/source`;
 const NETHERSCROLLS_IMPORT_QUEUE_POLL_INTERVAL_MS = 60_000;
+const NETHERSCROLLS_IMPORT_QUEUE_IDLE_POLL_INTERVAL_MS = 5 * 60_000;
 const NETHERSCROLLS_CAMPAIGN_CACHE_TTL_MS = 5 * 60_000;
 const NETHERSCROLLS_CHARACTER_SELECTION_CACHE_TTL_MS = 5 * 60_000;
 const NETHERSCROLLS_IMAGE_VALIDATION_CONCURRENCY = 6;
@@ -156,6 +157,7 @@ const NETHERSCROLLS_DEFAULT_IMAGE = "https://i.postimg.cc/wBj0LZyj/image.png";
 const NETHERSCROLLS_IMPORT_IMAGE = NETHERSCROLLS_DEFAULT_IMAGE;
 const netherscrollsCharacterImportState = new WeakMap();
 const netherscrollsCharacterImportLocks = new Map();
+const netherscrollsPendingImportAcknowledgements = new Set();
 const netherscrollsCharacterSelectionRefreshes = new Map();
 const netherscrollsValidImageReferences = new Set();
 const netherscrollsDeadImageReferences = new Set();
@@ -2262,8 +2264,12 @@ function toggleNetherscrollsImportQueuePolling(enabled) {
 
   const run = async () => {
     if (generation !== netherscrollsImportQueuePollGeneration) return;
+    let nextPollDelay = NETHERSCROLLS_IMPORT_QUEUE_IDLE_POLL_INTERVAL_MS;
     try {
-      await pollNetherscrollsImportQueues();
+      const result = await pollNetherscrollsImportQueues();
+      if ((result?.imported ?? 0) > 0) {
+        nextPollDelay = NETHERSCROLLS_IMPORT_QUEUE_POLL_INTERVAL_MS;
+      }
     } catch (err) {
       console.error(`${MODULE_ID} | Foundry Import queue poll failed.`, err);
     } finally {
@@ -2274,7 +2280,7 @@ function toggleNetherscrollsImportQueuePolling(enabled) {
       ) {
         netherscrollsImportQueuePollTimer = setTimeout(
           run,
-          NETHERSCROLLS_IMPORT_QUEUE_POLL_INTERVAL_MS
+          nextPollDelay
         );
       }
     }
@@ -2319,10 +2325,27 @@ async function pollNetherscrollsImportQueues() {
         continue;
       }
       for (const importedCharacter of queuedCharacters) {
+        const acknowledgementKey = getNetherscrollsImportAcknowledgementKey(
+          campaignId,
+          importedCharacter
+        );
+        if (netherscrollsPendingImportAcknowledgements.has(acknowledgementKey)) {
+          try {
+            await acknowledgeNetherscrollsCampaignImport(campaignId, importedCharacter.id);
+            netherscrollsPendingImportAcknowledgements.delete(acknowledgementKey);
+          } catch (err) {
+            failed += 1;
+            console.error(`${MODULE_ID} | Foundry Import was applied, but queue acknowledgement still failed.`, {
+              campaignId,
+              characterId: importedCharacter.id,
+              error: err,
+            });
+          }
+          continue;
+        }
+
         try {
           await importNetherscrollsCampaignCharacter(importedCharacter, folder);
-          await acknowledgeNetherscrollsCampaignImport(campaignId, importedCharacter.id);
-          imported += 1;
         } catch (err) {
           failed += 1;
           console.error(
@@ -2333,6 +2356,21 @@ async function pollNetherscrollsImportQueues() {
               error: err,
             }
           );
+          continue;
+        }
+
+        netherscrollsPendingImportAcknowledgements.add(acknowledgementKey);
+        try {
+          await acknowledgeNetherscrollsCampaignImport(campaignId, importedCharacter.id);
+          netherscrollsPendingImportAcknowledgements.delete(acknowledgementKey);
+          imported += 1;
+        } catch (err) {
+          failed += 1;
+          console.error(`${MODULE_ID} | Foundry Import completed, but its queue acknowledgement failed.`, {
+            campaignId,
+            characterId: importedCharacter.id,
+            error: err,
+          });
         }
       }
     }
@@ -2347,6 +2385,13 @@ async function pollNetherscrollsImportQueues() {
   }
 }
 
+function getNetherscrollsImportAcknowledgementKey(campaignId, importedCharacter) {
+  const queueIdentity = normalizeNetherscrollsReferenceValue(
+    importedCharacter?.raw?.queue?.dueAt ?? importedCharacter?.raw?.queue?.id
+  ) ?? "queue";
+  return `${campaignId}:${importedCharacter?.id}:${queueIdentity}`;
+}
+
 function isPrimaryNetherscrollsQueuePoller() {
   if (!game?.user?.isGM) return false;
   const activeGM = game?.users?.activeGM;
@@ -2356,7 +2401,12 @@ function isPrimaryNetherscrollsQueuePoller() {
 async function fetchNetherscrollsCampaignImports(campaignId) {
   const apiKey = getNetherscrollsApiKey();
   const endpoint = `${NETHERSCROLLS_CAMPAIGNS_ENDPOINT}/${encodeURIComponent(campaignId)}/imports`;
-  const data = await fetchNetherscrollsApiJson(endpoint, apiKey);
+  const data = await requestNetherscrollsJson(endpoint, {
+    method: "GET",
+    apiKey,
+    cache: "no-store",
+    operation: "Foundry Import queue read",
+  });
   return getNetherscrollsApiRows(data)
     .map(normalizeNetherscrollsImportedCharacter)
     .filter(Boolean);
@@ -2364,11 +2414,29 @@ async function fetchNetherscrollsCampaignImports(campaignId) {
 
 async function acknowledgeNetherscrollsCampaignImport(campaignId, characterId) {
   const endpoint = `${NETHERSCROLLS_CAMPAIGNS_ENDPOINT}/${encodeURIComponent(campaignId)}/imports/${encodeURIComponent(characterId)}`;
-  await requestNetherscrollsJson(endpoint, {
-    method: "DELETE",
-    apiKey: getNetherscrollsApiKey(),
-    operation: "Foundry Import acknowledgement",
-  });
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      await requestNetherscrollsJson(endpoint, {
+        method: "DELETE",
+        apiKey: getNetherscrollsApiKey(),
+        cache: "no-store",
+        operation: "Foundry Import acknowledgement",
+      });
+      return;
+    } catch (err) {
+      const transient =
+        !err?.status ||
+        err.status === 408 ||
+        err.status === 429 ||
+        err.status >= 500;
+      if (attempt >= 2 || !transient) throw err;
+      console.warn(`${MODULE_ID} | Retrying Foundry Import queue acknowledgement.`, {
+        campaignId,
+        characterId,
+        error: err,
+      });
+    }
+  }
 }
 
 async function loadNetherscrollsCampaignCharactersIntoForm(root, campaignId) {
@@ -2421,10 +2489,12 @@ async function requestNetherscrollsJson(
     body = null,
     operation = "Request",
     includeStatus = false,
+    cache = null,
   } = {}
 ) {
   const response = await fetch(url, {
     method,
+    ...(cache ? { cache } : {}),
     headers: {
       Accept: "application/json",
       ...(body == null ? {} : { "Content-Type": "application/json" }),

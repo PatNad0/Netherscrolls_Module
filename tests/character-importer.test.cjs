@@ -2336,7 +2336,7 @@ test("shares and briefly caches the campaign list while allowing a forced refres
   assert.equal(requests, 2);
 });
 
-test("polls a remembered campaign queue without requesting the campaign list", async () => {
+test("polls a remembered empty queue once without campaigns or selection", async () => {
   const { context, importer } = createHarness();
   let rememberedCampaigns = "";
   context.game.settings.get = (_module, key) => {
@@ -2353,7 +2353,7 @@ test("polls a remembered campaign queue without requesting the campaign list", a
 
   const requests = [];
   context.fetch = async (url, options) => {
-    requests.push({ url, method: options.method });
+    requests.push({ url, method: options.method, cache: options.cache });
     if (url.endsWith("/campaigns/campaign-1/imports")) {
       return {
         ok: true,
@@ -2369,6 +2369,8 @@ test("polls a remembered campaign queue without requesting the campaign list", a
   assert.deepEqual(clone(result), { imported: 0, failed: 0 });
   assert.equal(requests.length, 1);
   assert.equal(requests[0].url.endsWith("/campaigns/campaign-1/imports"), true);
+  assert.equal(requests[0].method, "GET");
+  assert.equal(requests[0].cache, "no-store");
 });
 
 test("does not burst-poll every campaign when campaign discovery returns several", async () => {
@@ -2446,10 +2448,10 @@ test("invalidates an older queue-poll schedule when polling is toggled again", a
   await Promise.resolve();
 
   assert.equal(scheduled.length, 1);
-  assert.equal(scheduled[0].delay, 60_000);
+  assert.equal(scheduled[0].delay, 5 * 60_000);
 });
 
-test("acknowledges Foundry Import queue entries only after a complete apply", async () => {
+test("acknowledges a completed import and retries a transient queue deletion", async () => {
   const { context, importer } = createHarness();
   const seedPack = makePack("world.netherscrolls-items", [
     makeDocument({
@@ -2473,6 +2475,7 @@ test("acknowledges Foundry Import queue entries only after a complete apply", as
   };
 
   const methods = [];
+  let deleteAttempts = 0;
   context.fetch = async (url, options) => {
     methods.push({ url, method: options.method });
     if (url.endsWith("/campaigns")) {
@@ -2506,6 +2509,15 @@ test("acknowledges Foundry Import queue entries only after a complete apply", as
       };
     }
     if (url.endsWith("/campaigns/campaign-1/imports/character-1") && options.method === "DELETE") {
+      deleteAttempts += 1;
+      if (deleteAttempts === 1) {
+        return {
+          ok: false,
+          status: 503,
+          statusText: "Unavailable",
+          json: async () => ({ message: "Try again" }),
+        };
+      }
       return {
         ok: true,
         status: 204,
@@ -2518,6 +2530,7 @@ test("acknowledges Foundry Import queue entries only after a complete apply", as
 
   const result = await importer.pollNetherscrollsImportQueues();
   assert.deepEqual(clone(result), { imported: 1, failed: 0 });
+  assert.equal(deleteAttempts, 2);
   assert.equal(
     methods.some((entry) => entry.method === "DELETE" && entry.url.endsWith("/imports/character-1")),
     true
