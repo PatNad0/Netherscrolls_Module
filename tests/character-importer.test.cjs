@@ -224,6 +224,10 @@ globalThis.__test = {
   getNetherscrollsCharacterSourceId,
   collectNetherscrollsCharacterItemSources,
   normalizeNetherscrollsSpellData,
+  normalizeNetherscrollsFeatData,
+  getNetherscrollsClassFeatureItemDescriptors,
+  normalizeNetherscrollsClassFeatureData,
+  buildNetherscrollsItemChoiceAdvancement,
   prepareNetherscrollsCharacterActorItemData,
   resolveNetherscrollsCharacterItemSources,
   resolveNetherscrollsCharacterItemSource,
@@ -237,6 +241,7 @@ globalThis.__test = {
   hydrateNetherscrollsImportedCharacter,
   findNetherscrollsCampaignCharacterById,
   findNetherscrollsActorByCharacterId,
+  findNetherscrollsActorForQueuedExport,
   buildFoundryExportPayload,
   prepareNetherscrollsFoundryExportImages,
   applyFoundryExportCanonicalIds,
@@ -1893,6 +1898,7 @@ test("class feature repair applies selected choices while filtering unselected/h
     }));
   };
   addFeature("Compendium.test.Item.low", "feature-low", 1);
+  await featureMap.get("Compendium.test.Item.low").update({ system: { type: { value: "feat" } } });
   addFeature("Compendium.test.Item.high", "feature-high", 8);
   addFeature("Compendium.test.Item.optional", "feature-optional", 2, true);
   addFeature("Compendium.test.Item.unselected", "feature-unselected", 2, true);
@@ -1959,6 +1965,7 @@ test("class feature repair applies selected choices while filtering unselected/h
   assert.equal(first.created, 3);
   assert.equal(second.created, 0);
   assert.equal(ids.includes("feature-low"), true);
+  assert.equal(actor.items.find((item) => item.flags?.netherscrolls?.id === "feature-low").system.type.value, "class");
   assert.equal(ids.includes("feature-sub"), true);
   assert.equal(ids.includes("feature-high"), false);
   assert.equal(ids.includes("feature-optional"), true);
@@ -2045,6 +2052,75 @@ test("creates then updates one Actor with canonical identity and progress feedba
     importer.findNetherscrollsActorByCharacterId("linked-character"),
     linkedActor
   );
+});
+
+test("matches a unique unlinked character by full name while prioritizing canonical IDs", () => {
+  const { context, importer } = createHarness();
+  const danika = makeActor(context, { name: "Danika Halcyon", type: "character" });
+  context.game.actors.push(danika,
+    makeActor(context, { _id: "weapon", name: "Danika Spiritual Weapon", type: "npc" }),
+    makeActor(context, { _id: "npc", name: "Danika Halcyon", type: "npc" }));
+  assert.equal(importer.findNetherscrollsActorByCharacterId("danika-id", "  DANIKA   HALCYON "), danika);
+  assert.equal(importer.findNetherscrollsActorByCharacterId("danika-id", "Danika"), null);
+  assert.equal(importer.findNetherscrollsActorByCharacterId("danika-id"), null);
+  assert.equal(danika.flags.netherscrolls, undefined);
+  assert.equal(importer.findNetherscrollsActorForQueuedExport({ id: "danika-id", name: "Danika Halcyon" }), danika);
+
+  const duplicate = makeActor(context, { name: "Danika Halcyon", type: "character" });
+  context.game.actors.push(duplicate);
+  assert.equal(importer.findNetherscrollsActorByCharacterId("danika-id", "Danika Halcyon"), null);
+  duplicate.flags.netherscrolls = { characterId: "danika-id" };
+  duplicate.name = "Renamed Danika";
+  assert.equal(importer.findNetherscrollsActorByCharacterId("danika-id", "Danika Halcyon"), duplicate);
+  danika.flags.netherscrolls = { characterId: "different-character" };
+  assert.equal(importer.findNetherscrollsActorByCharacterId("another-id", "Danika Halcyon"), null);
+  assert.equal(importer.findNetherscrollsActorForQueuedExport({
+    id: "another-id", name: "Danika Halcyon", character: { foundryFlag: danika.id },
+  }), null);
+});
+
+test("imports into an existing unlinked name match instead of creating a duplicate", async () => {
+  const { context, importer } = createHarness();
+  const actor = makeActor(context, { name: "Danika Halcyon", type: "character" });
+  context.game.actors.push(actor);
+  const result = await importer.importNetherscrollsCampaignCharacter({
+    id: "danika-id", name: "Danika Halcyon",
+    character: { hp: { current: 10, max: 20 }, backgroundId: "", raceId: "" },
+  }, { id: "ns-character-folder" });
+  assert.equal(result.created, false);
+  assert.equal(context.game.actors.length, 1);
+  assert.equal(actor.flags.netherscrolls.characterId, "danika-id");
+});
+
+test("exports a name match to the selected character and links only after API success", async () => {
+  const { context, importer } = createHarness();
+  const actor = makeActor(context, { name: "Danika Halcyon", type: "character" });
+  context.game.actors.push(actor);
+  let succeed = false;
+  const requests = [];
+  context.fetch = async (_url, options) => {
+    assert.equal(actor.flags.netherscrolls?.characterId, undefined);
+    const body = JSON.parse(options.body);
+    requests.push(body);
+    assert.equal(body.characters[0].characterId, "danika-id");
+    return {
+      ok: true, status: succeed ? 200 : 207, statusText: "OK",
+      json: async () => ({ data: [succeed
+        ? { index: 0, ok: true, data: { characterId: "danika-id" } }
+        : { index: 0, ok: false, error: { status: 400, message: "Invalid item" } } ] }),
+    };
+  };
+  const descriptor = { actor: importer.findNetherscrollsActorByCharacterId("danika-id", "Danika Halcyon"), characterId: "danika-id" };
+  const failure = await importer.exportNetherscrollsCampaignActors("campaign-1", [descriptor]);
+  assert.equal(failure.failed.length, 1);
+  assert.equal(actor.flags.netherscrolls?.characterId, undefined);
+  succeed = true;
+  const success = await importer.exportNetherscrollsCampaignActors("campaign-1", [descriptor]);
+  assert.equal(success.succeeded.length, 1);
+  assert.equal(actor.flags.netherscrolls.characterId, "danika-id");
+  assert.equal(importer.findNetherscrollsActorByCharacterId("danika-id"), actor);
+  await assert.rejects(importer.exportNetherscrollsCampaignActors("campaign-1", [{ actor, characterId: "other-id" }]), /already linked/);
+  assert.equal(requests.length, 2);
 });
 
 test("validates each hosted import image once and replaces dead references", async () => {
@@ -2454,18 +2530,114 @@ test("exports only native Character fields while preserving complete embedded co
   assert.equal(payload.actor.flags.netherscrolls.characterId, "character-1");
   assert.deepEqual(clone(payload.actor.system.attributes.hp), { value: 8, max: 10 });
   assert.equal(payload.actor.system.abilities.str.value, 10);
-  assert.equal(payload.actor.items.length, 4);
+  assert.equal(payload.actor.items.length, 6);
   assert.equal(payload.actor.items[0].flags.netherscrolls.id, "canonical-item");
   assert.equal(payload.actor.items[1].flags.netherscrolls.id, "canonical-subclass");
   assert.equal(payload.actor.items[1].flags.netherscrolls.classId, "canonical-class");
   assert.deepEqual(payload.actor.items[2].effects[0].changes, [{ key: "system.abilities.str.value", mode: 2, value: "2" }]);
-  assert.equal(payload.actor.items.some((item) => item._id === "class-feature-1"), false);
-  assert.equal(payload.actor.items.some((item) => item._id === "foundry-class-feature-1"), false);
+  assert.equal(payload.actor.items.find((item) => item._id === "class-feature-1").system.type.value, "class");
+  assert.equal(payload.actor.items.find((item) => item._id === "foundry-class-feature-1").system.type.value, "class");
   assert.equal(payload.actor.items.some((item) => item._id === "feat-1"), true);
   assert.equal(payload.preparedActor.system.abilities.str.value, 12);
   assert.deepEqual(payload.preparedActor.prototypeToken, transformedActor.prototypeToken);
   assert.equal(payload.actor.items[0]._stats.modifiedTime, 1700000002000);
   assert.equal(payload.actor.items[0]._stats.lastModifiedBy, "player-1");
+});
+
+test("preserves feature categories from native and Foundry feat imports", () => {
+  const { importer } = createHarness();
+  const examples = [
+    { system: { type: "race" }, expected: "race" },
+    { system: { type: { value: "class", subtype: "arcaneShot" } }, expected: "class", subtype: "arcaneShot" },
+    { system: { type: " background " }, expected: "background" },
+    { system: { type: { value: "monster" } }, expected: "monster" },
+    { system: { type: { value: "" } }, foundryType: { value: "race" }, expected: "race" },
+    { system: {}, featType: "race", expected: "race" },
+    { system: { type: { value: "feat", subtype: "general" } }, expected: "feat", subtype: "general" },
+    { system: {}, expected: "feat" },
+    { system: { type: { value: "feat" } }, flags: { [MODULE_ID]: { featureScope: "class" } }, expected: "class" },
+    { system: { type: { value: "feat" } }, flags: { [MODULE_ID]: { featureScope: "choice", choiceType: "metamagic" } }, expected: "class" },
+    { system: { type: { value: "feat" } }, flags: { [MODULE_ID]: { featureScope: "choice", choiceType: "feat" } }, expected: "feat" },
+    { system: { type: { value: "feat", subtype: "fightingStyle" } }, flags: { [MODULE_ID]: { featureScope: "choice" } }, expected: "feat", subtype: "fightingStyle" },
+  ];
+  for (const { expected, subtype = "", ...fields } of examples) {
+    const native = { _id: "record-1", name: "Feature", type: "feat", ...fields };
+    const wrapped = { _id: "record-1", foundryType: fields.foundryType, featType: fields.featType, foundryItem: native };
+    for (const source of [native, wrapped]) {
+      const original = structuredClone(source);
+      const normalized = importer.normalizeNetherscrollsFeatData(source);
+      assert.equal(normalized.type, "feat");
+      assert.equal(normalized.system.type.value, expected);
+      assert.equal(normalized.system.type.subtype, subtype);
+      assert.deepEqual(source, original);
+    }
+  }
+});
+
+test("generates class options with matching advancement restrictions while preserving actual feat choices", () => {
+  const { importer } = createHarness();
+  for (const [choiceType, category, subtype] of [["metamagic", "class", ""], ["", "class", ""], ["feat", "feat", ""], ["fightingStyle", "feat", "fightingStyle"]]) {
+    const descriptors = importer.getNetherscrollsClassFeatureItemDescriptors([{
+      _id: "class-1", name: "Class",
+      features: [{ _id: "feature-1", title: "Options", level: 2, choiceType, selectable: 1, choices: [{ _id: "option-1", title: "Option" }] }],
+    }]);
+    const parent = descriptors.find((descriptor) => descriptor.scope === "class");
+    const choice = descriptors.find((descriptor) => descriptor.scope === "choice");
+    const item = importer.normalizeNetherscrollsClassFeatureData(choice);
+    const advancement = importer.buildNetherscrollsItemChoiceAdvancement(parent, new Map([[choice.key, "Compendium.test.Item.option"]]));
+    assert.equal(item.type, "feat");
+    assert.equal(item.system.type.value, category);
+    assert.equal(item.system.type.subtype, subtype);
+    assert.equal(item.flags[MODULE_ID].choiceType, choiceType);
+    assert.equal(advancement.configuration.type, item.type);
+    assert.equal(advancement.configuration.restriction.type, category);
+    assert.equal(advancement.configuration.restriction.subtype, subtype);
+  }
+});
+
+test("retains explicit feature categories when an old library record calls them feats", () => {
+  const { importer } = createHarness();
+  const canonical = makeDocument({
+    name: "Canonical feature", type: "feat",
+    system: { type: { value: "feat" }, description: { value: "Canonical description" } },
+  });
+  for (const category of ["race", "class", "background", "monster", "feat"]) {
+    const snapshot = { name: "Old name", type: "feat", system: { type: category } };
+    const item = importer.prepareNetherscrollsCharacterActorItemData(canonical, snapshot, snapshot, "feature-id", "feats");
+    assert.equal(item.system.type.value, category);
+    assert.equal(item.name, "Canonical feature");
+    assert.equal(item.system.description.value, "Canonical description");
+    assert.equal(canonical.system.type.value, "feat");
+  }
+});
+
+test("exports categorized feature snapshots and real feats without guessing from names or advancement origins", async () => {
+  const { context, importer } = createHarness();
+  const actor = makeActor(context, { name: "Hero", type: "character" });
+  await actor.createEmbeddedDocuments("Item", [
+    { _id: "racial", name: "Dual Mind", type: "feat", system: { type: { value: "race" }, activities: { action: { type: "utility" } } }, effects: [{ name: "Feature effect" }] },
+    { _id: "legacy", type: "feat", system: { type: "race" } },
+    { _id: "background", type: "feat", system: { type: { value: "background" } } },
+    { _id: "monster", type: "feat", system: { type: { value: "monster" } } },
+    { _id: "class", type: "feat", system: { type: { value: "class" } } },
+    { _id: "old-class", type: "feat", system: { type: { value: "feat" } }, flags: { [MODULE_ID]: { featureScope: "subclass" } } },
+    { _id: "missing-class", type: "feat", flags: { [MODULE_ID]: { parentClassIdentifier: "sorcerer" } } },
+    { _id: "real-feat", name: "Alert", type: "feat", system: { type: { value: "feat", subtype: "general" } }, flags: { dnd5e: { advancementOrigin: "race-item.advancement-id" } } },
+    { _id: "choice", type: "feat", system: { type: { value: "feat", subtype: "fightingStyle" } }, flags: { [MODULE_ID]: { featureScope: "choice", parentClassIdentifier: "fighter" } } },
+    { _id: "unknown", name: "Dual Mind", type: "feat", system: {} },
+    { _id: "resource", type: "feat", flags: { [MODULE_ID]: { nativeCharacterResource: true } } },
+  ]);
+  const original = actor.toObject();
+  const items = importer.buildFoundryExportPayload(actor).actor.items;
+  assert.deepEqual(Array.from(items, (item) => [item._id, item.system.type.value]), [
+    ["racial", "race"], ["legacy", "race"], ["background", "background"],
+    ["monster", "monster"], ["class", "class"], ["old-class", "class"], ["missing-class", "class"],
+    ["real-feat", "feat"], ["choice", "feat"], ["unknown", "feat"],
+  ]);
+  assert.equal(items[0].system.activities.action.type, "utility");
+  assert.equal(items[0].effects[0].name, "Feature effect");
+  assert.equal(items.find((item) => item._id === "choice").system.type.subtype, "fightingStyle");
+  assert.deepEqual(actor.toObject(), original);
 });
 
 test("exports modern and legacy spell preparation flags without mutating Actor Items", async () => {

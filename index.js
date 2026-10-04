@@ -2151,8 +2151,11 @@ function activateNetherscrollsCharacterImportListeners(root) {
       return;
     }
     const actors = selectedIds
-      .map((characterId) => findNetherscrollsActorByCharacterId(characterId))
-      .filter(Boolean);
+      .map((characterId) => ({
+        actor: findNetherscrollsActorByCharacterId(characterId, state.charactersById.get(characterId)?.name),
+        characterId,
+      }))
+      .filter((entry) => entry.actor);
     if (!actors.length) {
       ui?.notifications?.warn?.("Select at least one character that already exists in Foundry.");
       return;
@@ -2164,6 +2167,8 @@ function activateNetherscrollsCharacterImportListeners(root) {
     button.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Exporting characters…';
     try {
       const result = await exportNetherscrollsCampaignActors(campaignId, actors);
+      const list = root.querySelector("[data-ns-character-list]");
+      if (list) renderNetherscrollsCampaignCharacterList(list, Array.from(state.charactersById.values()));
       const summary = `Foundry Export: ${result.succeeded.length} succeeded, ${result.failed.length} failed.`;
       const failureMessages = result.failed.map((entry) => (
         `${entry.actor?.name ?? "Character"}: ${formatNetherscrollsApiError(entry.error)}`
@@ -2584,7 +2589,7 @@ async function pollNetherscrollsImportQueues() {
           });
           continue;
         }
-        exportEntries.push({ actor, syncToken });
+        exportEntries.push({ actor, syncToken, characterId: queuedExport.id });
       }
       for (let offset = 0; offset < exportEntries.length; offset += 100) {
         const chunk = exportEntries.slice(offset, offset + 100);
@@ -2685,10 +2690,11 @@ function findNetherscrollsActorForQueuedExport(queuedExport) {
   const foundryActorId = normalizeNetherscrollsReferenceValue(
     queuedExport?.character?.foundryFlag ?? queuedExport?.raw?.character?.foundryFlag
   );
-  if (!foundryActorId) return null;
-  return getWorldActors().find(
-    (actor) => String(actor?.id ?? actor?._id ?? "") === foundryActorId
-  ) ?? null;
+  const byFoundryId = foundryActorId ? getWorldActors().find(
+    (actor) => actor?.type === "character" && String(actor?.id ?? actor?._id ?? "") === foundryActorId &&
+      (!getActorCharacterId(actor) || getActorCharacterId(actor) === queuedExport?.id)
+  ) : null;
+  return byFoundryId ?? findNetherscrollsActorByCharacterId(queuedExport?.id, queuedExport?.name);
 }
 
 async function acknowledgeNetherscrollsCampaignImport(campaignId, characterId) {
@@ -2872,7 +2878,7 @@ function renderNetherscrollsCampaignCharacterList(root, characters) {
     const detailsCell = document.createElement("td");
     detailsCell.textContent = getNetherscrollsCharacterImportDetail(importedCharacter);
     const statusCell = document.createElement("td");
-    const existing = findNetherscrollsActorByCharacterId(importedCharacter.id);
+    const existing = findNetherscrollsActorByCharacterId(importedCharacter.id, importedCharacter.name);
     statusCell.className = `ns-character-status ${existing ? "is-existing" : "is-new"}`;
     statusCell.textContent = existing ? "Will update" : "Will create";
     row.append(selectCell, nameCell, detailsCell, statusCell);
@@ -3138,7 +3144,7 @@ async function applyNetherscrollsCampaignCharacter(importedCharacter, folder, { 
     fetched: content.fetched,
   });
 
-  let actor = findNetherscrollsActorByCharacterId(characterId);
+  let actor = findNetherscrollsActorByCharacterId(characterId, importedCharacter.name);
   const created = !actor;
   if (actor) {
     onProgress?.("updating existing Foundry actor...");
@@ -3757,10 +3763,19 @@ function getWorldActors() {
   return [];
 }
 
-function findNetherscrollsActorByCharacterId(characterId) {
+function findNetherscrollsActorByCharacterId(characterId, characterName = null) {
   const id = normalizeNetherscrollsReferenceValue(characterId);
   if (!id) return null;
-  return getWorldActors().find((actor) => String(getActorCharacterId(actor) ?? "") === id) ?? null;
+  const actors = getWorldActors();
+  const linked = actors.find((actor) => String(getActorCharacterId(actor) ?? "") === id);
+  if (linked) return linked;
+  const normalizeName = (name) => String(name ?? "").normalize("NFC").trim().replace(/\s+/g, " ").toLowerCase();
+  const name = normalizeName(characterName);
+  if (!name) return null;
+  const matches = actors.filter((actor) => actor.type === "character" && normalizeName(actor.name) === name);
+  // A name can recover an unlinked Actor, but must never steal an existing
+  // character link or pick arbitrarily between duplicate names.
+  return matches.length === 1 && !getActorCharacterId(matches[0]) ? matches[0] : null;
 }
 
 function collectNetherscrollsCharacterItemSources(importedCharacter) {
@@ -4156,6 +4171,16 @@ function prepareNetherscrollsCharacterActorItemData(
     feats: "feat",
   }[dataset];
   if (requiredType) data.type = requiredType;
+  if (data.type === "feat") {
+    data.system ??= {};
+    const canonicalType = normalizeNetherscrollsFeatType(data);
+    const snapshotType = normalizeNetherscrollsFeatType(sourceData);
+    // Older feat-library records can contain misclassified racial/class
+    // features. Preserve an explicit snapshot category across that lookup.
+    data.system.type = canonicalType.value === "feat" && snapshotType.value !== "feat"
+      ? snapshotType
+      : canonicalType;
+  }
   data.img = normalizeNetherscrollsImportImagePath(data.img);
   if (data.type === "spell") {
     data.system = data.system && typeof data.system === "object" ? data.system : {};
@@ -6511,7 +6536,7 @@ function normalizeNetherscrollsClassFeatureData(descriptor) {
     level: descriptor.level,
     optional: Boolean(feature?.optional),
     selectable: Math.max(0, Math.trunc(toNumber(feature?.selectable, 0))),
-    choiceType: toTrimmedStringOrNull(feature?.choiceType) ?? "",
+    choiceType: toTrimmedStringOrNull(descriptor.choiceType ?? feature?.choiceType) ?? "",
     choices: normalizeNetherscrollsFeatureChoices(feature),
   };
   if (descriptor.scope === "choice") {
@@ -6597,12 +6622,6 @@ function isNetherscrollsImportedClassFeatureDocument(document) {
       getNetherscrollsDocumentFlag(document, "parentClassNetherscrollsId") ||
       getNetherscrollsDocumentFlag(document, "parentClassIdentifier")
   );
-}
-
-function isNetherscrollsClassFeatureForExport(document) {
-  if (isNetherscrollsImportedClassFeatureDocument(document)) return true;
-  if (document?.type !== "feat") return false;
-  return toTrimmedStringOrNull(document?.system?.type?.value)?.toLowerCase() === "class";
 }
 
 function isNetherscrollsClassFeatureOwnedByImportedClass(document, { classIds, classIdentifiers, classNames }) {
@@ -6965,7 +6984,7 @@ function buildNetherscrollsItemChoiceAdvancement(descriptor, featureUuidByKey) {
       },
       sorting: "a",
       spell: null,
-      type: getNetherscrollsItemChoiceType(feature),
+      type: "feat",
     },
     value: {
       added: {},
@@ -7013,8 +7032,11 @@ function getNetherscrollsFeatureChoiceCount(feature, poolSize) {
   return 1;
 }
 
-function getNetherscrollsItemChoiceType(_feature) {
-  return "feat";
+function getNetherscrollsItemChoiceType(feature) {
+  const choiceType = toTrimmedStringOrNull(feature?.choiceType)?.toLowerCase();
+  return ["feat", "feats"].includes(choiceType) || getNetherscrollsItemChoiceSubtype(feature)
+    ? "feat"
+    : "class";
 }
 
 function getNetherscrollsItemChoiceSubtype(feature) {
@@ -7957,6 +7979,7 @@ function normalizeNetherscrollsFoundryFeatData(feat) {
     {
       ...feat,
       system: source.system,
+      flags: source.flags ?? feat?.flags,
     },
     {
       descriptionHtml,
@@ -7965,6 +7988,7 @@ function normalizeNetherscrollsFoundryFeatData(feat) {
     }
   );
   source.system = mergeNetherscrollsDefaults(defaults, source.system ?? {});
+  source.system.type = defaults.type;
   source.system.identifier ??=
     netherscrollsId ? `netherscrolls-${netherscrollsId}` : slugifyNetherscrollsIdentifier(source.name);
   source.system.source = buildNetherscrollsItemSource(sourceName, {
@@ -8080,17 +8104,28 @@ function normalizeNetherscrollsFeatProperties(source) {
 }
 
 function normalizeNetherscrollsFeatType(source) {
-  const explicit = source?.system?.type ?? source?.foundryType;
-  if (explicit && typeof explicit === "object") {
-    return {
-      value: toTrimmedStringOrNull(explicit.value) ?? "feat",
-      subtype: toTrimmedStringOrNull(explicit.subtype) ?? "",
-    };
+  const candidates = [source?.system?.type, source?.foundryType, source?.featType];
+  const explicit = candidates.find((type) => toTrimmedStringOrNull(
+    typeof type === "object" ? type?.value : type
+  ));
+  let value = toTrimmedStringOrNull(typeof explicit === "object" ? explicit?.value : explicit)?.toLowerCase();
+  const subtype = toTrimmedStringOrNull(source?.system?.type?.subtype ?? explicit?.subtype ?? source?.subtype) ?? "";
+  const scope = toTrimmedStringOrNull(getNetherscrollsDocumentFlag(source, "featureScope"))?.toLowerCase();
+  const choiceType = toTrimmedStringOrNull(getNetherscrollsDocumentFlag(source, "choiceType"))?.toLowerCase();
+  const hasClassParent = getNetherscrollsDocumentFlag(source, "parentClassNetherscrollsId") ||
+    getNetherscrollsDocumentFlag(source, "parentClassIdentifier");
+  // Only our class-feature provenance can repair an old default "feat".
+  // A real feat granted by a class/race advancement remains a feat, and
+  // selectable feat choices (e.g. fighting styles) retain their own category.
+  if (["class", "subclass"].includes(scope) ||
+      (scope === "choice" && (!value || value === "feat") && !subtype && !["feat", "feats"].includes(choiceType)) ||
+      (!value && scope !== "choice" && hasClassParent)) {
+    value = "class";
   }
-
   return {
-    value: toTrimmedStringOrNull(source?.foundryType ?? source?.featType) ?? "feat",
-    subtype: toTrimmedStringOrNull(source?.subtype) ?? "",
+    ...(explicit && typeof explicit === "object" ? explicit : {}),
+    value: value ?? "feat",
+    subtype,
   };
 }
 
@@ -8721,6 +8756,10 @@ function applyNetherscrollsItemAttackModifiers(item, source) {
 
 function prepareNetherscrollsFoundryExportItem(item, actorName) {
   const exported = duplicateNetherscrollsData(item);
+  if (exported.type === "feat") {
+    exported.system ??= {};
+    exported.system.type = normalizeNetherscrollsFeatType(item);
+  }
   if (!item?.system || typeof item.system !== "object") return exported;
   // Foundry can serialize an untouched charge counter as null. Native item
   // features accept an omitted counter, but reject null when consuming uses.
@@ -12659,6 +12698,8 @@ function buildNetherscrollsActorClassFeatureData(feature, ref, uuid, featureLeve
   delete data.ownership;
   data.sort = 0;
   data.img = normalizeNetherscrollsImagePath(data.img);
+  data.system ??= {};
+  data.system.type = normalizeNetherscrollsFeatType(data);
   data.flags = data.flags ?? {};
   data.flags[MODULE_ID] = {
     ...(data.flags[MODULE_ID] ?? {}),
@@ -12734,7 +12775,6 @@ function buildFoundryExportPayload(actor) {
   const characterId = getActorCharacterId(sourceActor);
   const activeBonuses = extractNetherscrollsPortableActiveBonuses(sourceActor.effects);
   const items = (sourceActor?.items ?? []).filter((item) => (
-    !isNetherscrollsClassFeatureForExport(item) &&
     item?.flags?.[MODULE_ID]?.nativeCharacterResource !== true
   )).map((item) => prepareNetherscrollsFoundryExportItem(item, sourceActor?.name ?? actor.name ?? "Character"));
   for (const item of items) {
@@ -13320,9 +13360,15 @@ async function exportNetherscrollsCampaignActors(campaignId, actors, { retryFail
         : candidate;
       const actor = descriptor?.actor;
       if (actor?.type !== "character") return null;
+      const characterId = normalizeNetherscrollsReferenceValue(descriptor?.characterId);
+      const linkedId = getActorCharacterId(actor);
+      if (characterId && linkedId && characterId !== linkedId) {
+        throw new Error(`${actor.name}: this Actor is already linked to another Netherscrolls character.`);
+      }
       return {
         actor,
         originalIndex,
+        characterId,
         syncToken: normalizeNetherscrollsReferenceValue(descriptor?.syncToken),
       };
     })
@@ -13344,6 +13390,9 @@ async function exportNetherscrollsCampaignActors(campaignId, actors, { retryFail
         cache: imageUploadCache,
       });
       if (entry.syncToken) entry.payload.syncToken = entry.syncToken;
+      // Target the selected campaign character without persisting a local
+      // link until the API has confirmed a successful export.
+      if (entry.characterId) entry.payload.characterId = entry.characterId;
       characters.push(entry.payload);
       await yieldNetherscrollsMainThread();
     }
@@ -13397,9 +13446,10 @@ async function exportNetherscrollsCampaignActors(campaignId, actors, { retryFail
     if (status === 200 && failed.length) {
       throw new Error("A 200 campaign Foundry Export response contained a failed or missing entry.");
     }
-    pending = failed.map(({ actor, originalIndex, syncToken, payload }) => ({
+    pending = failed.map(({ actor, originalIndex, characterId, syncToken, payload }) => ({
       actor,
       originalIndex,
+      characterId,
       syncToken,
       payload,
     }));
