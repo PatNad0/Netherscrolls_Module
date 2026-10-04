@@ -8783,7 +8783,10 @@ function sanitizeNetherscrollsActivityTargets(activities) {
 }
 
 function applyNetherscrollsImportFlags(documentData, source, netherscrollsId) {
-  const portableEffects = buildNetherscrollsPortableActiveEffects(source);
+  const nativeGenerated = Array.isArray(source?.foundryEffects) ? duplicateNetherscrollsData(source.foundryEffects) : [];
+  const existingIds = new Set((documentData.effects || []).map(e => e._id));
+  documentData.effects = [...(documentData.effects || []), ...nativeGenerated.filter(e => !existingIds.has(e._id))];
+  const portableEffects = nativeGenerated.length ? [] : buildNetherscrollsPortableActiveEffects(source);
   if (portableEffects.length) {
     const existingEffects = Array.isArray(documentData.effects) ? documentData.effects : [];
     documentData.effects = [...existingEffects, ...portableEffects];
@@ -8823,7 +8826,7 @@ function buildNetherscrollsPortableActiveEffects(source, { excludedIds = null } 
   for (const entry of entries) {
     const stat = toTrimmedStringOrNull(entry?.stat);
     const bonus = toTrimmedStringOrNull(entry?.bonus);
-    if (!stat || bonus == null) continue;
+    if (!stat || bonus == null || (entry.filters && Object.keys(entry.filters).length)) continue;
     const key = toTrimmedStringOrNull(entry?._id) ?? `${stat}:${bonus}:${entry?.source ?? ""}`;
     if (excluded.has(String(key))) continue;
     if (seen.has(key)) continue;
@@ -8855,7 +8858,7 @@ function buildNetherscrollsPortableActiveEffectChanges(stat, bonus, source = nul
 
   if (target === "proficiencyBonus") return [change("system.attributes.prof")];
   if (target === "xp") return [change("system.details.xp.value")];
-  if (target === "armorClass") return [change("system.attributes.ac.flat")];
+  if (target === "armorClass") return [change(isOverride ? "system.attributes.ac.flat" : "system.attributes.ac.bonus")];
   if (target === "exhaustion") return [change("system.attributes.exhaustion")];
   if (target === "initiative") return [change("system.attributes.init.bonus")];
   if (target === "ToHitStr") return [change("system.bonuses.mwak.attack")];
@@ -12596,6 +12599,27 @@ function buildFoundryExportPayload(actor) {
   }
 
   const sourceActor = actor.toObject();
+  const transformedActor = actor.toObject(false);
+  const preparedSystem = buildNetherscrollsCharacterSystemProjection(sourceActor?.system);
+  const acSources = [
+    actor.system?.attributes?.ac,
+    transformedActor?.system?.attributes?.ac,
+    sourceActor?.system?.attributes?.ac,
+  ].filter((ac) => ac != null);
+  const acValues = [...acSources.map((ac) => ac.value), ...acSources.map((ac) => ac.flat)];
+  const armorClass = acValues
+    .map((value) => (
+      typeof value === "number" || (typeof value === "string" && value.trim())
+        ? Number(value)
+        : NaN
+    ))
+    .find((value) => Number.isSafeInteger(value));
+  if (armorClass !== undefined) {
+    // Calculated AC can be a live getter absent from serialized source data.
+    preparedSystem.attributes.ac = { value: armorClass };
+  } else if (acSources.length) {
+    throw new Error(`${sourceActor?.name ?? actor.name ?? "Character"}: calculated armor class must be an integer before Foundry Export.`);
+  }
   const preparedPrototypeToken = typeof actor?.prototypeToken?.toObject === "function"
     ? actor.prototypeToken.toObject(false)
     : sourceActor?.prototypeToken;
@@ -12617,9 +12641,9 @@ function buildFoundryExportPayload(actor) {
       items: duplicateNetherscrollsData(items),
     },
     preparedActor: {
-      // Preserve the pulled export behavior: Active Effects are sent through
-      // native activeBonuses, never baked into prepared Actor statistics.
-      system: buildNetherscrollsCharacterSystemProjection(sourceActor?.system),
+      // Keep other source statistics and portable native activeBonuses intact.
+      // AC needs its calculated value because automatic source AC may be null.
+      system: preparedSystem,
       prototypeToken: duplicateNetherscrollsData(preparedPrototypeToken ?? {}),
     },
     ...(activeBonuses.length ? { netherscrolls: { activeBonuses } } : {}),
@@ -12713,7 +12737,8 @@ function pickNetherscrollsProjectionFields(source, fields) {
   const value = source && typeof source === "object" ? source : {};
   const projected = {};
   for (const field of fields) {
-    if (Object.prototype.hasOwnProperty.call(value, field)) projected[field] = duplicateNetherscrollsData(value[field]);
+    if (!Object.prototype.hasOwnProperty.call(value, field) || value[field] === undefined) continue;
+    projected[field] = value[field] === null ? null : duplicateNetherscrollsData(value[field]);
   }
   return projected;
 }

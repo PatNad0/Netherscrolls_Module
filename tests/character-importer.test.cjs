@@ -599,7 +599,7 @@ test("maps every native active-bonus family to its D&D5e Actor field", () => {
   const { importer } = createHarness();
   const rows = [
     ["proficiencyBonus", "system.attributes.prof"], ["xp", "system.details.xp.value"],
-    ["armorClass", "system.attributes.ac.flat"], ["exhaustion", "system.attributes.exhaustion"],
+    ["armorClass", "system.attributes.ac.bonus"], ["exhaustion", "system.attributes.exhaustion"],
     ["initiative", "system.attributes.init.bonus"], ["ToHitStr", "system.bonuses.mwak.attack"],
     ["ToHitDext", "system.bonuses.rwak.attack"], ["SaveDC", "system.bonuses.spell.dc"],
     ["abilities.cha.score", "system.abilities.cha.value"], ["savingThrows.dex.prof", "system.abilities.dex.proficient"],
@@ -2223,7 +2223,7 @@ test("exports only native Character fields while preserving complete embedded co
   };
 
   const payload = importer.buildFoundryExportPayload(actor);
-  assert.deepEqual(calls, [true]);
+  assert.deepEqual(calls, [true, false]);
   assert.equal(payload.schemaVersion, 2);
   assert.equal("systemVersion" in payload, false);
   assert.equal("_id" in payload.actor, false);
@@ -2245,6 +2245,66 @@ test("exports only native Character fields while preserving complete embedded co
   assert.deepEqual(payload.preparedActor.prototypeToken, transformedActor.prototypeToken);
   assert.equal(payload.actor.items[0]._stats.modifiedTime, 1700000002000);
   assert.equal(payload.actor.items[0]._stats.lastModifiedBy, "player-1");
+});
+
+test("exports calculated armor class without replacing other source statistics", () => {
+  const { importer } = createHarness();
+  const source = {
+    name: "Hero",
+    system: {
+      attributes: { ac: { calc: "default", flat: null }, hp: { value: 8, max: 10, temp: null } },
+      abilities: { str: { value: 10 } },
+    },
+    items: [],
+  };
+  const transformed = clone(source);
+  transformed.system.attributes.ac.value = 18;
+  transformed.system.attributes.hp.max = 12;
+  transformed.system.abilities.str.value = 12;
+  const actor = {
+    toObject: (sourceValues = true) => clone(sourceValues ? source : transformed),
+  };
+
+  const payload = importer.buildFoundryExportPayload(actor);
+  assert.deepEqual(clone(payload.preparedActor.system.attributes.ac), { value: 18 });
+  assert.equal(payload.actor.system.attributes.ac.flat, null);
+  assert.equal(payload.preparedActor.system.attributes.hp.temp, null);
+  assert.equal(payload.preparedActor.system.attributes.hp.max, 10);
+  assert.equal(payload.preparedActor.system.abilities.str.value, 10);
+  assert.equal(source.system.attributes.ac.value, undefined);
+});
+
+test("exports live armor class getters even when Actor serialization omits them", () => {
+  const { importer } = createHarness();
+  const source = { name: "Hero", system: { attributes: { ac: { flat: {} } } } };
+  const ac = Object.create({ get value() { return 19; } });
+  const actor = {
+    system: { attributes: { ac } },
+    toObject: () => clone(source),
+  };
+  const payload = importer.buildFoundryExportPayload(actor);
+  assert.deepEqual(clone(payload.preparedActor.system.attributes.ac), { value: 19 });
+});
+
+test("exports integer armor class fallbacks without coercing invalid values", () => {
+  const { importer } = createHarness();
+  for (const [ac, expected] of [
+    [{ flat: 16 }, 16],
+    [{ value: "18", flat: null }, 18],
+    [{ value: undefined, flat: "0" }, 0],
+    [{ value: {}, flat: 14 }, 14],
+  ]) {
+    const payload = importer.buildFoundryExportPayload({
+      toObject: () => ({ name: "Hero", system: { attributes: { ac } } }),
+    });
+    assert.deepEqual(clone(payload.preparedActor.system.attributes.ac), { value: expected });
+    assert.equal("value" in payload.actor.system.attributes.ac, ac.value !== undefined);
+  }
+  for (const value of [null, {}, [], true, "", "@abilities.dex.mod", 17.5, NaN, Infinity]) {
+    assert.throws(() => importer.buildFoundryExportPayload({
+      toObject: () => ({ name: "Hero", system: { attributes: { ac: { value, flat: null } } } }),
+    }), /Hero.*calculated armor class.*integer/);
+  }
 });
 
 test("uploads non-Netherscrolls Actor and embedded Item images before export", async () => {
