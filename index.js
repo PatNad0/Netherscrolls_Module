@@ -2793,6 +2793,7 @@ async function requestNetherscrollsJson(
     error.code = data?.error?.code ?? data?.code ?? null;
     error.hint = data?.error?.hint ?? null;
     error.requestId = data?.error?.requestId ?? null;
+    error.details = data?.error?.details ?? null;
     error.data = data;
     throw error;
   }
@@ -2800,8 +2801,24 @@ async function requestNetherscrollsJson(
 }
 
 function formatNetherscrollsApiError(error) {
+  const details = error?.details;
+  const document = details?.document;
+  const documentLabel = [
+    document?.type,
+    document?.name ? `"${document.name}"` : null,
+    document?.id ? `ID: ${document.id}` : null,
+    document?.foundryId ? `Foundry ID: ${document.foundryId}` : null,
+  ].filter(Boolean).join(", ");
+  const fields = Array.isArray(details?.fields)
+    ? details.fields.filter((field) => field?.path).map((field) => (
+      `${field.path}${field.kind ? ` (${field.kind})` : ""}`
+    ))
+    : [];
   return [
     error?.message ?? "Foundry Export failed.",
+    documentLabel ? `Document: ${documentLabel}.` : null,
+    details?.stage ? `Stage: ${details.stage}.` : null,
+    fields.length ? `Invalid fields: ${fields.join(", ")}.` : null,
     error?.hint,
     error?.code ? `Code: ${error.code}.` : null,
     error?.requestId ? `Request ID: ${error.requestId}.` : null,

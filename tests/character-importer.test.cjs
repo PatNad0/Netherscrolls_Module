@@ -841,13 +841,32 @@ test("preserves API error hints and request IDs for troubleshooting", async () =
   const detail = {
     status: 500, code: "FOUNDRY_ITEM_UPDATE_FAILED", message: "Could not retain Foundry item data",
     hint: "Provide the requestId to the API administrator.", requestId: "request-123",
+    details: {
+      document: { type: "item", id: "canonical", name: "Sword", foundryId: "embedded" },
+      stage: "project-and-save-document",
+      fields: [{ path: "features.0.damage", kind: "Number", value: "private value" }],
+    },
   };
-  assert.match(importer.formatNetherscrollsApiError(detail), /Could not retain.*Provide the requestId.*FOUNDRY_ITEM_UPDATE_FAILED.*request-123/);
+  const formatted = importer.formatNetherscrollsApiError(detail);
+  assert.match(formatted, /Could not retain.*Provide the requestId.*FOUNDRY_ITEM_UPDATE_FAILED.*request-123/);
+  assert.match(formatted, /Sword.*ID: canonical.*Foundry ID: embedded/);
+  assert.match(formatted, /Stage: project-and-save-document/);
+  assert.match(formatted, /Invalid fields: features\.0\.damage \(Number\)/);
+  assert.equal(formatted.includes("private value"), false);
+  const normalizationError = importer.formatNetherscrollsApiError({
+    message: "Invalid item snapshot", details: { document: detail.details.document, stage: "normalize-foundry-item" },
+  });
+  assert.match(normalizationError, /Sword.*Stage: normalize-foundry-item/);
+  assert.equal(normalizationError.includes("Invalid fields:"), false);
+  assert.equal(importer.formatNetherscrollsApiError({ message: "Legacy error" }), "Legacy error");
   context.fetch = async () => ({ ok: false, status: 500, json: async () => ({ error: detail }) });
   await assert.rejects(importer.requestNetherscrollsJson("https://api.example.test/export"), (error) => {
     assert.equal(error.requestId, detail.requestId);
     assert.equal(error.hint, detail.hint);
     assert.equal(error.code, detail.code);
+    assert.deepEqual(error.details, detail.details);
+    assert.match(error.message, /features\.0\.damage \(Number\)/);
+    assert.equal(error.message.includes("private value"), false);
     assert.match(error.message, /request-123/);
     return true;
   });
