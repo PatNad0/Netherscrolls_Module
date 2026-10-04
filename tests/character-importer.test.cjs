@@ -836,6 +836,35 @@ test("exports sparse numeric item modifiers while preserving armor formulas and 
   }), /Weapon.*system.ability/);
 });
 
+test("exports Waterskin charge consumption with an optional numeric spent counter", () => {
+  const { importer } = createHarness();
+  for (const spent of [null, undefined, 0, 2, 4]) {
+    const source = {
+      name: "Hero", system: {}, items: [{
+        _id: "waterskin", name: "Waterskin", type: "consumable",
+        flags: { netherscrolls: { id: "69532e5aef9733de795f46ba" } },
+        system: {
+          uses: { spent, max: "4", recovery: [], autoDestroy: false },
+          activities: { utilityWaterskin: {
+            type: "utility", _id: "utilityWaterskin",
+            consumption: { targets: [{ type: "itemUses", target: "", value: "1", scaling: { mode: "", formula: "" } }] },
+            uses: { spent: null, recovery: [] },
+            roll: { prompt: false, visible: false },
+          } },
+        },
+      }],
+    };
+    const original = clone(source);
+    const payload = importer.buildFoundryExportPayload({ toObject: () => source });
+    const item = JSON.parse(JSON.stringify(payload)).actor.items[0];
+    assert.equal(item.system.uses.max, "4");
+    assert.equal(item.system.uses.spent, spent == null ? undefined : spent);
+    assert.equal("spent" in item.system.uses, spent != null);
+    assert.deepEqual(item.system.activities, original.items[0].system.activities);
+    assert.deepEqual(clone(source), original);
+  }
+});
+
 test("preserves API error hints and request IDs for troubleshooting", async () => {
   const { context, importer } = createHarness();
   const detail = {
@@ -2417,7 +2446,7 @@ test("exports only native Character fields while preserving complete embedded co
   const payload = importer.buildFoundryExportPayload(actor);
   assert.deepEqual(calls, [true, false]);
   assert.equal(payload.schemaVersion, 2);
-  assert.equal("systemVersion" in payload, false);
+  assert.equal(payload.systemVersion, "5.3.3");
   assert.equal("_id" in payload.actor, false);
   assert.equal("_stats" in payload.actor, false);
   assert.equal("effects" in payload.actor, false);
@@ -2433,7 +2462,7 @@ test("exports only native Character fields while preserving complete embedded co
   assert.equal(payload.actor.items.some((item) => item._id === "class-feature-1"), false);
   assert.equal(payload.actor.items.some((item) => item._id === "foundry-class-feature-1"), false);
   assert.equal(payload.actor.items.some((item) => item._id === "feat-1"), true);
-  assert.equal(payload.preparedActor.system.abilities.str.value, 10);
+  assert.equal(payload.preparedActor.system.abilities.str.value, 12);
   assert.deepEqual(payload.preparedActor.prototypeToken, transformedActor.prototypeToken);
   assert.equal(payload.actor.items[0]._stats.modifiedTime, 1700000002000);
   assert.equal(payload.actor.items[0]._stats.lastModifiedBy, "player-1");
@@ -2481,7 +2510,7 @@ test("exports modern and legacy spell preparation flags without mutating Actor I
   assert.deepEqual(preparedNames(bodies[1]), []);
 });
 
-test("exports calculated armor class without replacing other source statistics", () => {
+test("exports prepared character statistics separately from source statistics", () => {
   const { importer } = createHarness();
   const source = {
     name: "Hero",
@@ -2495,6 +2524,8 @@ test("exports calculated armor class without replacing other source statistics",
   transformed.system.attributes.ac.value = 18;
   transformed.system.attributes.hp.max = 12;
   transformed.system.abilities.str.value = 12;
+  transformed.system.spells = { spell1: { value: 2, max: 4 } };
+  transformed.system.attributes.prof = 5;
   const actor = {
     toObject: (sourceValues = true) => clone(sourceValues ? source : transformed),
   };
@@ -2503,8 +2534,12 @@ test("exports calculated armor class without replacing other source statistics",
   assert.deepEqual(clone(payload.preparedActor.system.attributes.ac), { value: 18 });
   assert.equal(payload.actor.system.attributes.ac.flat, null);
   assert.equal(payload.preparedActor.system.attributes.hp.temp, null);
-  assert.equal(payload.preparedActor.system.attributes.hp.max, 10);
-  assert.equal(payload.preparedActor.system.abilities.str.value, 10);
+  assert.equal(payload.preparedActor.system.attributes.hp.max, 12);
+  assert.equal(payload.preparedActor.system.abilities.str.value, 12);
+  assert.equal(payload.preparedActor.system.attributes.prof, 5);
+  assert.equal(payload.preparedActor.system.spells.spell1.max, 4);
+  assert.equal(payload.actor.system.attributes.hp.max, 10);
+  assert.equal(payload.actor.system.abilities.str.value, 10);
   assert.equal(source.system.attributes.ac.value, undefined);
 });
 
@@ -2518,6 +2553,18 @@ test("exports live armor class getters even when Actor serialization omits them"
   };
   const payload = importer.buildFoundryExportPayload(actor);
   assert.deepEqual(clone(payload.preparedActor.system.attributes.ac), { value: 19 });
+});
+
+test("exports live maximum HP when serialization retains a null source maximum", () => {
+  const { importer } = createHarness();
+  const source = { name: "Hero", system: { attributes: { hp: { value: 70, max: null, temp: 0 } } } };
+  const actor = {
+    system: { attributes: { hp: { value: 70, max: 95, temp: 0 } } },
+    toObject: () => clone(source),
+  };
+  const payload = importer.buildFoundryExportPayload(actor);
+  assert.equal(payload.preparedActor.system.attributes.hp.max, 95);
+  assert.equal(payload.actor.system.attributes.hp.max, null);
 });
 
 test("exports integer armor class fallbacks without coercing invalid values", () => {

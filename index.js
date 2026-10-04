@@ -8722,6 +8722,11 @@ function applyNetherscrollsItemAttackModifiers(item, source) {
 function prepareNetherscrollsFoundryExportItem(item, actorName) {
   const exported = duplicateNetherscrollsData(item);
   if (!item?.system || typeof item.system !== "object") return exported;
+  // Foundry can serialize an untouched charge counter as null. Native item
+  // features accept an omitted counter, but reject null when consuming uses.
+  if (exported.system.uses && typeof exported.system.uses === "object" && exported.system.uses.spent == null) {
+    delete exported.system.uses.spent;
+  }
   const invalid = (field, value, expected) => {
     const received = typeof value === "number" ? String(value) : JSON.stringify(value)?.slice(0, 100);
     const error = new Error(`${actorName}: item "${item.name ?? "Unnamed Item"}" (${item._id ?? item.flags?.netherscrolls?.id ?? "no id"}) system.${field} ${expected}; received ${received}.`);
@@ -12698,7 +12703,12 @@ function buildFoundryExportPayload(actor) {
 
   const sourceActor = actor.toObject();
   const transformedActor = actor.toObject(false);
-  const preparedSystem = buildNetherscrollsCharacterSystemProjection(sourceActor?.system);
+  const preparedSystem = buildNetherscrollsCharacterSystemProjection(transformedActor?.system ?? sourceActor?.system);
+  const preparedHpMax = actor.system?.attributes?.hp?.max;
+  if (typeof preparedHpMax === "number" && Number.isFinite(preparedHpMax)) {
+    preparedSystem.attributes.hp ??= {};
+    preparedSystem.attributes.hp.max = preparedHpMax;
+  }
   const acSources = [
     actor.system?.attributes?.ac,
     transformedActor?.system?.attributes?.ac,
@@ -12739,6 +12749,7 @@ function buildFoundryExportPayload(actor) {
   }
   return {
     schemaVersion: 2,
+    systemVersion: game.system?.version ?? sourceActor?._stats?.systemVersion,
     actor: {
       name: sourceActor?.name ?? actor?.name ?? "Unnamed Character",
       type: "character",
@@ -12749,8 +12760,8 @@ function buildFoundryExportPayload(actor) {
       items,
     },
     preparedActor: {
-      // Keep other source statistics and portable native activeBonuses intact.
-      // AC needs its calculated value because automatic source AC may be null.
+      // The API projects native values from prepared data, including calculated
+      // AC, advancement-derived maximum HP, and spell-slot maxima.
       system: preparedSystem,
       prototypeToken: duplicateNetherscrollsData(preparedPrototypeToken ?? {}),
     },
