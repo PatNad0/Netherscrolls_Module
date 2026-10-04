@@ -2164,7 +2164,11 @@ function activateNetherscrollsCharacterImportListeners(root) {
     button.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Exporting characters…';
     try {
       const result = await exportNetherscrollsCampaignActors(campaignId, actors);
-      const message = `Foundry Export: ${result.succeeded.length} succeeded, ${result.failed.length} failed.`;
+      const summary = `Foundry Export: ${result.succeeded.length} succeeded, ${result.failed.length} failed.`;
+      const failureMessages = result.failed.map((entry) => (
+        `${entry.actor?.name ?? "Character"}: ${formatNetherscrollsApiError(entry.error)}`
+      ));
+      const message = [summary, ...failureMessages].join("\n");
       setNetherscrollsCharacterImportMessage(root, message, { error: Boolean(result.failed.length) });
       if (result.failed.length) ui?.notifications?.warn?.(message);
       else ui?.notifications?.info?.(message);
@@ -2784,13 +2788,24 @@ async function requestNetherscrollsJson(
       data?.message ??
       (typeof data?.error === "string" ? data.error : null) ??
       `${operation} failed (${response.status} ${response.statusText}).`;
-    const error = new Error(message);
+    const error = new Error(formatNetherscrollsApiError({ ...data?.error, message }));
     error.status = response.status;
     error.code = data?.error?.code ?? data?.code ?? null;
+    error.hint = data?.error?.hint ?? null;
+    error.requestId = data?.error?.requestId ?? null;
     error.data = data;
     throw error;
   }
   return includeStatus ? { data, status: response.status } : data;
+}
+
+function formatNetherscrollsApiError(error) {
+  return [
+    error?.message ?? "Foundry Export failed.",
+    error?.hint,
+    error?.code ? `Code: ${error.code}.` : null,
+    error?.requestId ? `Request ID: ${error.requestId}.` : null,
+  ].filter(Boolean).join(" ");
 }
 
 function getNetherscrollsApiRows(data) {
@@ -3099,6 +3114,7 @@ async function applyNetherscrollsCampaignCharacter(importedCharacter, folder, { 
     importedCharacter.character
   );
   applyNetherscrollsCharacterHitDiceToClassItems(content.items, importedCharacter.character);
+  applyNetherscrollsCharacterPreparedSpellsToItems(content.items, importedCharacter.character);
   debugNetherscrollsCharacterImport("Resolved character item sources.", {
     characterId,
     resolvedItemCount: content.items.length,
@@ -3781,6 +3797,7 @@ function collectNetherscrollsCharacterItemSources(importedCharacter) {
   };
   add(character.items, "items");
   add(character.spells, "spells");
+  add(character.preparedSpells, "spells");
   add(character.feats, "feats");
   addClassWithNestedContent(character.classes);
   addClassWithNestedContent(character.class);
@@ -4226,6 +4243,24 @@ function applyNetherscrollsCharacterItemState(target, source) {
   ];
   for (const path of mutableSystemPaths) {
     copyNetherscrollsCharacterItemStatePath(target.system, source.system, path);
+  }
+}
+
+function applyNetherscrollsCharacterPreparedSpellsToItems(items, character = null) {
+  if (!Array.isArray(items) || !Array.isArray(character?.preparedSpells)) return;
+  const preparedIds = new Set(character.preparedSpells.map((reference) => (
+    typeof reference === "string"
+      ? normalizeNetherscrollsReferenceValue(reference)
+      : getNetherscrollsCharacterSourceId(reference, { allowRecordId: true })
+  )).filter(Boolean));
+  for (const item of items) {
+    if (item?.type !== "spell") continue;
+    const prepared = preparedIds.has(getItemNetherId(item));
+    item.system ??= {};
+    item.system.prepared = prepared ? (item.system.prepared === 2 ? 2 : 1) : 0;
+    if (item.system.preparation && typeof item.system.preparation === "object") {
+      item.system.preparation.prepared = prepared;
+    }
   }
 }
 
@@ -8071,6 +8106,7 @@ function normalizeNetherscrollsItemData(item) {
     effects: [],
   };
 
+  applyNetherscrollsItemAttackModifiers(itemData, source);
   applyNetherscrollsImportFlags(itemData, source, netherscrollsId);
   return itemData;
 }
@@ -8120,6 +8156,7 @@ function normalizeNetherscrollsFoundryItemData(item) {
     },
   });
 
+  applyNetherscrollsItemAttackModifiers(source, { ...item, system: getNetherscrollsFoundryItemPayload(item)?.system });
   applyNetherscrollsImportFlags(source, item, netherscrollsId);
   return source;
 }
@@ -8215,14 +8252,10 @@ function applyNetherscrollsItemTypeSystem(system, source, itemType) {
     );
     system.activities = normalizeNetherscrollsActivities(source);
     system.ammunition = normalizeNetherscrollsWeaponAmmunition(source);
-    system.armor = {
-      value: Math.max(0, toNumber(source?.system?.armor?.value ?? source?.armor?.value, 0)),
-    };
     system.damage = {
       base: normalizeNetherscrollsItemDamagePart(baseDamage, damageType),
       versatile: normalizeNetherscrollsItemDamagePart(versatileDamage, versatileDamage == null ? null : damageType),
     };
-    system.magicalBonus = normalizeNetherscrollsMagicalBonus(source);
     system.mastery = toTrimmedStringOrNull(source?.system?.mastery ?? source?.mastery) ?? "";
     system.proficient = normalizeNetherscrollsNullableNumber(source?.system?.proficient ?? source?.proficient);
     system.range = normalizeNetherscrollsWeaponRange(source, baseData);
@@ -8251,7 +8284,6 @@ function applyNetherscrollsItemTypeSystem(system, source, itemType) {
       ),
       replace: Boolean(source?.system?.damage?.replace ?? source?.damage?.replace ?? false),
     };
-    system.magicalBonus = normalizeNetherscrollsMagicalBonus(source);
     system.type = normalizeNetherscrollsItemSubtype(source, "consumable");
     system.uses = normalizeNetherscrollsItemUses(source);
     return;
@@ -8641,10 +8673,59 @@ function getNetherscrollsItemDamageType(source) {
   );
 }
 
-function normalizeNetherscrollsMagicalBonus(source) {
-  return sanitizeNetherscrollsBonusFormula(
-    source?.system?.magicalBonus ?? source?.magicalBonus ?? source?.bonus
-  );
+function normalizeNetherscrollsFiniteItemNumber(value) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value !== "string" || !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(value.trim())) return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function isNetherscrollsUnspecifiedItemModifier(value) {
+  return value == null || (typeof value === "string" && !value.trim());
+}
+
+function applyNetherscrollsItemAttackModifiers(item, source) {
+  item.system ??= {};
+  for (const field of ["magicalBonus", "ability"]) {
+    const value = Object.prototype.hasOwnProperty.call(source ?? {}, field)
+      ? source[field]
+      : source?.system?.[field];
+    if (field === "magicalBonus") {
+      const bonus = normalizeNetherscrollsFiniteItemNumber(value);
+      if (bonus !== null) item.system.magicalBonus = bonus;
+      else if (isNetherscrollsUnspecifiedItemModifier(value)) delete item.system.magicalBonus;
+    } else if (typeof value === "string" && (value === "" || ABILITY_KEYS.includes(value))) {
+      item.system.ability = value;
+    } else if (value == null) {
+      delete item.system.ability;
+    }
+  }
+}
+
+function prepareNetherscrollsFoundryExportItem(item, actorName) {
+  const exported = duplicateNetherscrollsData(item);
+  if (!item?.system || typeof item.system !== "object") return exported;
+  const invalid = (field, value, expected) => {
+    const received = typeof value === "number" ? String(value) : JSON.stringify(value)?.slice(0, 100);
+    const error = new Error(`${actorName}: item "${item.name ?? "Unnamed Item"}" (${item._id ?? item.flags?.netherscrolls?.id ?? "no id"}) system.${field} ${expected}; received ${received}.`);
+    error.status = 400;
+    error.code = field === "magicalBonus" ? "ITEM_INVALID_MAGICAL_BONUS" : "ITEM_INVALID_ABILITY";
+    throw error;
+  };
+  const bonus = item.system.magicalBonus;
+  if (isNetherscrollsUnspecifiedItemModifier(bonus)) {
+    delete exported.system.magicalBonus;
+  } else {
+    const numericBonus = normalizeNetherscrollsFiniteItemNumber(bonus);
+    if (numericBonus === null) invalid("magicalBonus", bonus, "must be a finite number or numeric string");
+    exported.system.magicalBonus = numericBonus;
+  }
+  const ability = item.system.ability;
+  if (ability == null) delete exported.system.ability;
+  else if (typeof ability !== "string" || (ability !== "" && !ABILITY_KEYS.includes(ability))) {
+    invalid("ability", ability, 'must be str, dex, con, int, wis, cha, or an empty string');
+  }
+  return exported;
 }
 
 function normalizeNetherscrollsWeaponRange(source, baseData = getNetherscrollsWeaponBaseData(source)) {
@@ -12628,7 +12709,17 @@ function buildFoundryExportPayload(actor) {
   const items = (sourceActor?.items ?? []).filter((item) => (
     !isNetherscrollsClassFeatureForExport(item) &&
     item?.flags?.[MODULE_ID]?.nativeCharacterResource !== true
-  ));
+  )).map((item) => prepareNetherscrollsFoundryExportItem(item, sourceActor?.name ?? actor.name ?? "Character"));
+  for (const item of items) {
+    if (item?.type !== "spell") continue;
+    item.system ??= {};
+    // The API derives canonical preparedSpells from this legacy boolean.
+    // Keep modern preparation states and casting methods on the Item too.
+    const prepared = item.system.prepared != null
+      ? getNetherscrollsSpellPreparedState({ system: { prepared: item.system.prepared } }) > 0
+      : item.system.preparation?.prepared === true;
+    item.system.preparation = { ...(item.system.preparation ?? {}), prepared };
+  }
   return {
     schemaVersion: 2,
     actor: {
@@ -12638,7 +12729,7 @@ function buildFoundryExportPayload(actor) {
       flags: { netherscrolls: { ...(characterId ? { characterId } : {}) } },
       system: buildNetherscrollsCharacterSystemProjection(sourceActor?.system),
       prototypeToken: duplicateNetherscrollsData(sourceActor?.prototypeToken ?? {}),
-      items: duplicateNetherscrollsData(items),
+      items,
     },
     preparedActor: {
       // Keep other source statistics and portable native activeBonuses intact.
@@ -13256,7 +13347,10 @@ async function exportNetherscrollsCampaignActors(campaignId, actors, { retryFail
             message: "The API did not return a successful result for this entry.",
           },
         };
-        if (failure.error?.code === "FOUNDRY_EXPORT_SYNC_STALE") {
+        const failureStatus = Number(failure.error?.status);
+        if (failure.error?.code === "FOUNDRY_EXPORT_SYNC_STALE" || (
+          failureStatus >= 400 && failureStatus < 500 && ![408, 429].includes(failureStatus)
+        )) {
           nonRetryableFailures.push(failure);
         } else {
           failed.push(failure);

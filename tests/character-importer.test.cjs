@@ -206,6 +206,7 @@ globalThis.__test = {
   NETHERSCROLLS_WORLD_IMPORT_PACKS,
   normalizeNetherscrollsCharacterActorCreationData,
   applyNetherscrollsCharacterHitDiceToClassItems,
+  applyNetherscrollsCharacterPreparedSpellsToItems,
   applyNetherscrollsCharacterClassSelectionsToItems,
   buildNetherscrollsAdditionalResourceItems,
   normalizeNetherscrollsImagePath,
@@ -215,6 +216,8 @@ globalThis.__test = {
   buildNetherscrollsSpellSource,
   normalizeNetherscrollsItemData,
   normalizeNetherscrollsFoundryItemData,
+  requestNetherscrollsJson,
+  formatNetherscrollsApiError,
   sortNetherscrollsSpellbookSections,
   buildNetherscrollsPortableActiveEffects,
   buildNetherscrollsSourceImportRequest,
@@ -762,6 +765,94 @@ test("uses the Netherscrolls default image for items without an imported image",
   );
 });
 
+test("imports numeric item modifiers without inventing enhancement or armor fields", () => {
+  const { importer } = createHarness();
+  for (const value of [0, -2, 1.5, "0", "+3", "-1.5", "1e2"]) {
+    const native = importer.normalizeNetherscrollsItemData({ name: "Weapon", type: "weapon", magicalBonus: value, ability: "dex" });
+    assert.equal(native.system.magicalBonus, Number(value));
+    assert.equal(native.system.ability, "dex");
+    assert.equal("armor" in native.system, false);
+    const overlay = importer.normalizeNetherscrollsFoundryItemData({
+      magicalBonus: value, ability: "dex",
+      foundryItem: { name: "Weapon", type: "weapon", system: { magicalBonus: 9, ability: "str" } },
+    });
+    assert.equal(overlay.system.magicalBonus, Number(value));
+    assert.equal(overlay.system.ability, "dex");
+  }
+  for (const value of [undefined, null, "", "  "]) {
+    for (const type of ["weapon", "consumable"]) {
+      const native = importer.normalizeNetherscrollsItemData({ name: "Item", type, magicalBonus: value, bonus: "4" });
+      assert.equal("magicalBonus" in native.system, false);
+      const foundry = importer.normalizeNetherscrollsFoundryItemData({
+        foundryItem: { name: "Item", type, system: { magicalBonus: value, ability: null } },
+      });
+      assert.equal("magicalBonus" in foundry.system, false);
+      assert.equal("ability" in foundry.system, false);
+    }
+  }
+  const fallback = importer.normalizeNetherscrollsFoundryItemData({
+    foundryItem: { name: "Weapon", type: "weapon", system: { magicalBonus: "+2", ability: "" } },
+  });
+  assert.equal(fallback.system.magicalBonus, 2);
+  assert.equal(fallback.system.ability, "");
+});
+
+test("exports sparse numeric item modifiers while preserving armor formulas and attacks", () => {
+  const { importer } = createHarness();
+  const source = {
+    name: "Hero", system: {},
+    items: [
+      ...[undefined, null, "", "  ", 0, -1, "+2", "1.5"].map((magicalBonus, index) => ({
+        _id: `weapon-${index}`, name: `Weapon ${index}`, type: "weapon", system: { magicalBonus, ability: null },
+      })),
+      { _id: "armor", name: "Armor", type: "equipment", system: { armor: { magicalBonus: "@prof" }, ability: "" } },
+      { _id: "attack", name: "Weapon", type: "weapon", system: {
+        magicalBonus: 1, ability: "dex", activities: { attack: { attack: { ability: "str", bonus: "@prof" } } },
+      }, flags: { other: { keep: true } }, effects: [{ name: "Effect", changes: [] }] },
+    ],
+  };
+  const original = clone(source);
+  const payload = importer.buildFoundryExportPayload({ toObject: () => source });
+  for (const item of payload.actor.items.slice(0, 4)) {
+    assert.equal("magicalBonus" in item.system, false);
+    assert.equal("ability" in item.system, false);
+  }
+  assert.deepEqual(Array.from(payload.actor.items.slice(4, 8), (item) => item.system.magicalBonus), [0, -1, 2, 1.5]);
+  assert.equal(payload.actor.items[8].system.armor.magicalBonus, "@prof");
+  assert.equal(payload.actor.items[8].system.ability, "");
+  assert.deepEqual(clone(payload.actor.items[9]), original.items[9]);
+  assert.deepEqual(clone(source), original);
+  for (const value of [true, {}, [], "@prof", "1d4", "Infinity", "not a number", NaN, Infinity]) {
+    assert.throws(() => importer.buildFoundryExportPayload({
+      toObject: () => ({ name: "Calixte", system: {}, items: [{ _id: "bad-item", name: "Bad Weapon", type: "weapon", system: { magicalBonus: value } }] }),
+    }), (error) => {
+      assert.equal(error.code, "ITEM_INVALID_MAGICAL_BONUS");
+      assert.match(error.message, /Calixte.*Bad Weapon.*bad-item.*system.magicalBonus.*finite/);
+      return true;
+    });
+  }
+  assert.throws(() => importer.buildFoundryExportPayload({
+    toObject: () => ({ name: "Hero", system: {}, items: [{ name: "Weapon", type: "weapon", system: { ability: "invalid" } }] }),
+  }), /Weapon.*system.ability/);
+});
+
+test("preserves API error hints and request IDs for troubleshooting", async () => {
+  const { context, importer } = createHarness();
+  const detail = {
+    status: 500, code: "FOUNDRY_ITEM_UPDATE_FAILED", message: "Could not retain Foundry item data",
+    hint: "Provide the requestId to the API administrator.", requestId: "request-123",
+  };
+  assert.match(importer.formatNetherscrollsApiError(detail), /Could not retain.*Provide the requestId.*FOUNDRY_ITEM_UPDATE_FAILED.*request-123/);
+  context.fetch = async () => ({ ok: false, status: 500, json: async () => ({ error: detail }) });
+  await assert.rejects(importer.requestNetherscrollsJson("https://api.example.test/export"), (error) => {
+    assert.equal(error.requestId, detail.requestId);
+    assert.equal(error.hint, detail.hint);
+    assert.equal(error.code, detail.code);
+    assert.match(error.message, /request-123/);
+    return true;
+  });
+});
+
 test("keeps compendium data canonical while preserving mutable character state", () => {
   const { importer } = createHarness();
   const canonical = makeDocument({
@@ -884,6 +975,88 @@ test("normalizes library spells for leveled Actor spellbook sections", () => {
   assert.equal(repairedActorSpell.system.method, "spell");
   assert.equal(repairedActorSpell.system.prepared, 1);
   assert.equal(repairedActorSpell.system.sourceItem, "");
+});
+
+test("applies canonical prepared spell selections while preserving casting modes", () => {
+  const { importer } = createHarness();
+  const items = [
+    { type: "spell", flags: { netherscrolls: { id: "spell-1" } }, system: { method: "pact", prepared: 0 } },
+    { type: "spell", flags: { netherscrolls: { id: "spell-2" } }, system: { method: "innate", prepared: 1 } },
+    { type: "spell", flags: { netherscrolls: { id: "spell-3" } }, system: { preparation: { mode: "ritual", prepared: false } } },
+    { type: "spell", flags: { netherscrolls: { id: "spell-4" } }, system: { prepared: 2 } },
+    { type: "spell", flags: {}, system: { method: "spell", prepared: 1 } },
+    { type: "loot", system: { prepared: 1 } },
+  ];
+  importer.applyNetherscrollsCharacterPreparedSpellsToItems(items, {
+    preparedSpells: [{ id: "spell-1", name: "One" }, "spell-3", { _id: "spell-4" }, { id: "spell-1" }],
+  });
+  assert.deepEqual(items.map((item) => item.system.prepared), [1, 0, 1, 2, 0, 1]);
+  assert.equal(items[0].system.method, "pact");
+  assert.equal(items[1].system.method, "innate");
+  assert.deepEqual(items[2].system.preparation, { mode: "ritual", prepared: true });
+
+  const selected = clone(items);
+  importer.applyNetherscrollsCharacterPreparedSpellsToItems(items, {});
+  assert.deepEqual(items, selected);
+  importer.applyNetherscrollsCharacterPreparedSpellsToItems(items, { preparedSpells: [] });
+  assert.deepEqual(items.map((item) => item.system.prepared), [0, 0, 0, 0, 0, 1]);
+  assert.deepEqual(items[2].system.preparation, { mode: "ritual", prepared: false });
+});
+
+test("imports, changes, and clears prepared spells through canonical spell resolution", async () => {
+  const { context, importer } = createHarness();
+  const pack = makePack("world.netherscrolls-spells");
+  context.game.packs.set(pack.collection, pack);
+  context.Actor = { implementation: { async create(payload) {
+    const actor = makeActor(context, payload);
+    context.game.actors.push(actor);
+    return actor;
+  } } };
+  const selections = [];
+  context.fetch = async (url, options) => {
+    assert.equal(url.endsWith("/import/selection"), true);
+    const selection = JSON.parse(options.body);
+    selections.push(selection);
+    return {
+      ok: true, status: 200, statusText: "OK",
+      json: async () => ({ data: { spells: selection.spells.map((id) => ({
+        _id: id, name: id, level: 1,
+        foundryItem: {
+          name: id, type: "spell",
+          system: { level: 1, method: id === "spell-2" ? "pact" : "spell", prepared: 1 },
+        },
+      })) } }),
+    };
+  };
+  const input = {
+    id: "character-1", name: "Hero",
+    character: {
+      spells: [{ id: "spell-1" }, { id: "spell-2" }],
+      preparedSpells: [{ id: "spell-1" }, { id: "spell-3" }],
+    },
+  };
+  const first = await importer.importNetherscrollsCampaignCharacter(input, { id: "folder" });
+  const states = () => Object.fromEntries(first.actor.items.filter((item) => item.type === "spell")
+    .map((item) => [item.flags.netherscrolls.id, item.system.prepared]));
+  assert.deepEqual(selections, [{ spells: ["spell-1", "spell-2", "spell-3"] }]);
+  assert.deepEqual(states(), { "spell-1": 1, "spell-2": 0, "spell-3": 1 });
+  const preparedExportIds = () => Array.from(importer.buildFoundryExportPayload(first.actor).actor.items)
+    .filter((item) => item.type === "spell" && item.system.preparation.prepared)
+    .map((item) => item.flags.netherscrolls.id);
+  assert.deepEqual(preparedExportIds(), ["spell-1", "spell-3"]);
+  assert.equal(first.actor.items.find((item) => item.flags.netherscrolls.id === "spell-2").system.method, "pact");
+  assert.equal(pack.documents.find((item) => item.flags.netherscrolls.id === "spell-2").system.prepared, 1);
+
+  input.character.spells.push({ id: "spell-3" });
+  input.character.preparedSpells = ["spell-2"];
+  await importer.importNetherscrollsCampaignCharacter(input, { id: "folder" });
+  assert.deepEqual(states(), { "spell-1": 0, "spell-2": 1, "spell-3": 0 });
+  assert.deepEqual(preparedExportIds(), ["spell-2"]);
+  input.character.preparedSpells = [];
+  await importer.importNetherscrollsCampaignCharacter(input, { id: "folder" });
+  assert.deepEqual(states(), { "spell-1": 0, "spell-2": 0, "spell-3": 0 });
+  assert.deepEqual(preparedExportIds(), []);
+  assert.equal(context.game.actors.length, 1);
 });
 
 test("orders D&D5e spellbook sections by method priority and spell level", () => {
@@ -2247,6 +2420,48 @@ test("exports only native Character fields while preserving complete embedded co
   assert.equal(payload.actor.items[0]._stats.lastModifiedBy, "player-1");
 });
 
+test("exports modern and legacy spell preparation flags without mutating Actor Items", async () => {
+  const { context, importer } = createHarness();
+  const actor = makeActor(context, { name: "Hero", type: "character" });
+  await actor.createEmbeddedDocuments("Item", [
+    { _id: "local-one", type: "spell", name: "One", flags: { netherscrolls: { id: "spell-1" } }, system: { method: "pact", prepared: 1 } },
+    { _id: "local-two", type: "spell", name: "Two", flags: { netherscrolls: { id: "spell-2" } }, system: { method: "spell", prepared: 0, preparation: { mode: "always", prepared: true } } },
+    { _id: "local-always", type: "spell", name: "Always", system: { prepared: 2 } },
+    { _id: "local-legacy", type: "spell", name: "Legacy", system: { preparation: { mode: "prepared", prepared: true } } },
+    { _id: "local-unprepared", type: "spell", name: "Unprepared", system: { preparation: { mode: "innate", prepared: false } } },
+    { _id: "local-item", type: "loot", name: "Item", system: {} },
+  ]);
+  const original = actor.toObject();
+  const payload = importer.buildFoundryExportPayload(actor);
+  assert.deepEqual(Array.from(payload.actor.items.filter((item) => item.type === "spell"), (item) => item.system.preparation.prepared), [true, false, true, true, false]);
+  assert.equal(payload.actor.items[0].flags.netherscrolls.id, "spell-1");
+  assert.equal(payload.actor.items[0].system.method, "pact");
+  assert.equal(payload.actor.items[2].flags?.netherscrolls?.id, undefined);
+  assert.equal(payload.actor.items[3].system.preparation.mode, "prepared");
+  assert.equal(payload.actor.items[4].system.preparation.mode, "innate");
+  assert.equal(payload.actor.items[5].system.preparation, undefined);
+  assert.deepEqual(actor.toObject(), original);
+
+  const bodies = [];
+  context.fetch = async (_url, options) => {
+    bodies.push(JSON.parse(options.body));
+    return {
+      ok: true, status: 200, statusText: "OK",
+      json: async () => ({ data: [{ index: 0, ok: true, data: { characterId: "character-1" } }] }),
+    };
+  };
+  await importer.exportNetherscrollsCampaignActors("campaign-1", [actor]);
+  const preparedNames = (body) => body.characters[0].actor.items
+    .filter((item) => item.type === "spell" && item.system.preparation.prepared === true)
+    .map((item) => item.name);
+  assert.deepEqual(preparedNames(bodies[0]), ["One", "Always", "Legacy"]);
+  await actor.updateEmbeddedDocuments("Item", actor.items.filter((item) => item.type === "spell").map((item) => ({
+    _id: item.id, system: { prepared: 0, preparation: { prepared: false } },
+  })));
+  await importer.exportNetherscrollsCampaignActors("campaign-1", [actor]);
+  assert.deepEqual(preparedNames(bodies[1]), []);
+});
+
 test("exports calculated armor class without replacing other source statistics", () => {
   const { importer } = createHarness();
   const source = {
@@ -2468,6 +2683,39 @@ test("retries only failed entries from a 207 campaign Foundry Export", async () 
   assert.equal(requestBodies[1].characters[0].actor.name, "Second");
   assert.equal(result.succeeded.length, 2);
   assert.equal(result.failed.length, 0);
+});
+
+test("does not resend validation failures while retrying a transient API item failure", async () => {
+  const { context, importer } = createHarness();
+  const actors = ["Invalid", "Transient"].map((name) => makeActor(context, { name, type: "character" }));
+  await actors[0].createEmbeddedDocuments("Item", [{ name: "Unknown bonus", type: "weapon", system: { magicalBonus: "" } }]);
+  await actors[1].createEmbeddedDocuments("Item", [{ name: "Numeric bonus", type: "weapon", system: { magicalBonus: "+2" } }]);
+  const requests = [];
+  context.fetch = async (_url, options) => {
+    const body = JSON.parse(options.body);
+    requests.push(body);
+    assert.equal(body.characters.at(-1).actor.items[0].system.magicalBonus, 2);
+    const validation = { status: 400, code: "ITEM_INVALID_MAGICAL_BONUS", message: "Invalid bonus", hint: "Correct it.", requestId: "validation-123" };
+    return requests.length === 1 ? {
+      ok: true, status: 207,
+      json: async () => ({ data: [
+        { index: 0, ok: false, error: validation },
+        { index: 1, ok: false, error: { status: 500, code: "FOUNDRY_ITEM_UPDATE_FAILED", message: "Temporary storage failure" } },
+      ] }),
+    } : {
+      ok: true, status: 200,
+      json: async () => ({ data: [{ index: 0, ok: true, data: { characterId: "character-2" } }] }),
+    };
+  };
+  const result = await importer.exportNetherscrollsCampaignActors("campaign-1", actors);
+  assert.equal("magicalBonus" in requests[0].characters[0].actor.items[0].system, false);
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].characters.length, 1);
+  assert.equal(requests[1].characters[0].actor.name, "Transient");
+  assert.equal(result.succeeded.length, 1);
+  assert.equal(result.failed.length, 1);
+  assert.equal(result.failed[0].actor.name, "Invalid");
+  assert.equal(result.failed[0].error.requestId, "validation-123");
 });
 
 test("does not retry a queued Foundry Export whose sync token became stale", async () => {
