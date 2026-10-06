@@ -2664,6 +2664,31 @@ test("exports only race and class names and levels while retaining edited spell 
   assert.deepEqual(source, original);
 });
 
+test("sends explicit equipped inventory references and clears equipment after unequipping", async () => {
+  const { context, importer } = createHarness();
+  const actor = makeActor(context, { name: "Hero", type: "character" });
+  await actor.createEmbeddedDocuments("Item", [
+    { _id: "sword", name: "Sword", type: "weapon", flags: { netherscrolls: { id: "canonical-sword" } }, system: { equipped: true } },
+    { _id: "new-item", name: "Shield", type: "equipment", system: { equipped: true } },
+    { _id: "bag", name: "Bag", type: "container", system: { equipped: false } },
+    { _id: "spell", name: "Spell", type: "spell", system: { equipped: true } },
+  ]);
+  const bodies = [];
+  context.fetch = async (_url, options) => {
+    bodies.push(JSON.parse(options.body));
+    return { ok: true, status: 200, json: async () => ({ data: [{ index: 0, ok: true, data: { characterId: "hero-id" } }] }) };
+  };
+  await importer.exportNetherscrollsCampaignActors("campaign-1", [actor]);
+  assert.deepEqual(bodies[0].characters[0].netherscrolls.equipment, [
+    { name: "Sword", foundryId: "sword", netherscrollsId: "canonical-sword" },
+    { name: "Shield", foundryId: "new-item" },
+  ]);
+  await actor.updateEmbeddedDocuments("Item", [{ _id: "sword", system: { equipped: false } }, { _id: "new-item", system: { equipped: false } }]);
+  await importer.exportNetherscrollsCampaignActors("campaign-1", [actor]);
+  assert.deepEqual(bodies[1].characters[0].netherscrolls.equipment, []);
+  assert.equal(bodies[1].characters[0].actor.items.length, 4);
+});
+
 test("exports modern and legacy spell preparation flags without mutating Actor Items", async () => {
   const { context, importer } = createHarness();
   const actor = makeActor(context, { name: "Hero", type: "character" });

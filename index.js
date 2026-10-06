@@ -12844,7 +12844,17 @@ function buildFoundryExportPayload(actor) {
       system: preparedSystem,
       prototypeToken: duplicateNetherscrollsData(preparedPrototypeToken ?? {}),
     },
-    ...(activeBonuses.length ? { netherscrolls: { activeBonuses } } : {}),
+    netherscrolls: {
+      equipment: items.filter((item) => (
+        (NETHERSCROLLS_ITEM_TYPES.has(item.type) || ["facility", "vehicle", "backpack"].includes(item.type)) &&
+        item.system?.equipped === true
+      )).map((item) => ({
+        name: item.name,
+        ...(item._id ? { foundryId: item._id } : {}),
+        ...(getItemNetherId(item) ? { netherscrollsId: getItemNetherId(item) } : {}),
+      })),
+      ...(activeBonuses.length ? { activeBonuses } : {}),
+    },
   };
 }
 
