@@ -12737,6 +12737,32 @@ function renderFoundryTransferPayload(payload) {
   return `<pre class="ns-foundry-transfer-data">${escaped}</pre>`;
 }
 
+function buildNetherscrollsExportReference(item, allItems) {
+  const reference = { name: item.name, type: item.type };
+  if (item.type === "class") {
+    reference.system = {
+      levels: item.system?.levels ?? item.system?.level ?? item.system?.classLevel ?? 1,
+      identifier: item.name,
+    };
+  } else if (item.type === "subclass") {
+    const parent = allItems.find((candidate) => candidate.type === "class" && (
+      (item.system?.classIdentifier && candidate.system?.identifier === item.system.classIdentifier) ||
+      (item.flags?.netherscrolls?.classId && candidate.flags?.netherscrolls?.id === item.flags.netherscrolls.classId)
+    ));
+    const classes = allItems.filter((candidate) => candidate.type === "class");
+    const parentName = parent?.name ?? (classes.length === 1 ? classes[0].name : null);
+    if (!parentName) throw new Error(`${item.name}: cannot identify the parent class for export.`);
+    reference.system = { classIdentifier: parentName };
+  }
+  return reference;
+}
+
+function isNetherscrollsExcludedExportFeature(item) {
+  if (item?.type !== "feat") return false;
+  return isNetherscrollsImportedClassFeatureDocument(item) ||
+    ["race", "class", "subclass"].includes(normalizeNetherscrollsFeatType(item).value);
+}
+
 function buildFoundryExportPayload(actor) {
   if (!actor || typeof actor.toObject !== "function") {
     throw new Error("A Foundry Actor document is required for Foundry Export.");
@@ -12773,10 +12799,23 @@ function buildFoundryExportPayload(actor) {
     ? actor.prototypeToken.toObject(false)
     : sourceActor?.prototypeToken;
   const characterId = getActorCharacterId(sourceActor);
-  const activeBonuses = extractNetherscrollsPortableActiveBonuses(sourceActor.effects);
-  const items = (sourceActor?.items ?? []).filter((item) => (
-    item?.flags?.[MODULE_ID]?.nativeCharacterResource !== true
-  )).map((item) => prepareNetherscrollsFoundryExportItem(item, sourceActor?.name ?? actor.name ?? "Character"));
+  const sourceItems = sourceActor?.items ?? [];
+  const ignoredIds = new Set(sourceItems.filter((item) =>
+    ["race", "class", "subclass"].includes(item.type) || isNetherscrollsExcludedExportFeature(item)
+  ).map((item) => item._id).filter(Boolean));
+  const activeBonuses = extractNetherscrollsPortableActiveBonuses((sourceActor.effects ?? []).filter((effect) =>
+    !ignoredIds.has(String(effect.origin ?? "").split(".Item.")[1]?.split(".")[0])
+  ));
+  const items = sourceItems.filter((item) => (
+    item?.flags?.[MODULE_ID]?.nativeCharacterResource !== true && !isNetherscrollsExcludedExportFeature(item)
+  )).map((item) => ["race", "class", "subclass"].includes(item.type)
+    ? buildNetherscrollsExportReference(item, sourceItems)
+    : prepareNetherscrollsFoundryExportItem(item, sourceActor?.name ?? actor.name ?? "Character"));
+  if (!items.some((item) => item.type === "race")) {
+    const declaredRace = sourceActor.system?.details?.race;
+    const raceName = toTrimmedStringOrNull(typeof declaredRace === "string" ? declaredRace : declaredRace?.name);
+    if (raceName) items.push({ type: "race", name: raceName });
+  }
   for (const item of items) {
     if (item?.type !== "spell") continue;
     item.system ??= {};

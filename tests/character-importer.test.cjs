@@ -2471,6 +2471,7 @@ test("exports only native Character fields while preserving complete embedded co
       },
       {
         _id: "subclass-1",
+        name: "Champion",
         type: "subclass",
         flags: { netherscrolls: { id: "canonical-subclass", classId: "canonical-class" } },
       },
@@ -2482,6 +2483,7 @@ test("exports only native Character fields while preserving complete embedded co
           changes: [{ key: "system.abilities.str.value", mode: 2, value: "2" }],
         }],
       },
+      { name: "Fighter", type: "class", system: { levels: 3 }, flags: { netherscrolls: { id: "canonical-class" } } },
       {
         _id: "class-feature-1",
         name: "Rage",
@@ -2530,13 +2532,12 @@ test("exports only native Character fields while preserving complete embedded co
   assert.equal(payload.actor.flags.netherscrolls.characterId, "character-1");
   assert.deepEqual(clone(payload.actor.system.attributes.hp), { value: 8, max: 10 });
   assert.equal(payload.actor.system.abilities.str.value, 10);
-  assert.equal(payload.actor.items.length, 6);
+  assert.equal(payload.actor.items.length, 5);
   assert.equal(payload.actor.items[0].flags.netherscrolls.id, "canonical-item");
-  assert.equal(payload.actor.items[1].flags.netherscrolls.id, "canonical-subclass");
-  assert.equal(payload.actor.items[1].flags.netherscrolls.classId, "canonical-class");
-  assert.deepEqual(payload.actor.items[2].effects[0].changes, [{ key: "system.abilities.str.value", mode: 2, value: "2" }]);
-  assert.equal(payload.actor.items.find((item) => item._id === "class-feature-1").system.type.value, "class");
-  assert.equal(payload.actor.items.find((item) => item._id === "foundry-class-feature-1").system.type.value, "class");
+  assert.deepEqual(clone(payload.actor.items[1]), { name: "Champion", type: "subclass", system: { classIdentifier: "Fighter" } });
+  assert.equal(payload.actor.items[2].effects, undefined);
+  assert.equal(payload.actor.items.some(item => item._id === "class-feature-1"), false);
+  assert.equal(payload.actor.items.some(item => item._id === "foundry-class-feature-1"), false);
   assert.equal(payload.actor.items.some((item) => item._id === "feat-1"), true);
   assert.equal(payload.preparedActor.system.abilities.str.value, 12);
   assert.deepEqual(payload.preparedActor.prototypeToken, transformedActor.prototypeToken);
@@ -2630,14 +2631,37 @@ test("exports categorized feature snapshots and real feats without guessing from
   const original = actor.toObject();
   const items = importer.buildFoundryExportPayload(actor).actor.items;
   assert.deepEqual(Array.from(items, (item) => [item._id, item.system.type.value]), [
-    ["racial", "race"], ["legacy", "race"], ["background", "background"],
-    ["monster", "monster"], ["class", "class"], ["old-class", "class"], ["missing-class", "class"],
-    ["real-feat", "feat"], ["choice", "feat"], ["unknown", "feat"],
+    ["background", "background"], ["monster", "monster"], ["real-feat", "feat"], ["unknown", "feat"],
   ]);
-  assert.equal(items[0].system.activities.action.type, "utility");
-  assert.equal(items[0].effects[0].name, "Feature effect");
-  assert.equal(items.find((item) => item._id === "choice").system.type.subtype, "fightingStyle");
   assert.deepEqual(actor.toObject(), original);
+});
+
+test("exports only race and class names and levels while retaining edited spell and item content", () => {
+  const { importer } = createHarness();
+  const forbidden = { img: "banana.png", effects: [{ name: "banana" }], flags: { netherscrolls: { id: "stale-id" } } };
+  const source = { name: "Hero", type: "character", system: {}, items: [
+    { ...forbidden, type: "race", name: "Human", system: { description: { value: "banana" } } },
+    { ...forbidden, type: "class", name: "Sorcerer", system: { identifier: "sorc", levels: 3, advancement: { banana: {} }, hd: { denomination: "d20" } } },
+    { ...forbidden, type: "subclass", name: "Draconic", system: { classIdentifier: "sorc", description: { value: "banana" } } },
+    { type: "feat", name: "Summon banana", system: { type: { value: "class" } } },
+    { type: "feat", name: "Human banana", system: { type: { value: "race" } } },
+    { type: "spell", name: "Fireball", img: "spell-edit.png", system: { description: { value: "Edited spell" } } },
+    { type: "loot", name: "Book", img: "item-edit.png", system: { description: { value: "Edited item" } } },
+  ] };
+  const original = clone(source);
+  const payload = importer.buildFoundryExportPayload({ toObject: () => clone(source) });
+  assert.deepEqual(clone(payload.actor.items.slice(0, 3)), [
+    { type: "race", name: "Human" },
+    { type: "class", name: "Sorcerer", system: { levels: 3, identifier: "Sorcerer" } },
+    { type: "subclass", name: "Draconic", system: { classIdentifier: "Sorcerer" } },
+  ]);
+  assert.equal(JSON.stringify(payload).includes("banana"), false);
+  assert.equal(JSON.stringify(payload).includes("stale-id"), false);
+  assert.equal(payload.actor.items[3].img, "spell-edit.png");
+  assert.equal(payload.actor.items[3].system.description.value, "Edited spell");
+  assert.equal(payload.actor.items[4].img, "item-edit.png");
+  assert.equal(payload.actor.items[4].system.description.value, "Edited item");
+  assert.deepEqual(source, original);
 });
 
 test("exports modern and legacy spell preparation flags without mutating Actor Items", async () => {
@@ -2803,7 +2827,7 @@ test("uploads non-Netherscrolls Actor and embedded Item images before export", a
   await importer.prepareNetherscrollsFoundryExportImages(actor, payload, { apiKey: "test-key" });
 
   assert.match(payload.actor.img, /^https:\/\/api\.netherscrolls\.ca\/media\/image\/upload-\d+\.png$/);
-  for (const item of payload.actor.items.slice(0, types.length)) assert.match(item.img, /^https:\/\/api\.netherscrolls\.ca\/media\/image\/upload-\d+\.png$/);
+  for (const item of payload.actor.items.slice(0, types.length).filter(item => !["race", "class", "subclass"].includes(item.type))) assert.match(item.img, /^https:\/\/api\.netherscrolls\.ca\/media\/image\/upload-\d+\.png$/);
   assert.equal(payload.actor.items[types.length].img, "https://assets.example.com/not-hosted-by-foundry.png");
   assert.equal(payload.actor.items[types.length + 1].img, "icons/svg/item-bag.svg");
   assert.match(actor.img, /^https:\/\/api\.netherscrolls\.ca\/media\/image\/upload-\d+\.png$/);
@@ -2812,16 +2836,16 @@ test("uploads non-Netherscrolls Actor and embedded Item images before export", a
   assert.match(payload.preparedActor.prototypeToken.texture.src, /^https:\/\/api\.netherscrolls\.ca\/media\/image\/upload-\d+\.png$/);
   assert.match(actor.prototypeToken.texture.src, /^https:\/\/api\.netherscrolls\.ca\/media\/image\/upload-\d+\.png$/);
   const uploads = calls.filter((entry) => entry.options.method === "POST");
-  assert.equal(calls.length, (types.length + 2) * 2);
-  assert.equal(uploads.length, types.length + 2);
+  assert.equal(calls.length, (types.length - 1) * 2);
+  assert.equal(uploads.length, types.length - 1);
   assert.deepEqual(uploads.map((entry) => entry.options.body.get("module")).sort(), [
-    "backgrounds", "characters", "characters", "classes", "feats", "items", "races", "spells", "subclasses",
+    "backgrounds", "characters", "characters", "feats", "items", "spells",
   ].sort());
   for (const upload of uploads) assert.match(upload.options.body.get("sha256"), /^[a-f0-9]{64}$/);
 
   const repeatPayload = importer.buildFoundryExportPayload(actor);
   await importer.prepareNetherscrollsFoundryExportImages(actor, repeatPayload, { apiKey: "test-key" });
-  assert.equal(calls.length, (types.length + 2) * 2);
+  assert.equal(calls.length, (types.length - 1) * 2);
   assert.match(repeatPayload.actor.img, /^https:\/\/api\.netherscrolls\.ca\/media\/image\/upload-\d+\.png$/);
 });
 
