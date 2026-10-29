@@ -48,6 +48,10 @@
       {{else}}
         <div class="ns-import-source-message">{{#if sourceLoading}}Connecting to the API server...{{else}}{{#if hasSources}}Pick any sources to limit the import. Leave all unchecked to import all sources.{{else}}No importable sources returned.{{/if}}{{/if}}</div>
       {{/if}}
+      <button type="submit" data-ns-import-action="library">
+        <i class="fa-solid fa-boxes-stacked"></i>
+        Foundry Import Material
+      </button>
     </fieldset>
   </div>
 
@@ -78,10 +82,6 @@
   </fieldset>
 
   <footer class="sheet-footer flexrow">
-    <button type="submit" data-ns-import-action="library">
-      <i class="fa-solid fa-boxes-stacked"></i>
-      Foundry Import Material
-    </button>
     <button type="button" data-ns-character-action="import-selected">
       <i class="fa-solid fa-users"></i>
       Foundry Import Selected

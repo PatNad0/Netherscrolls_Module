@@ -2299,6 +2299,7 @@ async function fetchNetherscrollsCampaigns({ force = false } = {}) {
     const data = await fetchNetherscrollsApiJson(NETHERSCROLLS_CAMPAIGNS_ENDPOINT, apiKey);
     const rows = getNetherscrollsApiRows(data);
     const campaigns = rows
+      .filter((campaign) => campaign?.active !== false)
       .map((campaign) => {
         const id = normalizeNetherscrollsReferenceValue(
           campaign?._id ?? campaign?.id ?? campaign?.campaignId ?? campaign?.netherscrollsId
