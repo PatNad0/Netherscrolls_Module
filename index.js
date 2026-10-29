@@ -9367,7 +9367,7 @@ function inferNetherscrollsSpellFields(source, descriptionHtml) {
   const materials = inferNetherscrollsSpellMaterials(source, text);
   const saveAbility = inferNetherscrollsSpellSaveAbility(source, primaryText);
   const healing = inferNetherscrollsSpellHealing(source, primaryText);
-  const damage = inferNetherscrollsSpellDamage(source, primaryText);
+  const damage = inferNetherscrollsSpellDamage(source, primaryText, text);
   const attack = inferNetherscrollsSpellAttack(source, primaryText);
   const activity = buildNetherscrollsSpellActivity(source, {
     activation,
@@ -9745,7 +9745,7 @@ function inferNetherscrollsSpellHealing(source, text) {
   };
 }
 
-function inferNetherscrollsSpellDamage(source, text) {
+function inferNetherscrollsSpellDamage(source, text, scalingText = text) {
   const explicit = source?.damage;
   const explicitFormula = parseNetherscrollsFormulaFromUnknown(explicit);
   const explicitType = normalizeNetherscrollsDamageType(
@@ -9761,7 +9761,7 @@ function inferNetherscrollsSpellDamage(source, text) {
   if (!parsed?.formula || !parsed?.type) return null;
   return {
     ...parseNetherscrollsDicePart(parsed.formula, parsed.type),
-    scaling: inferNetherscrollsScaling(text, "damage"),
+    scaling: inferNetherscrollsScaling(scalingText, "damage", getNetherscrollsSpellLevel(source)),
   };
 }
 
@@ -9873,8 +9873,15 @@ function parseNetherscrollsDicePart(formula, type) {
   };
 }
 
-function inferNetherscrollsScaling(text, kind) {
+function inferNetherscrollsScaling(text, kind, spellLevel = null) {
   const source = String(text ?? "");
+  // Cantrip steps are supplied by D&D5e from total character level. Store the
+  // per-step increase, not a fixed dice total for the Actor's current level.
+  const hasCantripThresholds = /\b5(?:th)?\b/i.test(source) && /\b11(?:th)?\b/i.test(source) && /\b17(?:th)?\b/i.test(source);
+  const cantripIncrease = spellLevel === 0 && kind === "damage" && hasCantripThresholds
+    ? /\bdamage\s+increases?\s+by\s+(\d+)d(\d+)\b/i.exec(source)
+    : null;
+  if (cantripIncrease) return { mode: "whole", number: Number(cantripIncrease[1]), formula: "" };
   const scalingText = source.split(/\bat higher levels?\b/i).slice(1).join(" ");
   const formulaMatch =
     /\b(?:damage|healing|amount of healing|amount)\s+increases? by\s+(\d+d\d+|\d+)/i.exec(scalingText) ??
