@@ -6,3 +6,6 @@ séléné.txt
 README.md
 restructure.md
 docs/
+.env.dev-readonly.local
+fetch-api.ps1
+tests/character-importer.test.cjs
