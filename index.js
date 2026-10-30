@@ -1,3 +1,6 @@
+import "./scripts/ns-effects.js";
+import "./scripts/ns-effects-foundry.js";
+
 const MODULE_ID = "netherscrolls-module";
 const PLACEHOLDER_CHARACTER_ID = "PLACEHOLDER";
 const ABILITY_KEYS = ["str", "dex", "con", "int", "wis", "cha"];
@@ -3149,6 +3152,7 @@ async function applyNetherscrollsCampaignCharacter(importedCharacter, folder, { 
     if (Array.isArray(importedCharacter.character.equipment)) item.system.equipped = importedCharacter.character.equipment.some(matches);
     if (Array.isArray(importedCharacter.character.attunement)) item.system.attuned = importedCharacter.character.attunement.some(matches);
   }
+  applyNetherscrollsCharacterEquipmentArmorClass(actorPayload, importedCharacter.character, content.items, effectSources);
   debugNetherscrollsCharacterImport("Resolved character item sources.", {
     characterId,
     resolvedItemCount: content.items.length,
@@ -3355,6 +3359,7 @@ function applyNetherscrollsCharacterNativeActorData(actorPayload, character = nu
   actorPayload.flags[MODULE_ID] = {
     ...(actorPayload.flags[MODULE_ID] ?? {}),
     nativeCharacter,
+    nativeEffectState: null,
   };
 
   const characterName = toTrimmedStringOrNull(character.name);
@@ -3730,6 +3735,28 @@ function getNetherscrollsCharacterSkillManualBonus(sourceSkill) {
   return toNumber(sourceSkill?.misc, 0) +
     toNumber(sourceSkill?.bonus, 0) +
     toNumber(sourceSkill?.bonuses?.check, 0);
+}
+
+function applyNetherscrollsCharacterEquipmentArmorClass(actorPayload, character, items, actorEffects = []) {
+  const hasArmor = items.some(item => item.type === "equipment" && item.system?.equipped &&
+    ["light", "medium", "heavy"].includes(item.system?.type?.value));
+  if (!hasArmor) return;
+  const effects = [...actorEffects, ...items.flatMap(item => item.effects ?? [])];
+  // An explicit native total override must still win over equipment calculation.
+  if (effects.some(effect => !effect.disabled && effect.transfer !== false &&
+    effect.changes?.some(change => change.key === "system.attributes.ac.flat" && change.mode === 5))) return;
+  const components = [character?.armorClass?.misc ?? 0, character?.armorClass?.bonus ?? 0];
+  if (!components.every(value => Number.isFinite(Number(value)))) {
+    // The native runtime resolves formulas after all equipment and effects exist.
+    actorPayload.system.attributes.ac.calc = "default";
+    return;
+  }
+  const manual = components.reduce((sum, value) => sum + Number(value), 0);
+  actorPayload.system.attributes.ac = {
+    ...actorPayload.system.attributes.ac,
+    calc: manual ? "custom" : "default",
+    formula: manual ? `@attributes.ac.armor + @attributes.ac.dex + (${manual})` : "",
+  };
 }
 
 function getNetherscrollsCharacterArmorClassTotal(value) {
@@ -4426,8 +4453,8 @@ function buildNetherscrollsAdditionalResourceItems(character = null, characterId
     const name = toTrimmedStringOrNull(resource?.Name ?? resource?.name) ?? `Resource ${index + 1}`;
     const baseCurrent = Math.max(0, toNumber(resource?.CurrentQty ?? resource?.current ?? resource?.value, 0));
     const baseMaximum = Math.max(0, toNumber(resource?.TotalQty ?? resource?.max, 0));
-    const currentResult = applyNetherscrollsResourceActiveBonuses(baseCurrent, character, name, "CurrentQty");
-    const maximumResult = applyNetherscrollsResourceActiveBonuses(baseMaximum, character, name, "TotalQty");
+    const currentResult = { value: baseCurrent, bonuses: [] };
+    const maximumResult = { value: baseMaximum, bonuses: [] };
     const current = Math.max(0, currentResult.value);
     const maximum = Math.max(0, maximumResult.value);
     return {
@@ -4455,36 +4482,6 @@ function buildNetherscrollsAdditionalResourceItems(character = null, characterId
   });
 }
 
-function applyNetherscrollsResourceActiveBonuses(baseValue, character, resourceName, field) {
-  const entries = [character?.activeBonuses, character?.activeEffects, character?.effects]
-    .filter(Array.isArray)
-    .flat()
-    .filter((entry) => entry?.active !== false);
-  const matched = [];
-  let additive = 0;
-  let override = null;
-  for (const entry of entries) {
-    const stat = toTrimmedStringOrNull(entry?.stat);
-    if (!stat) continue;
-    const isOverride = stat.endsWith(".totalOverride");
-    const target = isOverride ? stat.slice(0, -".totalOverride".length) : stat;
-    if (!doesNetherscrollsResourceStatMatch(target, resourceName, field)) continue;
-    const value = toNumberOrNull(entry?.bonus);
-    if (value == null) continue;
-    matched.push(entry);
-    if (isOverride) override = value;
-    else additive += value;
-  }
-  return { value: override ?? (toNumber(baseValue, 0) + additive), bonuses: matched };
-}
-
-function doesNetherscrollsResourceStatMatch(target, resourceName, field) {
-  if (target === `Ressources.${field}`) return true;
-  const match = /^Ressources\.(.+)\.(CurrentQty|TotalQty)$/.exec(target);
-  if (!match || match[2] !== field) return false;
-  return normalizeNetherscrollsName(match[1]).toLowerCase() === normalizeNetherscrollsName(resourceName).toLowerCase();
-}
-
 function getNetherscrollsEmbeddedEffectSources(value) {
   const effects = value?.effects;
   const entries = Array.isArray(effects)
@@ -4502,12 +4499,14 @@ function getNetherscrollsEmbeddedEffectSources(value) {
 function getNetherscrollsEmbeddedEffectSignatures(value) {
   return getNetherscrollsEmbeddedEffectSources(value)
     .map((effect) => JSON.stringify({
+      id: effect._id ?? effect.id ?? null,
+      native: effect.flags?.netherscrolls ?? effect.flags?.[MODULE_ID] ?? null,
       name: toTrimmedStringOrNull(effect.name) ?? "",
       disabled: Boolean(effect.disabled),
       transfer: Boolean(effect.transfer),
-      changes: (Array.isArray(effect.changes) ? effect.changes : []).map((change) => ({
+      changes: (Array.isArray(effect.system?.changes) ? effect.system.changes : Array.isArray(effect.changes) ? effect.changes : []).map((change) => ({
         key: toTrimmedStringOrNull(change?.key) ?? "",
-        mode: change?.mode ?? null,
+        mode: change?.mode ?? change?.type ?? null,
         value: String(change?.value ?? ""),
       })),
     }))
@@ -4553,19 +4552,22 @@ function getNetherscrollsInventoryDocumentKey(item) {
 }
 
 async function reconcileNetherscrollsItemEffectsSafely(item, incoming) {
-  const previous = getNetherscrollsActorEffects(item);
+  const previous = Array.from(getNetherscrollsActorEffects(item));
   const retained = new Set();
   let failed = false;
   for (const effect of incoming) {
-    const match = previous.find(row => !retained.has(row.id) && (row.id === effect._id || row.name === effect.name));
+    const match = previous.find(row => !retained.has(row.id) && row.id === effect._id) ??
+      (!effect._id ? previous.find(row => !retained.has(row.id) &&
+        getNetherscrollsNativeEffectKey(row) && getNetherscrollsNativeEffectKey(row) === getNetherscrollsNativeEffectKey(effect)) : null);
     try {
       if (match) {
         retained.add(match.id);
-        await item.updateEmbeddedDocuments("ActiveEffect", [{ ...effect, _id: match.id }], { render: false });
+        const update = { ...effect, _id: match.id };
+        if (match.system?.changes && !effect.system?.changes) update["system.-=changes"] = null;
+        await item.updateEmbeddedDocuments("ActiveEffect", [update], { render: false });
       } else {
         const data = duplicateNetherscrollsData(effect);
-        delete data._id;
-        await item.createEmbeddedDocuments("ActiveEffect", [data], { render: false });
+        await item.createEmbeddedDocuments("ActiveEffect", [data], { render: false, keepId: true });
       }
     } catch (error) { failed = true; reportNetherscrollsTransferItemError(`${item.name}: ${effect.name ?? "effect"}`, error); }
   }
@@ -9078,15 +9080,21 @@ function sanitizeNetherscrollsActivityTargets(activities) {
   return activities;
 }
 
-function applyNetherscrollsImportFlags(documentData, source, netherscrollsId) {
-  const nativeGenerated = Array.isArray(source?.foundryEffects) ? duplicateNetherscrollsData(source.foundryEffects) : [];
-  const existingIds = new Set((documentData.effects || []).map(e => e._id));
-  documentData.effects = [...(documentData.effects || []), ...nativeGenerated.filter(e => !existingIds.has(e._id))];
-  const portableEffects = nativeGenerated.length ? [] : buildNetherscrollsPortableActiveEffects(source);
-  if (portableEffects.length) {
-    const existingEffects = Array.isArray(documentData.effects) ? documentData.effects : [];
-    documentData.effects = [...existingEffects, ...portableEffects];
+function getNetherscrollsNativeEffectKey(effect) {
+  const flags = effect?.flags?.netherscrolls;
+  if (flags?.generatedFeatureEffect && flags.nativeEffect) {
+    const native = flags.nativeEffect;
+    return [flags.sourceId ?? "", flags.featureId ?? "", native._id ?? native.id ?? native.stat].join(":");
   }
+  return effect?.flags?.[MODULE_ID]?.effectKey ?? null;
+}
+
+function buildNetherscrollsAuthoritativeItemEffects(documentData, source, sourceId) {
+  return globalThis.NetherscrollsEffects.translateItem(documentData, source, sourceId);
+}
+
+function applyNetherscrollsImportFlags(documentData, source, netherscrollsId) {
+  documentData.effects = buildNetherscrollsAuthoritativeItemEffects(documentData, source, netherscrollsId);
 
   if (!netherscrollsId) return;
   documentData.flags = documentData.flags ?? {};
@@ -9108,102 +9116,18 @@ function applyNetherscrollsImportFlags(documentData, source, netherscrollsId) {
 }
 
 function buildNetherscrollsPortableActiveEffects(source, { excludedIds = null } = {}) {
-  if (!source || typeof source !== "object") return [];
-  const excluded = new Set(
-    excludedIds && typeof excludedIds[Symbol.iterator] === "function"
-      ? Array.from(excludedIds, (value) => String(value))
-      : []
-  );
-  const entries = [source.activeBonuses, source.activeEffects, source.effects]
-    .filter(Array.isArray)
-    .flat();
+  const entries = Array.isArray(source?.effects) ? source.effects :
+    Array.isArray(source?.activeBonuses) ? source.activeBonuses : source?.activeEffects ?? [];
+  const excluded = new Set(excludedIds ?? []);
   const seen = new Set();
-  const effects = [];
-  for (const entry of entries) {
-    const stat = toTrimmedStringOrNull(entry?.stat);
-    const bonus = toTrimmedStringOrNull(entry?.bonus);
-    if (!stat || bonus == null || (entry.filters && Object.keys(entry.filters).length)) continue;
-    const key = toTrimmedStringOrNull(entry?._id) ?? `${stat}:${bonus}:${entry?.source ?? ""}`;
-    if (excluded.has(String(key))) continue;
-    if (seen.has(key)) continue;
+  return entries.filter(entry => {
+    const key = entry?._id ?? `${entry?.stat}:${entry?.bonus}:${entry?.source ?? ""}`;
+    if (!entry?.stat || excluded.has(key) || seen.has(key)) return false;
     seen.add(key);
-    const changes = buildNetherscrollsPortableActiveEffectChanges(stat, bonus, source);
-    if (!changes.length) continue;
-    effects.push({
-      name: toTrimmedStringOrNull(entry?.source) ?? `Netherscrolls: ${stat}`,
-      disabled: entry?.active === false,
-      changes,
-      flags: {
-        [MODULE_ID]: {
-          effectKey: `active-bonus:${key}`,
-          portableActiveEffect: true,
-          sourceStat: stat,
-          nativeActiveBonus: duplicateNetherscrollsData(entry),
-        },
-      },
-    });
-  }
-  return effects;
-}
-
-function buildNetherscrollsPortableActiveEffectChanges(stat, bonus, source = null) {
-  const isOverride = stat.endsWith(".totalOverride");
-  const target = isOverride ? stat.slice(0, -".totalOverride".length) : stat;
-  const mode = isOverride ? 5 : 2; // Foundry ActiveEffect OVERRIDE / ADD.
-  const change = (key) => ({ key, mode, value: bonus });
-
-  if (target === "proficiencyBonus") return [change("system.attributes.prof")];
-  if (target === "xp") return [change("system.details.xp.value")];
-  if (target === "armorClass") return [change(isOverride ? "system.attributes.ac.flat" : "system.attributes.ac.bonus")];
-  if (target === "exhaustion") return [change("system.attributes.exhaustion")];
-  if (target === "initiative") return [change("system.attributes.init.bonus")];
-  if (target === "ToHitStr") return [change("system.bonuses.mwak.attack")];
-  if (target === "ToHitDext") return [change("system.bonuses.rwak.attack")];
-  if (target === "ToHitMagic") return [change("system.bonuses.msak.attack"), change("system.bonuses.rsak.attack")];
-  if (target === "SaveDC") return [change("system.bonuses.spell.dc")];
-  if (/^abilities\.(str|dex|con|int|wis|cha)(?:\.score)?$/.test(target)) {
-    return [change(`system.${target.replace(/\.score$/, ".value")}`)];
-  }
-  if (/^savingThrows\.(str|dex|con|int|wis|cha)(?:\.(prof|misc|bonus))?$/.test(target)) {
-    const [, ability, part] = /^savingThrows\.(str|dex|con|int|wis|cha)(?:\.(prof|misc|bonus))?$/.exec(target);
-    return [change(part === "prof" ? `system.abilities.${ability}.proficient` : `system.abilities.${ability}.bonuses.save`)];
-  }
-  if (target === "savingThrows.all") {
-    return ABILITY_KEYS.map((ability) => change(`system.abilities.${ability}.bonuses.save`));
-  }
-  if (target.startsWith("skills.")) {
-    const [, sourceSkill, part] = /^skills\.([^.]+)(?:\.(prof|misc|bonus))?$/.exec(target) ?? [];
-    const skillKey = getNetherscrollsFoundrySkillKey(sourceSkill);
-    if (!skillKey) return [];
-    return [change(part === "prof" ? `system.skills.${skillKey}.value` : `system.skills.${skillKey}.bonuses.check`)];
-  }
-  const hpMatch = /^hp\.(current|max|temp)$/.exec(target);
-  if (hpMatch) return [change(`system.attributes.hp.${hpMatch[1] === "current" ? "value" : hpMatch[1]}`)];
-  const hitDiceMatch = /^hitDice\.(current|max)\.(d6|d8|d10|d12)$/.exec(target);
-  if (hitDiceMatch) return [change(`system.hitDice.${hitDiceMatch[2]}.${hitDiceMatch[1] === "current" ? "value" : "max"}`)];
-  if (/^currency\.(pp|gp|sp|cp)$/.test(target)) return [change(`system.${target}`)];
-  const slotMatch = /^spellSlots\.(current|max)\.lvl([1-9])$/.exec(target);
-  if (slotMatch) return [change(`system.spells.spell${slotMatch[2]}.${slotMatch[1] === "current" ? "value" : "max"}`)];
-  const resourceField = target === "Ressources.CurrentQty"
-    ? "CurrentQty"
-    : target === "Ressources.TotalQty"
-      ? "TotalQty"
-      : /^Ressources\.(.+)\.(CurrentQty|TotalQty)$/.exec(target)?.[2];
-  if (resourceField) {
-    const resources = Array.isArray(source?.Ressources) ? source.Ressources : [];
-    const namedMatch = /^Ressources\.(.+)\.(CurrentQty|TotalQty)$/.exec(target);
-    const indexes = namedMatch
-      ? resources
-          .map((resource, index) => ({ resource, index }))
-          .filter(({ resource }) => normalizeNetherscrollsName(resource?.Name ?? resource?.name).toLowerCase() === normalizeNetherscrollsName(namedMatch[1]).toLowerCase())
-          .map(({ index }) => index)
-      : resources.map((_resource, index) => index);
-    const resourceKeys = ["primary", "secondary", "tertiary"];
-    return indexes
-      .filter((index) => index < resourceKeys.length)
-      .map((index) => change(`system.resources.${resourceKeys[index]}.${resourceField === "CurrentQty" ? "value" : "max"}`));
-  }
-  return [];
+    return true;
+  }).map(entry => globalThis.NetherscrollsEffects.createEffect(entry, {
+    sourceId: source?._id ?? source?.id ?? "", actor: true,
+  }));
 }
 
 function mergeNetherscrollsDefaults(defaults, data) {
@@ -10120,7 +10044,19 @@ async function runNetherscrollsCompendiumDocumentBatches(
   if (!rows.length || typeof DocumentClass?.[method] !== "function") return results;
   const writeOptions = { pack: pack.collection, render: false, netherscrollsTransfer: true, ...options };
   const write = async (writeMethod, chunk) => {
-    try { results.push(...(await DocumentClass[writeMethod](chunk, writeOptions) ?? [])); }
+    try {
+      const saved = await DocumentClass[writeMethod](chunk, writeOptions) ?? [];
+      results.push(...saved);
+      if (writeMethod === "updateDocuments") {
+        for (const row of chunk) {
+          if (!Array.isArray(row.effects)) continue;
+          const item = saved.find(document => (document.id ?? document._id) === row._id);
+          if (typeof item?.createEmbeddedDocuments === "function" && !haveSameNetherscrollsEmbeddedEffects(item, row)) {
+            await reconcileNetherscrollsItemEffectsSafely(item, row.effects);
+          }
+        }
+      }
+    }
     catch (error) {
       if (chunk.length === 1) { reportNetherscrollsTransferItemError(chunk[0]?.name ?? "Library Item", error); return; }
       // Recheck identity after a failed batch in case Foundry saved some entries.
@@ -13073,13 +13009,16 @@ function buildFoundryExportPayload(actor) {
     : transformedActor?.prototypeToken ?? sourceActor?.prototypeToken;
   const characterId = getActorCharacterId(sourceActor);
   const sourceFlags = duplicateNetherscrollsData(sourceActor?.flags ?? {});
-  if (sourceFlags[MODULE_ID]) delete sourceFlags[MODULE_ID].nativeCharacter;
+  if (sourceFlags[MODULE_ID]) {
+    delete sourceFlags[MODULE_ID].nativeCharacter;
+    delete sourceFlags[MODULE_ID].nativeEffectState;
+  }
   const sourceItems = sourceActor?.items ?? [];
   const ignoredIds = new Set(sourceItems.filter((item) =>
     ["race", "class", "subclass"].includes(item.type) || isNetherscrollsExcludedExportFeature(item)
   ).map((item) => item._id).filter(Boolean));
   const activeBonuses = extractNetherscrollsPortableActiveBonuses((sourceActor.effects ?? []).filter((effect) =>
-    !ignoredIds.has(String(effect.origin ?? "").split(".Item.")[1]?.split(".")[0])
+    effect.flags?.[MODULE_ID]?.nsRuntimeEffect || !ignoredIds.has(String(effect.origin ?? "").split(".Item.")[1]?.split(".")[0])
   ));
   const items = sourceItems.filter((item) => (
     item?.flags?.[MODULE_ID]?.nativeCharacterResource !== true && !isNetherscrollsExcludedExportFeature(item)
@@ -13122,7 +13061,8 @@ function buildFoundryExportPayload(actor) {
     },
     netherscrolls: {
       ...buildNetherscrollsExportPlayState(sourceActor, preparedSystem),
-      ...(activeBonuses.length ? { activeBonuses } : {}),
+      ...(globalThis.NetherscrollsEffects.foundry?.exportState(actor) ?? {}),
+      ...(activeBonuses.length || sourceActor.flags?.[MODULE_ID]?.nativeCharacter ? { effects: activeBonuses, activeBonuses } : {}),
     },
   };
 }
@@ -13228,7 +13168,7 @@ function extractNetherscrollsPortableActiveBonuses(effects) {
     const stat = toTrimmedStringOrNull(flags?.sourceStat);
     if (!flags?.portableActiveEffect || !stat) continue;
     const changes = Array.isArray(effect?.changes) ? effect.changes : [];
-    const bonus = toTrimmedStringOrNull(changes[0]?.value);
+    const bonus = toTrimmedStringOrNull(flags?.nsRuntimeEffect ? flags.nativeActiveBonus?.bonus : changes[0]?.value);
     if (bonus == null) continue;
     const effectKey = toTrimmedStringOrNull(flags.effectKey) ?? "";
     const nativeActiveBonus = flags.nativeActiveBonus && typeof flags.nativeActiveBonus === "object"
