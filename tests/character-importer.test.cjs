@@ -1046,7 +1046,7 @@ test("splits large compendium imports into responsive write batches", async () =
     ["items"]
   );
 
-  assert.deepEqual(batchSizes, [50, 50, 21]);
+  assert.deepEqual(batchSizes, [10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 1]);
   assert.equal(result.items.created, 121);
   assert.equal(itemPack.documents.length, 121);
 });
@@ -1399,6 +1399,33 @@ test("replaces a stale embedded background whose Foundry Item type is wrong", as
   assert.equal(actor.items[0].type, "background");
   assert.equal(actor.items[0].img, "https://assets.example.com/image/acolyte.webp");
   assert.equal(result.embeddedIds["background-1"], actor.items[0].id);
+});
+
+test("recovers embedded links from Actor state when Foundry returns a non-Array write result", async () => {
+  const { context, importer } = createHarness();
+  const actor = makeActor(context, { name: "Hero", system: { details: {} } });
+  const createEmbeddedDocuments = actor.createEmbeddedDocuments.bind(actor);
+  actor.createEmbeddedDocuments = async (...args) => new Set(await createEmbeddedDocuments(...args));
+
+  const result = await importer.reconcileNetherscrollsCharacterActorItems(
+    actor,
+    [{
+      name: "Soldier",
+      type: "background",
+      system: {},
+      flags: { netherscrolls: { id: "background-1" } },
+    }],
+    "character-1",
+    { replaceAll: true }
+  );
+
+  assert.equal(result.embeddedIds["background-1"], actor.items[0].id);
+  const repaired = await importer.repairNetherscrollsCharacterActorDocumentLinks(
+    actor,
+    { backgroundId: "background-1" },
+    result.embeddedIds
+  );
+  assert.equal(repaired["system.details.background"], actor.items[0].id);
 });
 
 test("repairs D&D5e background, race, and original-class embedded Item links", async () => {
@@ -2874,5 +2901,8 @@ test("leaves a Foundry Import queued when a required library document is unavail
 
   const result = await importer.pollNetherscrollsImportQueues();
   assert.deepEqual(clone(result), { imported: 0, exported: 0, failed: 1 });
+  assert.equal(acknowledged, false);
+  const immediateRetry = await importer.pollNetherscrollsImportQueues();
+  assert.deepEqual(clone(immediateRetry), { imported: 0, exported: 0, failed: 0 });
   assert.equal(acknowledged, false);
 });

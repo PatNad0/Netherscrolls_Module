@@ -138,8 +138,12 @@ const NETHERSCROLLS_CAMPAIGN_CACHE_TTL_MS = 5 * 60_000;
 const NETHERSCROLLS_CHARACTER_SELECTION_CACHE_TTL_MS = 5 * 60_000;
 const NETHERSCROLLS_IMAGE_VALIDATION_CONCURRENCY = 6;
 const NETHERSCROLLS_IMAGE_VALIDATION_TIMEOUT_MS = 15_000;
-const NETHERSCROLLS_COMPENDIUM_WRITE_BATCH_SIZE = 50;
-const NETHERSCROLLS_IMPORT_PREPARATION_FRAME_BUDGET_MS = 12;
+const NETHERSCROLLS_COMPENDIUM_WRITE_BATCH_SIZE = 10;
+const NETHERSCROLLS_EMBEDDED_WRITE_BATCH_SIZE = 5;
+const NETHERSCROLLS_IMPORT_PREPARATION_FRAME_BUDGET_MS = 6;
+const NETHERSCROLLS_IMPORT_WRITE_PAUSE_MS = 24;
+const NETHERSCROLLS_IMPORT_STAGE_PAUSE_MS = 32;
+const NETHERSCROLLS_IMPORT_FAILURE_RETRY_DELAY_MS = 5 * 60_000;
 const NETHERSCROLLS_FOUNDRY_CREATED_SOURCE_ID = "6a4b21868f309c84b6cb7908";
 const NETHERSCROLLS_EXCLUDED_IMPORT_SOURCE_IDS = new Set([NETHERSCROLLS_FOUNDRY_CREATED_SOURCE_ID]);
 const NETHERSCROLLS_SOURCE_NAME_FALLBACKS = new Map([
@@ -164,6 +168,7 @@ const NETHERSCROLLS_IMPORT_IMAGE = NETHERSCROLLS_DEFAULT_IMAGE;
 const netherscrollsCharacterImportState = new WeakMap();
 const netherscrollsCharacterImportLocks = new Map();
 const netherscrollsPendingImportAcknowledgements = new Set();
+const netherscrollsFailedImportRetries = new Map();
 const netherscrollsCharacterSelectionRefreshes = new Map();
 const netherscrollsValidImageReferences = new Set();
 const netherscrollsDeadImageReferences = new Set();
@@ -2521,10 +2526,20 @@ async function pollNetherscrollsImportQueues() {
           campaignId,
           importedCharacter
         );
+        const retryStateKey = `${campaignId}:${importedCharacter.id}`;
+        const failedRetry = netherscrollsFailedImportRetries.get(retryStateKey);
+        if (
+          failedRetry?.acknowledgementKey === acknowledgementKey &&
+          failedRetry.nextRetryAt > Date.now()
+        ) {
+          continue;
+        }
+        if (failedRetry) netherscrollsFailedImportRetries.delete(retryStateKey);
         if (netherscrollsPendingImportAcknowledgements.has(acknowledgementKey)) {
           try {
             await acknowledgeNetherscrollsCampaignImport(campaignId, importedCharacter.id);
             netherscrollsPendingImportAcknowledgements.delete(acknowledgementKey);
+            netherscrollsFailedImportRetries.delete(retryStateKey);
           } catch (err) {
             failed += 1;
             console.error(`${MODULE_ID} | Foundry Import was applied, but queue acknowledgement still failed.`, {
@@ -2540,6 +2555,10 @@ async function pollNetherscrollsImportQueues() {
           await importNetherscrollsCampaignCharacter(importedCharacter, folder);
         } catch (err) {
           failed += 1;
+          netherscrollsFailedImportRetries.set(retryStateKey, {
+            acknowledgementKey,
+            nextRetryAt: Date.now() + NETHERSCROLLS_IMPORT_FAILURE_RETRY_DELAY_MS,
+          });
           console.error(
             `${MODULE_ID} | Foundry Import queue entry remains queued after a failed apply.`,
             {
@@ -2551,6 +2570,7 @@ async function pollNetherscrollsImportQueues() {
           continue;
         }
 
+        netherscrollsFailedImportRetries.delete(retryStateKey);
         netherscrollsPendingImportAcknowledgements.add(acknowledgementKey);
         try {
           await acknowledgeNetherscrollsCampaignImport(campaignId, importedCharacter.id);
@@ -2564,6 +2584,7 @@ async function pollNetherscrollsImportQueues() {
             error: err,
           });
         }
+        await pauseNetherscrollsImportWork();
       }
 
       const exportEntries = [];
@@ -3043,7 +3064,7 @@ async function applyNetherscrollsCampaignCharacter(importedCharacter, folder, { 
     character: importedCharacter.character,
     foundryItems: importedCharacter.foundryActor?.items,
   });
-  await yieldNetherscrollsMainThread();
+  await pauseNetherscrollsImportWork();
 
   onProgress?.("preparing actor data...");
   const actorPayload = {
@@ -3089,7 +3110,7 @@ async function applyNetherscrollsCampaignCharacter(importedCharacter, folder, { 
   const content = await resolveNetherscrollsCharacterItemSources(itemSources, {
     onProgress: (completed, total) => onProgress?.(`looking up imported library content (${completed}/${total})...`),
   });
-  await yieldNetherscrollsMainThread();
+  await pauseNetherscrollsImportWork();
   content.items.push(...buildNetherscrollsAdditionalResourceItems(
     importedCharacter.character,
     characterId
@@ -3124,13 +3145,13 @@ async function applyNetherscrollsCampaignCharacter(importedCharacter, folder, { 
   }
   onProgress?.("linking actor to Netherscrolls...");
   await setActorCharacterId(actor, characterId);
-  await yieldNetherscrollsMainThread();
+  await pauseNetherscrollsImportWork();
 
   onProgress?.(`adding or updating ${content.items.length} item${content.items.length === 1 ? "" : "s"}...`);
   const itemResult = await reconcileNetherscrollsCharacterActorItems(actor, content.items, characterId, {
     replaceAll: true,
   });
-  await yieldNetherscrollsMainThread();
+  await pauseNetherscrollsImportWork();
   debugNetherscrollsCharacterImport("Reconciled character items.", { characterId, itemResult });
   onProgress?.("linking background, race, and original class...");
   const documentLinks = await repairNetherscrollsCharacterActorDocumentLinks(
@@ -3138,13 +3159,14 @@ async function applyNetherscrollsCampaignCharacter(importedCharacter, folder, { 
     importedCharacter.character,
     itemResult.embeddedIds
   );
+  await pauseNetherscrollsImportWork();
   debugNetherscrollsCharacterImport("Repaired Actor embedded-document links.", {
     characterId,
     documentLinks,
   });
   onProgress?.(`adding or updating ${effectSources.length} effect${effectSources.length === 1 ? "" : "s"}...`);
   const effectResult = await reconcileNetherscrollsCharacterActorEffects(actor, effectSources, characterId);
-  await yieldNetherscrollsMainThread();
+  await pauseNetherscrollsImportWork();
   debugNetherscrollsCharacterImport("Reconciled character effects.", { characterId, effectResult });
   let repairedFeatures = 0;
   try {
@@ -3153,6 +3175,7 @@ async function applyNetherscrollsCampaignCharacter(importedCharacter, folder, { 
     repairedFeatures = repair.created ?? 0;
     console.info(`${MODULE_ID} | Foundry Import | ${actorPayload.name}: class feature repair result.`, repair);
     debugNetherscrollsCharacterImport("Repaired class features after import.", { characterId, repair });
+    await pauseNetherscrollsImportWork();
   } catch (err) {
     debugNetherscrollsCharacterImport("Class-feature repair failed.", {
       characterId,
@@ -4562,6 +4585,15 @@ async function reconcileNetherscrollsCharacterActorItems(
     const id = getNetherscrollsSourceId(data);
     const embeddedId = createdDocuments?.[index]?.id ?? createdDocuments?.[index]?._id;
     if (id && embeddedId) embeddedIds[String(id)] = embeddedId;
+  }
+  // Re-read the Actor after writes. Foundry versions may return embedded
+  // documents in different container shapes, but the persisted Actor is the
+  // authoritative place to recover every Netherscrolls-to-Foundry link.
+  await pauseNetherscrollsImportWork();
+  for (const embeddedItem of getNetherscrollsActorItems(actor)) {
+    const netherscrollsId = getItemNetherId(embeddedItem);
+    const embeddedId = normalizeNetherscrollsReferenceValue(embeddedItem?.id ?? embeddedItem?._id);
+    if (netherscrollsId && embeddedId) embeddedIds[String(netherscrollsId)] = embeddedId;
   }
   return {
     created: creates.length,
@@ -9788,6 +9820,10 @@ function yieldNetherscrollsMainThread() {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+function pauseNetherscrollsImportWork(delayMs = NETHERSCROLLS_IMPORT_STAGE_PAUSE_MS) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(delayMs) || 0)));
+}
+
 function createNetherscrollsMainThreadBudget(maximumWorkMs = NETHERSCROLLS_IMPORT_PREPARATION_FRAME_BUDGET_MS) {
   return {
     maximumWorkMs,
@@ -9821,7 +9857,7 @@ async function runNetherscrollsCompendiumDocumentBatches(
       ...options,
     });
     if (Array.isArray(result)) results.push(...result);
-    if (offset + batchSize < rows.length) await yieldNetherscrollsMainThread();
+    await pauseNetherscrollsImportWork(NETHERSCROLLS_IMPORT_WRITE_PAUSE_MS);
   }
   return results;
 }
@@ -9832,7 +9868,7 @@ async function runNetherscrollsEmbeddedDocumentBatches(
   documentType,
   entries,
   options = {},
-  batchSize = 25
+  batchSize = NETHERSCROLLS_EMBEDDED_WRITE_BATCH_SIZE
 ) {
   const rows = Array.from(entries ?? []);
   const results = [];
@@ -9841,7 +9877,7 @@ async function runNetherscrollsEmbeddedDocumentBatches(
     const chunk = rows.slice(offset, offset + batchSize);
     const result = await actor[method](documentType, chunk, options);
     if (Array.isArray(result)) results.push(...result);
-    if (offset + batchSize < rows.length) await yieldNetherscrollsMainThread();
+    await pauseNetherscrollsImportWork(NETHERSCROLLS_IMPORT_WRITE_PAUSE_MS);
   }
   return results;
 }
@@ -13037,7 +13073,9 @@ function normalizeNetherscrollsName(name) {
 }
 
 function getItemNetherId(item) {
-  return normalizeNetherscrollsReferenceValue(item?.flags?.netherscrolls?.id);
+  return normalizeNetherscrollsReferenceValue(
+    item?.flags?.netherscrolls?.id ?? item?._source?.flags?.netherscrolls?.id
+  );
 }
 
 async function setItemNetherId(item, id) {
