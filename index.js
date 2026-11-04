@@ -4593,7 +4593,7 @@ async function resolveNetherscrollsCharacterItemSources(sources, { onProgress = 
   let fetched = 0;
   try { fetched = await importMissingNetherscrollsCharacterDocuments(sources, { guildId }); }
   catch (error) {
-    if ([401, 403].includes(error?.status)) throw error;
+    if ([401, 403].includes(error?.status) || error?.netherscrollsWriteFailure) throw error;
     reportNetherscrollsTransferItemError("Library lookup", error);
   }
   // Resolve non-embedded class-feature references first. A targeted feature
@@ -4750,7 +4750,10 @@ async function importMissingNetherscrollsCharacterDocuments(sources, { guildId =
     for (const dataset of Object.keys(selection)) {
       for (const row of getNetherscrollsResponseDataset(response, dataset) ?? []) {
         try { await applyNetherscrollsImportResponse({ data: { [dataset]: [row] } }, null, [dataset]); }
-        catch (error) { reportNetherscrollsTransferItemError(row.name ?? getNetherscrollsSourceId(row) ?? dataset, error); }
+        catch (error) {
+          reportNetherscrollsTransferItemError(row.name ?? getNetherscrollsSourceId(row) ?? dataset, error);
+          if (error?.netherscrollsWriteFailure) throw error;
+        }
       }
     }
     for (const entry of chunk) {
@@ -5194,7 +5197,7 @@ function getNetherscrollsInventoryDocumentKey(item) {
 async function reconcileNetherscrollsItemEffectsSafely(item, incoming) {
   const previous = Array.from(getNetherscrollsActorEffects(item));
   const retained = new Set();
-  let failed = false;
+  const failures = [];
   for (const effect of incoming) {
     const match = previous.find(row => !retained.has(row.id) && row.id === effect._id) ??
       (!effect._id ? previous.find(row => !retained.has(row.id) &&
@@ -5203,18 +5206,20 @@ async function reconcileNetherscrollsItemEffectsSafely(item, incoming) {
       if (match) {
         retained.add(match.id);
         const update = { ...effect, _id: match.id };
-        if (match.system?.changes && !effect.system?.changes) update["system.-=changes"] = null;
+        // Foundry migrates legacy `changes` to `system.changes` before applying
+        // updates. Deleting that required field afterward invalidates the effect.
         await item.updateEmbeddedDocuments("ActiveEffect", [update], { render: false });
       } else {
         const data = duplicateNetherscrollsData(effect);
         await item.createEmbeddedDocuments("ActiveEffect", [data], { render: false, keepId: true });
       }
-    } catch (error) { failed = true; reportNetherscrollsTransferItemError(`${item.name}: ${effect.name ?? "effect"}`, error); }
+    } catch (error) { failures.push(error); reportNetherscrollsTransferItemError(`${item.name}: ${effect.name ?? "effect"}`, error); }
   }
-  if (!failed) for (const effect of previous.filter(row => !retained.has(row.id))) {
+  if (!failures.length) for (const effect of previous.filter(row => !retained.has(row.id))) {
     try { await item.deleteEmbeddedDocuments("ActiveEffect", [effect.id], { render: false }); }
-    catch (error) { reportNetherscrollsTransferItemError(`${item.name}: effect`, error); }
+    catch (error) { failures.push(error); reportNetherscrollsTransferItemError(`${item.name}: effect`, error); }
   }
+  if (failures.length) throw new AggregateError(failures, `${item.name}: ${failures.length} Active Effect write(s) failed.`);
 }
 
 async function reconcileNetherscrollsCharacterItemsSafely(actor, rows, characterId, expectedSources) {
@@ -10707,7 +10712,11 @@ async function runNetherscrollsCompendiumDocumentBatches(
       }
     }
     catch (error) {
-      if (chunk.length === 1) { reportNetherscrollsTransferItemError(chunk[0]?.name ?? "Library Item", error); return; }
+      if (chunk.length === 1) {
+        reportNetherscrollsTransferItemError(chunk[0]?.name ?? "Library Item", error);
+        error.netherscrollsWriteFailure = true;
+        throw error;
+      }
       // Recheck identity after a failed batch in case Foundry saved some entries.
       for (const row of chunk) results.push(...await runNetherscrollsCompendiumDocumentBatches(DocumentClass, writeMethod, [row], pack, options, batchSize));
     }
@@ -10732,7 +10741,14 @@ async function runNetherscrollsCompendiumDocumentBatches(
       if (matching.length) {
         for (const entry of matching) {
           const localId = entry.id ?? entry._id;
-          updates.set(localId, { ...row, _id: localId, img: image });
+          const update = { ...row, _id: localId, img: image };
+          const ForcedReplacement = globalThis.foundry?.data?.operators?.ForcedReplacement;
+          if (entry.type && row.type && entry.type !== row.type && ForcedReplacement) {
+            // Foundry v14 requires a new system model when the Item type changes.
+            // Keep the document ID so existing compendium references remain valid.
+            update.system = new ForcedReplacement(row.system ?? {});
+          }
+          updates.set(localId, update);
         }
       } else if (method === "updateDocuments") {
         updates.set(row._id, { ...row, img: image });
