@@ -1,11 +1,22 @@
-/* D&D5e adapter for the native NS effect evaluator. Prepared values are never saved as base stats. */
+/* D&D5e adapter for the native NS effect evaluator. Prepared values are never saved as base stats.
+ *
+ * On an actor imported from Netherscrolls (it has a native character flag):
+ * - Base values come from the persisted Foundry source, never from prepared data, so
+ *   changes Foundry already applied are not counted a second time.
+ * - Every applicable effect is read: Netherscrolls definitions use their native formula;
+ *   Foundry effects are translated for the keys Netherscrolls owns (see ns-effects.js).
+ * - Passive effects are exported to Netherscrolls. Active (temporary or activity-applied)
+ *   effects stay Foundry-side: they count in totals but are never exported.
+ * Actors without a native character are left entirely to D&D5e.
+ */
 (() => {
   "use strict";
   const NS = globalThis.NetherscrollsEffects;
   const { MODULE, ABILITIES, SKILLS, TOOLS, clone, list, number, resolve } = NS;
   const states = new WeakMap(), preparing = new WeakSet(), warnings = new Set();
+  const FOREIGN_NOTE = "[Foundry]";
   const report = (actor, error) => {
-    const message = `${actor?.name ?? "Netherscrolls"}: ${error.message ?? error}`;
+    const message = `${actor?.name ?? "Netherscrolls"}: ${error?.message ?? error}`;
     if (warnings.has(message)) return;
     warnings.add(message);
     console.warn(`${MODULE} | NS effects | ${message}`);
@@ -18,35 +29,169 @@
     target[parts.at(-1)] = value;
   }
   const nativeFlags = actor => actor?.flags?.[MODULE]?.nativeCharacter;
-  const hasNative = actor => nativeFlags(actor) || [...list(actor?.effects), ...list(actor?.items).flatMap(item => list(item.effects))]
-    .some(effect => effect.flags?.[MODULE]?.nsRuntimeEffect);
-  function sourceCharacter(actor) {
+  const hasNative = actor => Boolean(nativeFlags(actor));
+  // A deterministic Foundry bonus as a number (dice and @references count as 0, like fixed totals).
+  const numeric = value => {
+    if (typeof value === "number") return Number.isFinite(value) ? value : 0;
+    const parsed = Number(String(value ?? "").replace(/\s+/g, ""));
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+  const changesOf = effect => list(effect?.system?.changes).length ? list(effect.system.changes) : list(effect?.changes);
+  const effectId = effect => effect?.id ?? effect?._id;
+
+  function levelsOf(actor) {
+    const classes = {};
+    let total = 0, attunement = 0;
+    for (const item of list(actor?.items)) {
+      if (item.type === "class") {
+        const levels = number(item.system?.levels);
+        total += levels;
+        for (const key of new Set([NS.slug(item.system?.identifier), NS.slug(item.name)].filter(Boolean))) classes[key] = (classes[key] ?? 0) + levels;
+      }
+      if (item.system?.attuned === true) attunement++;
+    }
+    return { total, classes, attunement };
+  }
+  function ownerScope(item, levels) {
+    if (!item) return {};
+    const flags = item.flags?.[MODULE] ?? {};
+    const key = item.type === "class" ? NS.slug(item.system?.identifier ?? item.name) :
+      item.type === "subclass" ? NS.slug(item.system?.classIdentifier) :
+      NS.slug(flags.parentClassIdentifier ?? flags.parentClass);
+    return { classLevel: key && levels.classes[key] != null ? levels.classes[key] : levels.total,
+      classIdentifier: key || undefined };
+  }
+  function isTemporary(effect) {
+    if (typeof effect?.isTemporary === "boolean") return effect.isTemporary;
+    const duration = effect?.duration ?? {};
+    return number(duration.seconds) > 0 || number(duration.rounds) > 0 || number(duration.turns) > 0 || list(effect?.statuses).length > 0;
+  }
+  const isOff = effect => effect?.disabled === true || effect?.isSuppressed === true || effect?.active === false;
+
+  // Every effect that currently applies to the actor, as NS effect entries.
+  function collect(actor, now = Date.now()) {
+    const levels = levelsOf(actor);
+    const effects = [], foreign = [], keys = new Set(), passiveOrigins = new Set(), problems = [];
+    let acFromFoundry = false;
+    const ownUuid = actor?.uuid ?? (actor?.id ? `Actor.${actor.id}` : null);
+
+    const readForeign = (effect, item) => {
+      if (isOff(effect)) return;
+      const appliedByOther = !item && effect.origin && ownUuid && /^Actor\./.test(String(effect.origin)) && !String(effect.origin).startsWith(ownUuid);
+      const kind = isTemporary(effect) || appliedByOther ? "active" : "passive";
+      const groups = new Set();
+      changesOf(effect).forEach((change, index) => {
+        const translated = NS.fromFoundryChange(change);
+        if (!translated) return;
+        if (translated.acCalc) { acFromFoundry = true; return; }
+        if (translated.warning) problems.push(`${effect.name ?? "Effect"}: ${translated.warning}`);
+        translated.entries.forEach((entry, part) => {
+          if (entry._nsGroup) {
+            const group = `${entry._nsGroup}|${entry.stat}|${entry.bonus}|${entry.mode ?? ""}`;
+            if (groups.has(group)) return;
+            groups.add(group);
+          }
+          const key = `foundry:${item?.id ?? "actor"}:${effectId(effect)}:${index}:${part}`;
+          const row = { ...entry, active: true, source: effect.name ?? "Foundry effect", _nsKey: key, _nsKind: kind,
+            _nsForeign: true, _nsScope: ownerScope(item, levels), _nsEffectId: effectId(effect), _nsItemName: item?.name ?? null };
+          delete row._nsGroup;
+          foreign.push(row); effects.push(row);
+        });
+      });
+    };
+    const readNative = (effect, item) => {
+      const flags = effect.flags?.netherscrolls;
+      const native = flags?.nativeEffect ?? effect.flags?.[MODULE]?.nativeActiveBonus;
+      if (!native?.stat || effect.disabled || native.active === false || !NS.eligible(flags?.effectApplication, item)) return;
+      if (native.expiresAt && Date.parse(native.expiresAt) <= now) return;
+      // Item definitions never expire while eligible. Duration starts on activation.
+      if (!item && effect.duration?.remaining != null && effect.duration.remaining <= 0 && effect.duration.type !== "none") return;
+      const runtime = effect.flags?.[MODULE] ?? {};
+      const lifecycle = runtime.lifecycle;
+      if (!item && lifecycle && effect.duration?.seconds != null &&
+          number(globalThis.game?.time?.worldTime) >= lifecycle.startedAt + effect.duration.seconds) return;
+      // A Netherscrolls copy of a Foundry effect that is still on the actor counts once.
+      if (!item && String(native.note ?? "").startsWith(FOREIGN_NOTE) && foreign.some(row => row._nsKind === "passive" &&
+          row.source === native.source && NS.canonicalTarget(row.stat) === NS.canonicalTarget(native.stat))) return;
+      const origin = native.origin;
+      const originKey = origin ? [origin.sourceId ?? origin.itemId, origin.featureId, origin.effectId, origin.characterId].join(":") : null;
+      if (!item && originKey && passiveOrigins.has(originKey)) return;
+      if (item) passiveOrigins.add([flags.sourceId, flags.featureId, native._id,
+        actor.flags?.netherscrolls?.characterId ?? nativeFlags(actor)?._id].join(":"));
+      const key = originKey ?? `${item?.id ?? lifecycle?.sourceActorId ?? actor.id}:${runtime.effectKey ?? effectId(effect)}`;
+      if (keys.has(key)) return;
+      keys.add(key);
+      const kind = item ? "passive" : runtime.appliedActivation || lifecycle || isTemporary(effect) ? "active" : "passive";
+      effects.push({ ...clone(native), _nsKey: key, _nsKind: kind, _nsScope: ownerScope(item, levels) });
+    };
+    const isNative = effect => effect?.flags?.[MODULE]?.nsRuntimeEffect;
+    for (const item of list(actor?.items)) for (const effect of list(item.effects)) {
+      if (effect.transfer !== false && !isNative(effect)) readForeign(effect, item);
+    }
+    for (const effect of list(actor?.effects)) if (!isNative(effect)) readForeign(effect, null);
+    for (const item of list(actor?.items)) for (const effect of list(item.effects)) {
+      if (effect.transfer !== false && isNative(effect)) readNative(effect, item);
+    }
+    // A repeated activation refreshes a source; prefer the most recent instance.
+    for (const effect of [...list(actor?.effects)].reverse()) if (isNative(effect)) readNative(effect, null);
+    return { effects, foreign, acFromFoundry, problems, levels };
+  }
+
+  // Adopts a manual bonus edited on the Foundry sheet. The importer writes misc + bonus.
+  function adoptManual(block, value) {
+    if (!block || typeof block !== "object" || value == null) return;
+    const raw = String(value).trim();
+    const edited = raw === "" ? 0 : Number(raw.replace(/\s+/g, ""));
+    if (!Number.isFinite(edited)) return;
+    const misc = numeric(block.misc), bonus = numeric(block.bonus);
+    if (edited !== misc + bonus) block.bonus = edited - misc;
+  }
+
+  function sourceCharacter(actor, collected = { levels: levelsOf(actor), acFromFoundry: false }) {
     const native = clone(nativeFlags(actor));
-    const source = actor._source?.system ?? actor.system;
-    const prepared = states.get(actor)?.baseInputs ?? actor.system;
-    native.proficiencyBonus ??= { value: source.attributes?.prof ?? states.get(actor)?.character?.proficiencyBonus?.value ?? actor.system.attributes?.prof ?? 0 };
-    native.armorClass ??= { value: source.attributes?.ac?.flat ?? 10 };
+    const source = actor._source?.system ?? actor.system ?? {};
+    const prepared = actor.system ?? {};
+    const pick = (path, fallback) => {
+      const value = NS.get(source, path);
+      return value ?? NS.get(prepared, path) ?? fallback;
+    };
+    const proficiency = native.proficiencyBonus;
+    if (proficiency == null || typeof proficiency !== "object") {
+      native.proficiencyBonus = { value: proficiency ?? source.attributes?.prof ?? prepared.attributes?.prof ?? 0, misc: 0, bonus: 0 };
+    }
+    const armorClass = native.armorClass;
+    if (armorClass == null || typeof armorClass !== "object") native.armorClass = { value: armorClass ?? 10, misc: 0, bonus: 0 };
     native.abilities ??= {}; native.savingThrows ??= {}; native.skills ??= {}; native.tools ??= {};
     for (const ability of ABILITIES) {
-      native.abilities[ability] ??= { score: 10, misc: 0, bonus: 0 };
-      if (prepared.abilities?.[ability]?.value != null) native.abilities[ability].score = prepared.abilities[ability].value;
-      if (prepared.abilities?.[ability]?.proficient != null) {
-        native.savingThrows[ability] ??= {};
-        native.savingThrows[ability].prof = prepared.abilities[ability].proficient;
+      if (native.abilities[ability] == null || typeof native.abilities[ability] !== "object") {
+        native.abilities[ability] = { score: native.abilities[ability] ?? 10, misc: 0, bonus: 0 };
       }
+      const score = pick(`abilities.${ability}.value`);
+      if (score != null) native.abilities[ability].score = score;
+      const proficient = pick(`abilities.${ability}.proficient`);
+      native.savingThrows[ability] ??= {};
+      if (proficient != null) native.savingThrows[ability].prof = proficient;
+      adoptManual(native.savingThrows[ability], source.abilities?.[ability]?.bonuses?.save);
     }
     for (const [family, mapping] of [["skills", SKILLS], ["tools", TOOLS]]) {
       for (const [key, [foundryKey, defaultAbility]] of Object.entries(mapping)) {
-        const current = prepared[family]?.[foundryKey];
+        const current = source[family]?.[foundryKey] ?? prepared[family]?.[foundryKey];
         if (!current) continue;
         native[family][key] ??= { ability: defaultAbility, prof: 0, misc: 0, bonus: 0 };
         if (current.value != null) native[family][key].prof = current.value;
         if (current.ability) native[family][key].ability = current.ability;
+        adoptManual(native[family][key], source[family]?.[foundryKey]?.bonuses?.check);
       }
+    }
+    native.initiative ??= {};
+    adoptManual(native.initiative, source.attributes?.init?.bonus);
+    for (const [stat, kind, field] of [["ToHitStr", "mwak", "attack"], ["ToHitDext", "rwak", "attack"], ["ToHitMagic", "msak", "attack"], ["SaveDC", "spell", "dc"]]) {
+      if (native[stat] == null || typeof native[stat] !== "object") native[stat] = { misc: 0, bonus: native[stat] ?? 0 };
+      adoptManual(native[stat], source.bonuses?.[kind]?.[field]);
     }
     native.hp ??= {}; native.currency ??= {}; native.spellSlots ??= { current: {}, max: {} };
     for (const [part, key] of [["current", "value"], ["max", "max"], ["temp", "temp"]]) {
-      const value = source.attributes?.hp?.[key] ?? prepared.attributes?.hp?.[key];
+      const value = source.attributes?.hp?.[key];
       if (value != null) native.hp[part] = value;
     }
     for (const coin of ["pp", "gp", "sp", "cp"]) if (source.currency?.[coin] != null) native.currency[coin] = source.currency[coin];
@@ -87,12 +232,27 @@
         if (stored.spent != null) resource.CurrentQty = number(resource.TotalQty) - number(stored.spent);
       }
     }
-    const equipment = list(actor.items).filter(item => item.type === "equipment" && item.system?.equipped);
+    // Equipped armor and shield, including Foundry-native magical bonuses. Netherscrolls
+    // library armor carries its enhancement as an effect and clears the mirror field.
+    const equipment = list(actor.items).filter(item => item.type === "equipment" && item.system?.equipped === true);
     const armor = equipment.find(item => ["light", "medium", "heavy"].includes(item.system?.type?.value));
     const shield = equipment.find(item => item.system?.type?.value === "shield");
-    if (armor || shield) native._nsArmor = { value: number(armor?.system?.armor?.value ?? 10),
-      dex: armor?.system?.type?.value === "heavy" ? 0 : armor?.system?.armor?.dex ?? null,
-      shield: number(shield?.system?.armor?.value) };
+    if (armor || shield) native._nsArmor = {
+      armor: armor ? { value: number(armor.system?.armor?.value) + numeric(armor.system?.armor?.magicalBonus),
+        dex: armor.system?.type?.value === "heavy" ? 0 : armor.system?.armor?.dex ?? (armor.system?.type?.value === "medium" ? 2 : null) } : null,
+      shield: shield ? number(shield.system?.armor?.value) + numeric(shield.system?.armor?.magicalBonus) : 0,
+    };
+    // A Foundry AC calculation (Mage Armor, unarmored defense, natural armor) supplies the
+    // base. The importer's own "default"/"flat" calculations and its legacy custom formula do not.
+    const preparedAc = prepared.attributes?.ac ?? {};
+    const calc = preparedAc.calc ?? source.attributes?.ac?.calc;
+    const formula = String(preparedAc.formula ?? source.attributes?.ac?.formula ?? "");
+    const legacyCustom = calc === "custom" && /^@attributes\.ac\.armor \+ @attributes\.ac\.dex \+ \(/.test(formula);
+    if (collected.acFromFoundry || (calc && !["default", "flat"].includes(calc) && !legacyCustom)) {
+      const base = Number(preparedAc.base);
+      const fallback = number(preparedAc.value) - number(preparedAc.shield) - number(preparedAc.bonus) - number(preparedAc.cover);
+      if (Number.isFinite(base) || preparedAc.value != null) native._nsAcBase = Number.isFinite(base) ? base : fallback;
+    }
     // Merge sparse native pool edits without losing the names/other members of a resource.
     const merge = (target, patch) => {
       for (const [key, value] of Object.entries(patch ?? {})) {
@@ -102,14 +262,16 @@
       }
     };
     merge(native, actor.flags?.[MODULE]?.nativeEffectState);
+    native._nsLevels = collected.levels;
     return native;
   }
   function collectState(actor, context = {}) {
-    const character = sourceCharacter(actor);
-    const effects = NS.collect(actor);
-    const result = resolve(character, effects, context);
+    const collected = collect(actor);
+    const character = sourceCharacter(actor, collected);
+    const result = resolve(character, collected.effects, context);
+    for (const problem of collected.problems) report(actor, problem);
     for (const error of result.errors) report(actor, error);
-    return { character, effects, result };
+    return { character, effects: collected.effects, collected, result };
   }
   const val = (result, path, fallback = 0) => result.values[path] ?? fallback;
   const expression = (result, path, fallback = 0) => result.formulas[path] ?? String(val(result, path, fallback));
@@ -122,12 +284,10 @@
     preparing.add(actor);
     try {
       const state = collectState(actor), { result, character } = state, system = actor.system;
-      state.baseInputs = states.get(actor)?.baseInputs ?? {
-        attributes: { hp: { value: system.attributes?.hp?.value, max: system.attributes?.hp?.max, temp: system.attributes?.hp?.temp } },
-        abilities: Object.fromEntries(ABILITIES.map(key => [key, { value: system.abilities?.[key]?.value, proficient: system.abilities?.[key]?.proficient }])),
-        skills: Object.fromEntries(Object.entries(system.skills ?? {}).map(([key, value]) => [key, { value: value.value, ability: value.ability }])),
-        tools: Object.fromEntries(Object.entries(system.tools ?? {}).map(([key, value]) => [key, { value: value.value, ability: value.ability }])),
-      };
+      // Bonuses Netherscrolls does not model stay D&D5e's: they are still added to rolls
+      // by D&D5e, so they are added to displayed totals here too.
+      const global = system.bonuses?.abilities ?? {};
+      const checkBonus = ability => numeric(system.abilities?.[ability]?.bonuses?.check) + numeric(global.check);
       const pb = val(result, "proficiencyBonus", number(system.attributes?.prof));
       system.attributes ??= {}; system.attributes.prof = pb;
       system.details ??= {}; system.details.xp ??= {}; system.details.xp.value = val(result, "xp", system.details.xp.value);
@@ -144,14 +304,15 @@
         const total = val(result, path, data.mod + prof.flat);
         data.bonuses ??= {};
         data.bonuses.save = `(${expression(result, path)}) - (${data.mod + prof.flat})`;
-        if (data.save && typeof data.save === "object") Object.assign(data.save, { value: total, prof, bonus: total - data.mod - prof.flat });
-        else data.save = total;
+        const shown = total + numeric(global.save);
+        if (data.save && typeof data.save === "object") Object.assign(data.save, { value: shown, prof, bonus: shown - data.mod - prof.flat });
+        else data.save = shown;
         data.saveProf = prof;
-        data.saveBonus = total - data.mod - prof.flat;
+        data.saveBonus = shown - data.mod - prof.flat;
         data.checkProf = proficiency(data.checkProf, pb, data.checkProf?.multiplier ?? 0);
-        if (data.check && typeof data.check === "object") data.check.value = data.mod + number(data.checkBonus) + data.checkProf.flat;
+        if (data.check && typeof data.check === "object") data.check.value = data.mod + checkBonus(ability) + data.checkProf.flat;
         data.attack = data.mod + pb;
-        data.dc = 8 + data.mod + pb + val(result, "SaveDC") - (8 + val(result, `abilities.${character.advanced?.spellcastingAbility ?? "int"}.mod`) + pb);
+        data.dc = 8 + data.mod + pb + val(result, "SaveDC") - (8 + val(result, `abilities.${character.advanced?.spellcastingAbility || "int"}.mod`) + pb);
       }
       for (const [family, mapping] of [["skills", SKILLS], ["tools", TOOLS]]) {
         system[family] ??= {};
@@ -162,6 +323,10 @@
           // Custom NS skills/tools remain available through the NS effects sheet;
           // adding unknown CONFIG keys to the stock sheet can break its rendering.
           if (!mapping[key] && !system[family][foundryKey]) continue;
+          if (!(`${family}.${key}` in result.values)) continue;
+          // Netherscrolls lists every standard tool, mostly untrained; only tools the
+          // Actor already has, or is trained in, belong on the D&D5e sheet.
+          if (family === "tools" && !system.tools[foundryKey] && !val(result, `tools.${key}.prof`)) continue;
           const entry = character[family]?.[key] ?? {}, data = system[family][foundryKey] ??= {};
           const path = `${family}.${key}`, ability = entry.ability ?? mapping[key]?.[1] ?? "int";
           const mod = val(result, `abilities.${ability}.mod`), multiplier = val(result, `${path}.prof`);
@@ -169,27 +334,30 @@
           data.prof = proficiency(data.prof, pb, multiplier, entry.proficiencyRounding !== "up");
           data.bonuses ??= {};
           data.bonuses.check = `(${expression(result, path)}) - (${mod + data.prof.flat})`;
-          data.total = val(result, path); data.bonus = data.total - mod - data.prof.flat;
-          if (family === "skills") data.passive = 10 + data.total;
+          const extra = checkBonus(ability) + numeric(family === "skills" ? global.skill : global.tool);
+          data.total = val(result, path) + extra; data.bonus = data.total - mod - data.prof.flat;
+          if (family === "skills") data.passive = 10 + data.total + numeric(data.bonuses.passive);
         }
       }
       system.attributes.ac ??= {}; system.attributes.ac.value = val(result, "armorClass", system.attributes.ac.value);
       system.attributes.init ??= {};
-      const initMod = val(result, `abilities.${character.initiative?.ability ?? "dex"}.mod`);
-      system.attributes.init.total = val(result, "initiative");
-      system.attributes.init.mod = initMod;
+      const initAbility = character.initiative?.ability ?? "dex";
+      const initMod = val(result, `abilities.${initAbility}.mod`);
       system.attributes.init.prof = proficiency(system.attributes.init.prof, pb, number(character.initiative?.prof));
+      system.attributes.init.total = val(result, "initiative") + checkBonus(initAbility);
+      system.attributes.init.mod = initMod;
       system.attributes.init.bonus = `(${expression(result, "initiative")}) - (${initMod + system.attributes.init.prof.flat})`;
       system.attributes.spelldc = val(result, "SaveDC");
       system.bonuses ??= {};
       for (const [stat, keys, ability] of [["ToHitStr", ["mwak"], "str"], ["ToHitDext", ["rwak"], "dex"],
-        ["ToHitMagic", ["msak", "rsak"], character.advanced?.spellcastingAbility ?? "int"]]) {
+        ["ToHitMagic", ["msak", "rsak"], character.advanced?.spellcastingAbility || "int"]]) {
         for (const key of keys) { system.bonuses[key] ??= {}; system.bonuses[key].attack = `(${expression(result, stat)}) - (${val(result, `abilities.${ability}.mod`) + pb})`; }
       }
       system.bonuses.spell ??= {};
-      system.bonuses.spell.dc = String(val(result, "SaveDC") - (8 + val(result, `abilities.${character.advanced?.spellcastingAbility ?? "int"}.mod`) + pb));
+      system.bonuses.spell.dc = String(val(result, "SaveDC") - (8 + val(result, `abilities.${character.advanced?.spellcastingAbility || "int"}.mod`) + pb));
       system.attributes.hp ??= {};
       for (const [part, key] of [["current", "value"], ["max", "max"], ["temp", "temp"]]) system.attributes.hp[key] = val(result, `hp.${part}`, system.attributes.hp[key]);
+      if ("effectiveMax" in system.attributes.hp) system.attributes.hp.effectiveMax = system.attributes.hp.max + number(system.attributes.hp.tempmax);
       system.currency ??= {};
       for (const coin of ["pp", "gp", "sp", "cp", "rations"]) system.currency[coin] = val(result, `currency.${coin}`);
       system.spells ??= {};
@@ -267,6 +435,8 @@
   function modifyRoll(type, config, roll, options = {}) {
     const subject = config.subject, actor = subject?.actor ?? (subject?.documentName === "Actor" || subject?.system?.abilities ? subject : null);
     if (!actor || !hasNative(actor)) return;
+    // Skill and tool rolls also fire the ability-check hook; they are handled once, by their own hook.
+    if (type === "abilityCheck" && (config.skill || config.tool)) return;
     try {
       const state = states.get(actor) ?? collectState(actor);
       const fields = options.formData?.object ?? {};
@@ -281,8 +451,7 @@
         character[type === "skill" ? "skills" : "tools"][target.split(".")[1]].ability = roll.data.abilityId;
       }
       // Re-collect at roll time: an instance may have expired since the sheet opened.
-      const effects = NS.collect(actor);
-      const contextual = resolve(character, effects, context);
+      const contextual = resolve(character, collect(actor).effects, context);
       for (const error of contextual.errors) report(actor, error);
       const base = expression(state.result, target), desired = expression(contextual, target);
       if (base === desired) return;
@@ -298,7 +467,7 @@
         roll.parts = roll.parts.filter(part => !replaceParts.has(part));
         let adjusted = desired;
         if (type === "attack" && !state.effects.some(e => e.stat === `${target}.totalOverride` && NS.matchesFilters(e.filters, context))) {
-          const ability = target === "ToHitMagic" ? character.advanced?.spellcastingAbility ?? "int" : target === "ToHitDext" ? "dex" : "str";
+          const ability = target === "ToHitMagic" ? character.advanced?.spellcastingAbility || "int" : target === "ToHitDext" ? "dex" : "str";
           // Keep the weapon's own proficiency choice and alternate attack ability.
           const difference = number(roll.data.mod) + number(roll.data.prof) - val(state.result, `abilities.${ability}.mod`) - val(state.result, "proficiencyBonus");
           if (difference) adjusted = `(${desired}) + (${difference})`;
@@ -323,9 +492,9 @@
     const state = states.get(actor);
     if (!state) return;
     const context = contextFor(activity, "dc");
-    const result = resolve(state.character, NS.collect(actor), context);
+    const result = resolve(state.character, state.effects, context);
     const ability = activity.save.dc.calculation;
-    const castingAbility = state.character.advanced?.spellcastingAbility ?? "int";
+    const castingAbility = state.character.advanced?.spellcastingAbility || "int";
     const bonus = val(result, "SaveDC") - (8 + val(result, `abilities.${castingAbility}.mod`) + val(result, "proficiencyBonus"));
     if (state.effects.some(e => e.stat === "SaveDC.totalOverride" && NS.matchesFilters(e.filters, context))) activity.save.dc.value = val(result, "SaveDC");
     else if (!ability || ability === "custom") {
@@ -335,6 +504,37 @@
       dcBases.set(activity, { base, applied: activity.save.dc.value });
     } else activity.save.dc.value = 8 + val(result, `abilities.${ABILITIES.includes(ability) ? ability : castingAbility}.mod`) + val(result, "proficiencyBonus") + bonus;
   }
+
+  // When an activity applies a Netherscrolls definition, it becomes an active Foundry
+  // effect: feature references are frozen with the caster's levels (as the API does at
+  // activation) and its D&D5e changes are rebuilt so any target, NPCs included, receives it.
+  function onPreCreateActiveEffect(effect, data) {
+    if (!data.flags?.[MODULE]?.nsRuntimeEffect || effect.parent?.documentName !== "Actor") return;
+    if (data.flags[MODULE].portableActiveEffect === true) return;
+    const originActor = /^Actor\.([^.]+)/.exec(data.origin ?? "")?.[1] ?? effect.parent.id;
+    const lifecycle = { sourceActorId: originActor, startedAt: globalThis.game?.time?.worldTime ?? 0,
+      combatId: globalThis.game?.combat?.id ?? null, round: globalThis.game?.combat?.round ?? null, turn: globalThis.game?.combat?.turn ?? null };
+    const ns = data.flags.netherscrolls;
+    const source = globalThis.game?.actors?.get?.(originActor) ?? effect.parent;
+    const sourceItem = source?.items?.get?.(data.origin?.split(".Item.")[1]?.split(".")[0]);
+    const sourceType = sourceItem?.flags?.[MODULE]?.featureScope ??
+      (["race", "class", "subclass", "feat", "background"].includes(sourceItem?.type) ? sourceItem.type : "item");
+    const native = { ...clone(ns?.nativeEffect), duration: clone(ns?.nativeEffect?.duration ?? ns?.effectApplication?.duration),
+      origin: ns?.nativeEffect?.origin ?? { sourceType,
+        sourceId: ns?.sourceId, featureId: ns?.featureId, effectId: ns?.nativeEffect?._id,
+        characterId: source?.flags?.netherscrolls?.characterId ?? nativeFlags(source)?._id } };
+    if (!ns?.nativeEffect?.origin) native._id = globalThis.crypto?.randomUUID?.().replaceAll("-", "").slice(0, 24) ??
+      (NS.stableId(`${Date.now()}:${Math.random()}`) + NS.stableId(Math.random())).slice(0, 24);
+    const levels = levelsOf(source);
+    const scope = { ...levels, ...ownerScope(sourceItem, levels) };
+    try { native.bonus = NS.bindFeatureReferences(native.bonus, scope); } catch (error) { report(effect.parent, error); }
+    const seconds = ({ minute: 60, hour: 3600, day: 86400 })[native.duration?.unit];
+    if (seconds && !native.expiresAt) native.expiresAt = new Date(Date.now() + seconds * number(native.duration.value) * 1000).toISOString();
+    effect.updateSource({ [`flags.${MODULE}.lifecycle`]: lifecycle, [`flags.${MODULE}.appliedActivation`]: true,
+      [`flags.${MODULE}.portableActiveEffect`]: false, [`flags.${MODULE}.nativeActiveBonus`]: native,
+      "flags.netherscrolls.nativeEffect": native, changes: NS.toFoundryChanges(native, scope) });
+  }
+
   function install() {
     const ActorClass = globalThis.CONFIG?.Actor?.documentClass ?? globalThis.Actor;
     if (!ActorClass?.prototype?.prepareData || ActorClass.prototype.prepareData._nsEffects) return;
@@ -358,28 +558,7 @@
       }
       prepareDC(activity.actor, activity);
     });
-    Hooks.on("preCreateActiveEffect", (effect, data) => {
-      if (!data.flags?.[MODULE]?.nsRuntimeEffect || effect.parent?.documentName !== "Actor") return;
-      const originActor = /^Actor\.([^.]+)/.exec(data.origin ?? "")?.[1] ?? effect.parent.id;
-      const lifecycle = { sourceActorId: originActor, startedAt: globalThis.game?.time?.worldTime ?? 0,
-        combatId: globalThis.game?.combat?.id ?? null, round: globalThis.game?.combat?.round ?? null, turn: globalThis.game?.combat?.turn ?? null };
-      const ns = data.flags.netherscrolls;
-      const source = globalThis.game?.actors?.get?.(originActor);
-      const sourceItem = source?.items?.get?.(data.origin?.split(".Item.")[1]?.split(".")[0]);
-      const sourceType = sourceItem?.flags?.[MODULE]?.featureScope ??
-        (["race", "class", "subclass", "feat", "background"].includes(sourceItem?.type) ? sourceItem.type : "item");
-      const native = { ...clone(ns?.nativeEffect), duration: clone(ns?.nativeEffect?.duration ?? ns?.effectApplication?.duration),
-        origin: ns?.nativeEffect?.origin ?? { sourceType,
-          sourceId: ns?.sourceId, featureId: ns?.featureId, effectId: ns?.nativeEffect?._id,
-          characterId: source?.flags?.netherscrolls?.characterId ?? nativeFlags(source)?._id } };
-      if (!ns?.nativeEffect?.origin) native._id = globalThis.crypto?.randomUUID?.().replaceAll("-", "").slice(0, 24) ??
-        (NS.stableId(`${Date.now()}:${Math.random()}`) + NS.stableId(Math.random())).slice(0, 24);
-      const seconds = ({ minute: 60, hour: 3600, day: 86400 })[native.duration?.unit];
-      if (seconds && !native.expiresAt) native.expiresAt = new Date(Date.now() + seconds * number(native.duration.value) * 1000).toISOString();
-      effect.updateSource({ [`flags.${MODULE}.lifecycle`]: lifecycle,
-        [`flags.${MODULE}.portableActiveEffect`]: true, [`flags.${MODULE}.nativeActiveBonus`]: native,
-        "flags.netherscrolls.nativeEffect": native });
-    });
+    Hooks.on("preCreateActiveEffect", onPreCreateActiveEffect);
     Hooks.on("createActiveEffect", effect => {
       const actor = effect.parent, native = effect.flags?.netherscrolls?.nativeEffect;
       if (actor?.documentName !== "Actor" || !activeOwner(actor) || !effect.flags?.[MODULE]?.nsRuntimeEffect || !native?.origin) return;
@@ -398,7 +577,8 @@
     });
     const module = globalThis.game?.modules?.get(MODULE);
     if (module) module.api = { ...module.api, effects: { resolve: (actor, context) => collectState(actor, context).result,
-      roll: rollNative, rollHitDie, inspect: inspect, refresh: actor => actor.prepareData(), adjustPool, endEffect, event: expireEvent } };
+      roll: rollNative, rollHitDie, inspect: inspect, refresh: actor => actor.prepareData(), adjustPool, endEffect, event: expireEvent,
+      exportEffects } };
   }
 
   function appendContextControls(app) {
@@ -406,7 +586,7 @@
     const actor = subject?.actor ?? (subject?.documentName === "Actor" ? subject : null);
     if (!actor || !hasNative(actor) || !app.element?.querySelector || app.element.querySelector("[data-ns-context]")) return;
     const choices = new Map();
-    for (const effect of NS.collect(actor)) for (const [filter, values] of Object.entries(effect.filters ?? {})) {
+    for (const effect of collect(actor).effects) for (const [filter, values] of Object.entries(effect.filters ?? {})) {
       const key = NS.FILTERS[filter];
       if (!key || key === "rollType") continue;
       const set = choices.get(key) ?? new Set();
@@ -537,6 +717,44 @@
       "ToHitStr", "ToHitDext", "ToHitMagic", "SaveDC", "xp", "exhaustion", "hp", "currency", "hitDice", "spellSlots", "Ressources"]
       .filter(key => character[key] !== undefined).map(key => [key, clone(character[key])]));
   }
+  const signed = value => `${value >= 0 ? "+" : ""}${value}`;
+  // Passive Foundry effects as Netherscrolls character effects. Temporary and
+  // activity-applied effects are Foundry-side and are not exported.
+  function exportEffects(actor) {
+    if (!hasNative(actor)) return [];
+    const state = collectState(actor);
+    const rows = [];
+    for (const entry of state.collected.foreign) {
+      if (entry._nsKind !== "passive") continue;
+      const applied = state.result.applied?.[entry._nsKey];
+      if (!applied) continue;
+      const override = entry.stat.endsWith(".totalOverride");
+      let stat = entry.stat, bonus;
+      if (entry.mode) {
+        // Netherscrolls has no upgrade/downgrade/multiply: export the value they produce.
+        if (!applied.changed) continue;
+        stat = `${NS.canonicalTarget(entry.stat)}.totalOverride`;
+        bonus = String(state.result.values[applied.target]);
+      } else if (NS.hasFeatureReference(entry.bonus)) {
+        if (NS.parseFormula(entry.bonus).dice) continue;
+        bonus = override ? String(applied.value) : signed(applied.value);
+      } else {
+        const text = String(entry.bonus).trim();
+        bonus = override ? text : /^[+-]?\d+(?:\.\d+)?$/.test(text) ? signed(Number(text)) : text;
+      }
+      rows.push({ active: true, stat, bonus, source: entry.source,
+        note: `${FOREIGN_NOTE} ${entry._nsItemName ? `Item: ${entry._nsItemName}` : "Actor effect"}` });
+    }
+    return rows;
+  }
+  // True when a Netherscrolls character effect is the exported copy of a Foundry
+  // effect still present on the actor (it must not be imported or exported twice).
+  function isForeignMirror(actor, effectData) {
+    const native = effectData?.flags?.netherscrolls?.nativeEffect ?? effectData?.flags?.[MODULE]?.nativeActiveBonus ?? effectData;
+    if (!String(native?.note ?? "").startsWith(FOREIGN_NOTE) || !native?.stat) return false;
+    return collect(actor).foreign.some(row => row._nsKind === "passive" && row.source === native.source &&
+      NS.canonicalTarget(row.stat) === NS.canonicalTarget(native.stat));
+  }
 
   async function rollNative(actor, stat, context = {}) {
     const { result } = collectState(actor, context);
@@ -547,13 +765,15 @@
     return roll;
   }
   function inspect(actor) {
-    const { result } = collectState(actor);
+    const { result, effects } = collectState(actor);
     const escape = value => String(value).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
     const rows = Object.entries(result.values).filter(([key]) => !/\.(misc|bonus|prof)$/.test(key));
+    const sourceRows = effects.map(entry => `<tr><td>${escape(entry.source ?? "")}</td><td>${escape(entry.stat)}${entry.mode ? ` (${escape(entry.mode)})` : ""}</td><td>${escape(entry.bonus)}</td><td>${entry._nsKind === "active" ? "Active (Foundry)" : "Passive (Netherscrolls)"}</td></tr>`).join("");
     const content = `<table><thead><tr><th>NS stat</th><th>Total</th><th>Action</th></tr></thead><tbody>${rows.map(([key, value]) =>
       `<tr><td>${escape(key)}</td><td>${escape(result.formulas[key] ?? value)}</td><td>${/^(skills|tools|savingThrows)\./.test(key) ? `<button type="button" data-ns-roll="${escape(key)}">Roll</button>` :
         /^hitDice\.current/.test(key) ? `<button type="button" data-ns-hit-die="${escape(key.split(".").at(-1))}">Roll &amp; spend</button>` :
         /^(spellSlots\.current|currency\.|Ressources\..+\.CurrentQty)/.test(key) ? `<button type="button" data-ns-spend="${escape(key)}">Spend 1</button>` : ""}</td></tr>`).join("")}</tbody></table>
+      ${sourceRows ? `<h3>Applied effects</h3><table><thead><tr><th>Source</th><th>Stat</th><th>Bonus</th><th>Kind</th></tr></thead><tbody>${sourceRows}</tbody></table>` : ""}
       ${list(actor.effects).filter(e => e.flags?.[MODULE]?.nsRuntimeEffect && !e.disabled).map(e => `<p>${escape(e.name)} <button type="button" data-ns-end="${escape(e.id)}">End effect</button></p>`).join("")}`;
     const DialogClass = globalThis.foundry?.applications?.api?.DialogV2;
     if (DialogClass) return new DialogClass({ window: { title: `${actor.name}: NS effects` }, content,
@@ -568,8 +788,9 @@
           rollHitDie(actor, button.dataset.nsHitDie).then(() => { dialog.close(); inspect(actor); }).catch(error => report(actor, error)));
       } }).render({ force: true });
   }
-  NS.foundry = { prepare, sourceCharacter, collectState, contextFor, modifyRoll, prepareDC, install, rollNative, inspect, states,
-    adjustPool, endEffect, expireEvent, expireTurns, hasNative, exportState, rollHitDie };
+  NS.foundry = { prepare, sourceCharacter, collect, collectState, contextFor, modifyRoll, prepareDC, install, rollNative, inspect, states,
+    adjustPool, endEffect, expireEvent, expireTurns, hasNative, exportState, exportEffects, isForeignMirror, rollHitDie,
+    onPreCreateActiveEffect, levelsOf, ownerScope };
   if (globalThis.Hooks) {
     Hooks.once("setup", install);
     Hooks.on("getHeaderControlsActorSheetV2", (app, controls) => {

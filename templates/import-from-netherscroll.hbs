@@ -1,94 +1,89 @@
-<form class="ns-import-form" autocomplete="off">
-  <header class="ns-import-header">
-    <div class="ns-import-api-status {{#if hasApiKey}}is-ready{{else}}is-missing{{/if}}">
-      <i class="{{#if hasApiKey}}fa-solid fa-key{{else}}fa-solid fa-triangle-exclamation{{/if}}"></i>
-      <span>{{#if hasApiKey}}API key ready{{else}}API key missing{{/if}}</span>
-    </div>
-    <div class="ns-import-library-status {{#if compendiumReady}}is-ready{{else}}is-missing{{/if}}" data-ns-compendium-status>
-      <i class="{{#if compendiumReady}}fa-solid fa-boxes-stacked{{else}}fa-solid fa-cloud-arrow-down{{/if}}"></i>
-      <span>{{#if compendiumReady}}Netherscrolls library ready ({{compendiumDocumentCount}} documents){{else}}Library empty; Foundry Import will fetch required linked records{{/if}}</span>
-    </div>
-  </header>
-
-  <div class="ns-import-layout">
-    <fieldset class="ns-import-panel ns-import-types-panel">
-      <legend>Foundry Import Library</legend>
-      <div class="ns-import-options">
-        {{#each importTypes}}
-          <label class="ns-import-option">
-            <input type="checkbox" name="importTypes.{{key}}" value="1" {{#if checked}}checked{{/if}}>
-            <span class="ns-import-option-icon"><i class="{{icon}}"></i></span>
-            <span>{{label}}</span>
-          </label>
-        {{/each}}
-      </div>
-    </fieldset>
-    <fieldset class="ns-import-panel ns-import-since-panel">
-      <legend>Range</legend>
-      <label class="ns-import-since-toggle">
-        <input type="checkbox" name="sinceEnabled" value="1">
-        <span>Since...</span>
-      </label>
-      <input type="date" name="sinceDate" value="{{defaultSinceDate}}" disabled>
-      <div class="ns-import-forever">Forever</div>
-    </fieldset>
-
-    <fieldset class="ns-import-panel ns-import-sources-panel">
-      <legend>Sources</legend>
-      <div class="ns-import-source-list {{#if sourceLoading}}is-loading{{/if}}" role="group" aria-label="Netherscroll sources">
-        {{#each sources}}
-          <label class="ns-import-source-option">
-            <input type="checkbox" name="sources" value="{{value}}">
-            <span>{{label}}</span>
-          </label>
-        {{/each}}
-      </div>
-      {{#if sourceLoadError}}
-        <div class="ns-import-source-message is-error">Sources unavailable: {{sourceLoadError}}</div>
-      {{else}}
-        <div class="ns-import-source-message">{{#if sourceLoading}}Connecting to the API server...{{else}}{{#if hasSources}}Pick any sources to limit the import. Leave all unchecked to import all sources.{{else}}No importable sources returned.{{/if}}{{/if}}</div>
-      {{/if}}
-      <button type="submit" data-ns-import-action="library">
-        <i class="fa-solid fa-boxes-stacked"></i>
-        Foundry Import Material
-      </button>
-    </fieldset>
+<form class="ns-transfer" autocomplete="off" data-ns-transfer>
+  {{!-- Shown while connecting, and when nothing else can be shown (no key, no guild, network error). --}}
+  <div class="ns-transfer-status" data-ns-status>
+    <i class="fa-solid fa-circle-notch fa-spin" data-ns-status-icon aria-hidden="true"></i>
+    <span data-ns-status-text>{{#if hasApiKey}}Connecting to Netherscrolls…{{else}}Add your Netherscrolls API key in Module Settings first.{{/if}}</span>
+    <button type="button" data-ns-action="retry" hidden><i class="fa-solid fa-rotate" aria-hidden="true"></i> Try again</button>
   </div>
 
-  <fieldset class="ns-import-panel ns-character-import-panel" data-ns-character-import-panel>
-    <legend>Foundry Import Characters</legend>
-    <div class="ns-character-import-prerequisite is-ready" data-ns-character-prerequisite>
-      {{#if compendiumReady}}
-        Select a campaign, then choose the Netherscrolls characters to create or update in Foundry.
-      {{else}}
-        Select a campaign. Linked records are refreshed from Netherscrolls before the character is updated.
-      {{/if}}
-    </div>
-    <div class="ns-character-import-controls">
-      <label>
-        <span>Campaign</span>
-        <select name="campaignId" data-ns-campaign-select>
-          <option value="">Loading campaigns…</option>
-        </select>
-      </label>
-      <button type="button" class="ns-character-refresh" data-ns-character-action="refresh-campaigns">
-        <i class="fa-solid fa-rotate"></i> Refresh campaigns
-      </button>
-    </div>
-    <div class="ns-character-import-message" data-ns-character-message>
-      Loading campaigns available to this API key…
-    </div>
-    <div class="ns-character-list" data-ns-character-list></div>
-  </fieldset>
+  {{!-- Step 1, only when the account has several guilds and none is chosen yet. --}}
+  <section class="ns-guild-step" data-ns-guild-step hidden>
+    <h2>Which guild does this world play in?</h2>
+    <p class="ns-hint">Your Netherscrolls account belongs to several guilds. Characters and library content come from the guild you pick. You can change it later.</p>
+    <div class="ns-guild-list" data-ns-guild-list role="list"></div>
+  </section>
 
-  <footer class="sheet-footer flexrow">
-    <button type="button" data-ns-character-action="import-selected">
-      <i class="fa-solid fa-users"></i>
-      Foundry Import Selected
-    </button>
-    <button type="button" data-ns-character-action="export-selected">
-      <i class="fa-solid fa-cloud-arrow-up"></i>
-      Foundry Export Selected
-    </button>
-  </footer>
+  {{!-- Step 2: characters and library of the chosen guild. --}}
+  <section class="ns-workspace" data-ns-workspace hidden>
+    <header class="ns-workspace-bar" data-ns-guild-bar>
+      <i class="fa-solid fa-shield-halved" aria-hidden="true"></i>
+      <strong data-ns-guild-name></strong>
+      <span class="ns-guild-access" data-ns-guild-access></span>
+      <button type="button" class="ns-link-button" data-ns-action="change-guild" hidden>Change guild</button>
+    </header>
+
+    <nav class="ns-tabs" role="tablist">
+      <button type="button" class="ns-tab is-active" role="tab" aria-selected="true" data-ns-tab="characters">
+        <i class="fa-solid fa-users" aria-hidden="true"></i> Characters
+      </button>
+      <button type="button" class="ns-tab" role="tab" aria-selected="false" data-ns-tab="library">
+        <i class="fa-solid fa-book" aria-hidden="true"></i> Library
+      </button>
+    </nav>
+
+    <div class="ns-panel" role="tabpanel" data-ns-panel="characters" data-ns-character-import-panel>
+      <div class="ns-field-row">
+        <label class="ns-field">
+          <span>Campaign</span>
+          <select name="campaignId" data-ns-campaign-select>
+            <option value="">Loading campaigns…</option>
+          </select>
+        </label>
+        <button type="button" class="ns-icon-button" data-ns-character-action="refresh-campaigns" title="Reload campaigns" aria-label="Reload campaigns">
+          <i class="fa-solid fa-rotate" aria-hidden="true"></i>
+        </button>
+      </div>
+      <div class="ns-character-list" data-ns-character-list></div>
+      <p class="ns-message" data-ns-character-message>Choose a campaign.</p>
+      <footer class="ns-actions">
+        <button type="button" data-ns-character-action="import-selected">
+          <i class="fa-solid fa-cloud-arrow-down" aria-hidden="true"></i> Import to Foundry
+        </button>
+        <button type="button" data-ns-character-action="export-selected">
+          <i class="fa-solid fa-cloud-arrow-up" aria-hidden="true"></i> Send to Netherscrolls
+        </button>
+      </footer>
+    </div>
+
+    <div class="ns-panel" role="tabpanel" data-ns-panel="library" hidden>
+      <div class="ns-chip-group" role="group" aria-label="Content to import">
+        {{#each importTypes}}
+          <label class="ns-chip">
+            <input type="checkbox" name="importTypes.{{key}}" value="1" {{#if checked}}checked{{/if}}>
+            <i class="{{icon}}" aria-hidden="true"></i>
+            <span>{{label}}</span>
+          </label>
+        {{/each}}
+      </div>
+
+      <details class="ns-sources" data-ns-sources>
+        <summary>Sources: <span data-ns-source-summary>all</span></summary>
+        <div class="ns-import-source-list" role="group" aria-label="Netherscrolls sources"></div>
+      </details>
+      <p class="ns-import-source-message ns-hint">Loading sources…</p>
+
+      <label class="ns-since">
+        <input type="checkbox" name="sinceEnabled" value="1">
+        <span>Only what changed since</span>
+        <input type="date" name="sinceDate" value="{{defaultSinceDate}}" disabled>
+      </label>
+
+      <p class="ns-message" data-ns-library-message>{{libraryStatus}}</p>
+      <footer class="ns-actions">
+        <button type="submit" data-ns-import-action="library">
+          <i class="fa-solid fa-boxes-stacked" aria-hidden="true"></i> Import library
+        </button>
+      </footer>
+    </div>
+  </section>
 </form>

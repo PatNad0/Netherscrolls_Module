@@ -129,6 +129,7 @@ const NETHERSCROLLS_IMPORT_SIDEBAR_FOLDER = {
   sort: 0,
 };
 const NETHERSCROLLS_API_BASE = "https://api.netherscrolls.ca/api/foundry";
+const NETHERSCROLLS_GUILDS_ENDPOINT = `${NETHERSCROLLS_API_BASE}/guilds`;
 const NETHERSCROLLS_MEDIA_IMAGE_ENDPOINT = `${NETHERSCROLLS_API_BASE}/media/image`;
 const NETHERSCROLLS_EXPORT_ENDPOINT = `${NETHERSCROLLS_API_BASE}/export`;
 const NETHERSCROLLS_IMPORT_SELECTION_ENDPOINT = `${NETHERSCROLLS_API_BASE}/import/selection`;
@@ -173,17 +174,32 @@ const netherscrollsDeadImageReferences = new Set();
 const netherscrollsPendingImageValidations = new Map();
 const netherscrollsSourceNamesById = new Map(NETHERSCROLLS_SOURCE_NAME_FALLBACKS);
 const netherscrollsSourceCatalogState = {
-  apiKey: null,
+  scope: null,
   loaded: false,
   pending: null,
 };
 const NETHERSCROLLS_PACK_FOLDER_INDEX_READY = Symbol("netherscrollsPackFolderIndexReady");
 const netherscrollsCampaignCache = {
-  apiKey: null,
+  scope: null,
   campaigns: null,
   expiresAt: 0,
   pending: null,
 };
+// GET /foundry/guilds, cached per API key. Guild permissions and modules can change
+// on the server, so the list is refreshed after this delay or after a guild error.
+const NETHERSCROLLS_GUILD_CACHE_TTL_MS = 60_000;
+const netherscrollsGuildCache = {
+  apiKey: null,
+  data: null,
+  expiresAt: 0,
+  pending: null,
+};
+// API errors that mean the stored guild can no longer be used (cookbook reaction table).
+const NETHERSCROLLS_GUILD_SELECTION_ERRORS = new Set([
+  "GUILD_ID_INVALID",
+  "GUILD_MEMBERSHIP_NOT_FOUND",
+  "GUILD_NOT_SELECTED",
+]);
 const NETHERSCROLLS_MAX_SPELL_LEVEL = 15;
 const NETHERSCROLLS_ITEM_FOLDERS = [
   { type: "weapon", label: "Weapons", sort: 1000 },
@@ -876,6 +892,9 @@ const SETTINGS = {
   rerollInit: "rerollInitEachRound",
   npcDeathSave: "npcDeathSaveEachTurn",
   apiKey: "nsApiKey",
+  guildId: "nsGuildId",
+  guildName: "nsGuildName",
+  libraryImportDates: "nsLibraryImportDatesV1",
   importFromNetherscroll: "importFromNetherscroll",
   exportButton: "showFoundryExportButton",
   importQueuePolling: "pollFoundryImportQueue",
@@ -1436,19 +1455,43 @@ Hooks.once("init", () => {
 
   game.settings.register(MODULE_ID, SETTINGS.apiKey, {
     name: "Netherscrolls API Key",
-    hint: "Use a user-generated key with apikey.import and apikey.export; campaign actions require a campaign DM or administrator key.",
+    hint: "Your account key from Netherscrolls. It works in every guild you belong to; import and export rights are granted per guild. Campaign actions need a campaign DM or guild administrator.",
     scope: "world",
     config: true,
+    restricted: true,
+    type: String,
+    default: "",
+    onChange: () => resetNetherscrollsGuildState(),
+  });
+  // The guild this world plays in (GET /foundry/guilds id), chosen in the import/export window.
+  game.settings.register(MODULE_ID, SETTINGS.guildId, {
+    scope: "world",
+    config: false,
+    restricted: true,
+    type: String,
+    default: "",
+    onChange: () => clearNetherscrollsGuildScopedCaches(),
+  });
+  game.settings.register(MODULE_ID, SETTINGS.guildName, {
+    scope: "world",
+    config: false,
+    type: String,
+    default: "",
+  });
+  // { [guildId]: ISO date } of the last library import, offered as the "only changes since" date.
+  game.settings.register(MODULE_ID, SETTINGS.libraryImportDates, {
+    scope: "world",
+    config: false,
     restricted: true,
     type: String,
     default: "",
   });
 
   game.settings.registerMenu(MODULE_ID, SETTINGS.importFromNetherscroll, {
-    name: "Foundry Import",
-    label: "Open Foundry Import",
-    hint: "Run Foundry Import for Netherscrolls library content and campaign characters.",
-    icon: "fa-solid fa-cloud-arrow-down",
+    name: "Import / Export",
+    label: "Open Netherscrolls import / export",
+    hint: "Choose your guild, then bring characters and library content from Netherscrolls or send characters back.",
+    icon: "fa-solid fa-right-left",
     type: NetherscrollsImportSettings,
     restricted: true,
   });
@@ -1522,6 +1565,287 @@ Hooks.once("init", () => {
 });
 
 
+// ---------------------------------------------------------------- guilds
+//
+// One API key works in every guild its account belongs to; every request except
+// GET /foundry/guilds names its guild with x-guild-id (docs: Foundry and guilds cookbook).
+// The world remembers one guild. Actors remember the guild they came from, so an
+// export always returns to that guild even after the world switches guilds.
+
+// A guild chosen on a client that cannot write world settings (a player) for this session.
+let netherscrollsSessionGuild = null;
+
+function normalizeNetherscrollsGuildId(value) {
+  const id = toTrimmedStringOrNull(value);
+  return id && /^[a-f\d]{24}$/i.test(id) ? id : "";
+}
+
+function getNetherscrollsSelectedGuildId() {
+  const stored = normalizeNetherscrollsGuildId(game?.settings?.get?.(MODULE_ID, SETTINGS.guildId));
+  return normalizeNetherscrollsGuildId(netherscrollsSessionGuild?.id) || stored;
+}
+
+function getNetherscrollsSelectedGuildName() {
+  if (netherscrollsSessionGuild?.id) return netherscrollsSessionGuild.name ?? "";
+  return toTrimmedStringOrNull(game?.settings?.get?.(MODULE_ID, SETTINGS.guildName)) ?? "";
+}
+
+function getActorNetherscrollsGuildId(actor) {
+  return normalizeNetherscrollsGuildId(actor?.flags?.netherscrolls?.guildId);
+}
+
+// `undefined` means "the world's guild"; an explicit "" sends no x-guild-id header.
+function getNetherscrollsRequestGuildId(guildId = undefined) {
+  if (guildId !== undefined && guildId !== null) return normalizeNetherscrollsGuildId(guildId);
+  return getNetherscrollsSelectedGuildId();
+}
+
+function buildNetherscrollsApiHeaders({ apiKey = getNetherscrollsApiKey(), guildId = undefined, json = false } = {}) {
+  const headers = { Accept: "application/json", "x-api-key": apiKey };
+  const guild = getNetherscrollsRequestGuildId(guildId);
+  if (guild) headers["x-guild-id"] = guild;
+  if (json) headers["Content-Type"] = "application/json";
+  return headers;
+}
+
+function getNetherscrollsGuildScope(apiKey = getNetherscrollsApiKey(), guildId = undefined) {
+  return `${apiKey}|${getNetherscrollsRequestGuildId(guildId)}`;
+}
+
+function normalizeNetherscrollsGuildList(body) {
+  const data = body?.data && typeof body.data === "object" ? body.data : {};
+  const guilds = (Array.isArray(data.guilds) ? data.guilds : [])
+    .map((guild) => {
+      const id = normalizeNetherscrollsGuildId(guild?.id ?? guild?._id);
+      if (!id) return null;
+      const modules = guild?.modules && typeof guild.modules === "object" ? guild.modules : {};
+      return {
+        id,
+        slug: toTrimmedStringOrNull(guild.slug) ?? "",
+        name: toTrimmedStringOrNull(guild.name) ?? toTrimmedStringOrNull(guild.slug) ?? id,
+        isDefault: guild.isDefault === true,
+        modules: {
+          library: modules.library !== false,
+          campaigns: modules.campaigns !== false,
+        },
+        apikey: {
+          import: guild?.apikey?.import === true,
+          export: guild?.apikey?.export === true,
+        },
+      };
+    })
+    .filter(Boolean);
+  return {
+    guildMode: data.guildMode === true,
+    defaultGuildId: normalizeNetherscrollsGuildId(data.defaultGuildId),
+    guilds,
+  };
+}
+
+async function fetchNetherscrollsGuilds({ force = false } = {}) {
+  const apiKey = getNetherscrollsApiKey();
+  if (!apiKey) throw new Error("Netherscrolls API Key is missing. Set it in Module Settings.");
+  const now = Date.now();
+  if (
+    !force &&
+    netherscrollsGuildCache.apiKey === apiKey &&
+    netherscrollsGuildCache.data &&
+    netherscrollsGuildCache.expiresAt > now
+  ) {
+    return netherscrollsGuildCache.data;
+  }
+  if (netherscrollsGuildCache.apiKey === apiKey && netherscrollsGuildCache.pending) {
+    return netherscrollsGuildCache.pending;
+  }
+
+  const pending = (async () => {
+    let data;
+    try {
+      data = normalizeNetherscrollsGuildList(await requestNetherscrollsJson(NETHERSCROLLS_GUILDS_ENDPOINT, {
+        method: "GET",
+        apiKey,
+        guildId: "",
+        cache: "no-store",
+        operation: "Guild list",
+      }));
+    } catch (err) {
+      // A server from before guilds has no such route; it needs no guild at all.
+      if (err?.status !== 404) throw err;
+      data = { guildMode: false, defaultGuildId: "", guilds: [] };
+    }
+    if (netherscrollsGuildCache.apiKey === apiKey) {
+      netherscrollsGuildCache.data = data;
+      netherscrollsGuildCache.expiresAt = Date.now() + NETHERSCROLLS_GUILD_CACHE_TTL_MS;
+    }
+    return data;
+  })();
+  netherscrollsGuildCache.apiKey = apiKey;
+  netherscrollsGuildCache.pending = pending;
+  try {
+    return await pending;
+  } finally {
+    if (netherscrollsGuildCache.pending === pending) netherscrollsGuildCache.pending = null;
+  }
+}
+
+function invalidateNetherscrollsGuildList() {
+  netherscrollsGuildCache.data = null;
+  netherscrollsGuildCache.expiresAt = 0;
+}
+
+// What the key may do in a guild: its apikey.* rights combined with the guild's
+// modules (campaigns covers characters, exports and images; library covers imports).
+function getNetherscrollsGuildAccess(guild) {
+  if (!guild) return { importCharacters: true, exportCharacters: true, importLibrary: true };
+  return {
+    importCharacters: guild.apikey.import && guild.modules.campaigns,
+    exportCharacters: guild.apikey.export && guild.modules.campaigns,
+    importLibrary: guild.apikey.import && guild.modules.library,
+  };
+}
+
+function isNetherscrollsGuildUsable(guild) {
+  const access = getNetherscrollsGuildAccess(guild);
+  return access.importCharacters || access.exportCharacters || access.importLibrary;
+}
+
+function describeNetherscrollsGuildAccess(guild) {
+  if (!guild) return "";
+  if (!guild.apikey.import && !guild.apikey.export) {
+    return "No Foundry access: ask a guild admin for apikey.import / apikey.export";
+  }
+  const access = getNetherscrollsGuildAccess(guild);
+  if (!isNetherscrollsGuildUsable(guild)) return "Library and campaigns are turned off in this guild";
+  const parts = [];
+  if (access.importCharacters && access.exportCharacters) parts.push("Import and export");
+  else if (access.importCharacters) parts.push("Import only");
+  else if (access.exportCharacters) parts.push("Export only");
+  else parts.push("Library only");
+  if (!guild.modules.campaigns) parts.push("campaigns turned off");
+  else if (!access.importLibrary) parts.push(guild.modules.library ? "no library import" : "library turned off");
+  return parts.join(" · ");
+}
+
+async function setNetherscrollsSelectedGuild(guild) {
+  const id = normalizeNetherscrollsGuildId(guild?.id);
+  const name = id ? guild?.name ?? "" : "";
+  const previous = getNetherscrollsSelectedGuildId();
+  netherscrollsSessionGuild = null;
+  let saved = false;
+  if (game?.user?.isGM && typeof game?.settings?.set === "function") {
+    try {
+      await game.settings.set(MODULE_ID, SETTINGS.guildId, id);
+      await game.settings.set(MODULE_ID, SETTINGS.guildName, name);
+      saved = true;
+    } catch (err) {
+      console.warn(`${MODULE_ID} | Unable to save the Netherscrolls guild for this world.`, err);
+    }
+  }
+  if (!saved) netherscrollsSessionGuild = { id, name };
+  if (previous !== id) clearNetherscrollsGuildScopedCaches();
+  return id ? guild : null;
+}
+
+// Validates the world's guild against GET /foundry/guilds. One guild is chosen
+// automatically; several guilds without a valid choice return needsChoice.
+async function resolveNetherscrollsGuild({ force = false, notify = true } = {}) {
+  const list = await fetchNetherscrollsGuilds({ force });
+  if (!list.guildMode) return { ...list, guild: null, needsChoice: false };
+
+  const storedId = getNetherscrollsSelectedGuildId();
+  const stored = list.guilds.find((guild) => guild.id === storedId);
+  if (stored) {
+    // Keep the displayed name in sync when a super admin renames the guild.
+    if (stored.name !== getNetherscrollsSelectedGuildName()) await setNetherscrollsSelectedGuild(stored);
+    return { ...list, guild: stored, needsChoice: false };
+  }
+  if (storedId) {
+    const lostName = getNetherscrollsSelectedGuildName() || "the saved guild";
+    if (notify) ui?.notifications?.warn?.(`Netherscrolls: you no longer have access to "${lostName}". Choose a guild.`);
+    await setNetherscrollsSelectedGuild(null);
+  }
+  if (list.guilds.length === 1) {
+    const guild = await setNetherscrollsSelectedGuild(list.guilds[0]);
+    return { ...list, guild, needsChoice: false, autoSelected: true };
+  }
+  return { ...list, guild: null, needsChoice: list.guilds.length > 1 };
+}
+
+// The guild a request for this Actor must use: the guild it came from, else the
+// world's guild. Throws when the account has several guilds and none is chosen.
+async function resolveNetherscrollsActorGuildId(actor = null) {
+  const tagged = getActorNetherscrollsGuildId(actor);
+  if (tagged) return tagged;
+  const state = await resolveNetherscrollsGuild({ notify: false });
+  if (!state.guildMode) return "";
+  if (state.guild) return state.guild.id;
+  if (!state.guilds.length) throw new Error("This Netherscrolls account is not a member of any guild.");
+  throw new Error("Choose your Netherscrolls guild first: open Netherscrolls import / export.");
+}
+
+function getNetherscrollsGuildName(guildId) {
+  const id = normalizeNetherscrollsGuildId(guildId);
+  if (!id) return "";
+  const known = netherscrollsGuildCache.data?.guilds?.find((guild) => guild.id === id);
+  if (known) return known.name;
+  return id === getNetherscrollsSelectedGuildId() ? getNetherscrollsSelectedGuildName() : "";
+}
+
+function clearNetherscrollsGuildScopedCaches() {
+  netherscrollsCampaignCache.scope = null;
+  netherscrollsCampaignCache.campaigns = null;
+  netherscrollsCampaignCache.expiresAt = 0;
+  netherscrollsCampaignCache.pending = null;
+  resetNetherscrollsSourceNameCache(null);
+  netherscrollsCharacterSelectionRefreshes.clear();
+}
+
+function resetNetherscrollsGuildState() {
+  netherscrollsGuildCache.apiKey = null;
+  netherscrollsGuildCache.pending = null;
+  invalidateNetherscrollsGuildList();
+  netherscrollsSessionGuild = null;
+  clearNetherscrollsGuildScopedCaches();
+}
+
+// Reacts to guild errors once, for every request (cookbook "module reaction table").
+async function handleNetherscrollsGuildError(error, guildId) {
+  const code = error?.code;
+  if (!code) return;
+  if (NETHERSCROLLS_GUILD_SELECTION_ERRORS.has(code)) {
+    invalidateNetherscrollsGuildList();
+    if (guildId && guildId === getNetherscrollsSelectedGuildId()) {
+      const name = getNetherscrollsSelectedGuildName() || "the saved guild";
+      await setNetherscrollsSelectedGuild(null);
+      ui?.notifications?.warn?.(`Netherscrolls: "${name}" can no longer be used. Choose a guild again in Netherscrolls import / export.`);
+    }
+    return;
+  }
+  // Rights and modules are read per request; refresh what the window shows.
+  if (code === "MODULE_DISABLED" || code === "FOUNDRY_API_PERMISSION_DENIED") invalidateNetherscrollsGuildList();
+}
+
+function getNetherscrollsLibraryImportDate(guildId = getNetherscrollsSelectedGuildId()) {
+  try {
+    const dates = JSON.parse(game?.settings?.get?.(MODULE_ID, SETTINGS.libraryImportDates) || "{}");
+    return toTrimmedStringOrNull(dates?.[guildId || "default"]);
+  } catch (_err) {
+    return null;
+  }
+}
+
+async function rememberNetherscrollsLibraryImportDate(guildId, isoDate) {
+  if (!game?.user?.isGM || typeof game?.settings?.set !== "function") return;
+  try {
+    let dates = {};
+    try { dates = JSON.parse(game.settings.get(MODULE_ID, SETTINGS.libraryImportDates) || "{}") ?? {}; } catch (_err) { dates = {}; }
+    dates[guildId || "default"] = isoDate;
+    await game.settings.set(MODULE_ID, SETTINGS.libraryImportDates, JSON.stringify(dates));
+  } catch (err) {
+    console.warn(`${MODULE_ID} | Unable to remember the library import date.`, err);
+  }
+}
+
 const NetherscrollsImportSettings = createNetherscrollsImportSettingsClass();
 
 function createNetherscrollsImportSettingsClass() {
@@ -1537,10 +1861,11 @@ function createNetherscrollsImportSettingsClass() {
         id: "netherscrolls-import-settings",
         classes: ["netherscrolls-import-window"],
         window: {
-          title: "Foundry Import",
+          title: "Netherscrolls import / export",
+          icon: "fa-solid fa-right-left",
         },
         position: {
-          width: 900,
+          width: 680,
           height: "auto",
         },
       };
@@ -1572,10 +1897,11 @@ function createNetherscrollsImportSettingsClass() {
         id: "netherscrolls-import-settings",
         classes: ["netherscrolls-import-window"],
         window: {
-          title: "Foundry Import",
+          title: "Netherscrolls import / export",
+          icon: "fa-solid fa-right-left",
         },
         position: {
-          width: 900,
+          width: 680,
           height: "auto",
         },
       };
@@ -1616,10 +1942,10 @@ function createNetherscrollsImportSettingsClass() {
     static get defaultOptions() {
       const options = {
         id: "netherscrolls-import-settings",
-        title: "Foundry Import",
+        title: "Netherscrolls import / export",
         template: `modules/${MODULE_ID}/templates/import-from-netherscroll.hbs`,
         classes: ["netherscrolls-import-window"],
-        width: 900,
+        width: 680,
         height: "auto",
         submitOnChange: false,
         closeOnSubmit: false,
@@ -1647,46 +1973,45 @@ function createNetherscrollsImportSettingsClass() {
 
 async function getNetherscrollsImportSettingsContext(context = {}) {
   const apiKey = getNetherscrollsApiKey();
-  const today = new Date().toISOString().slice(0, 10);
   const compendiumState = await getNetherscrollsCompendiumReadiness();
 
   return {
     ...context,
     hasApiKey: Boolean(apiKey),
-    compendiumReady: compendiumState.ready,
-    compendiumDocumentCount: compendiumState.documentCount,
     importTypes: IMPORT_TYPES,
-    sources: [],
-    sourceLoading: Boolean(apiKey),
-    sourceLoadError: null,
-    hasSources: false,
-    defaultSinceDate: today,
+    defaultSinceDate: getNetherscrollsDefaultSinceDate(),
+    libraryStatus: describeNetherscrollsCompendiumState(compendiumState),
   };
 }
 
-async function getNetherscrollsImportSourceContext(apiKey) {
-  if (netherscrollsSourceCatalogState.apiKey !== apiKey) {
-    resetNetherscrollsSourceNameCache(apiKey);
+// The "only what changed since" date: the guild's last library import, else today.
+function getNetherscrollsDefaultSinceDate(guildId = getNetherscrollsSelectedGuildId()) {
+  const last = getNetherscrollsLibraryImportDate(guildId);
+  const date = last ? new Date(last) : new Date();
+  return Number.isNaN(date.getTime()) ? new Date().toISOString().slice(0, 10) : date.toISOString().slice(0, 10);
+}
+
+function describeNetherscrollsCompendiumState(state) {
+  return state?.ready
+    ? `${state.documentCount} Netherscrolls documents are in this world's compendiums. Character imports fetch anything missing on their own.`
+    : "The world has no Netherscrolls compendium content yet. Character imports fetch what they need on their own; import the library to browse it.";
+}
+
+async function getNetherscrollsImportSourceContext(apiKey, { guildId = undefined } = {}) {
+  const scope = getNetherscrollsGuildScope(apiKey, guildId);
+  if (netherscrollsSourceCatalogState.scope !== scope) {
+    resetNetherscrollsSourceNameCache(scope);
   }
   try {
-    const response = await fetch(NETHERSCROLLS_SOURCES_ENDPOINT, {
+    const data = await requestNetherscrollsJson(NETHERSCROLLS_SOURCES_ENDPOINT, {
       method: "GET",
-      headers: {
-        Accept: "application/json",
-        "x-api-key": apiKey,
-      },
+      apiKey,
+      guildId,
+      operation: "Source list",
     });
-    const data = await response.json().catch(() => null);
-    if (!response.ok) {
-      const message =
-        data?.error?.message ??
-        data?.message ??
-        `Source list failed (${response.status} ${response.statusText}).`;
-      throw new Error(message);
-    }
 
     registerNetherscrollsSourceNames(data);
-    if (apiKey === netherscrollsSourceCatalogState.apiKey) {
+    if (scope === netherscrollsSourceCatalogState.scope) {
       netherscrollsSourceCatalogState.loaded = true;
     }
 
@@ -1707,12 +2032,12 @@ function isNetherscrollsSourceObjectId(value) {
   return /^[a-f\d]{24}$/i.test(String(value ?? "").trim());
 }
 
-function resetNetherscrollsSourceNameCache(apiKey) {
+function resetNetherscrollsSourceNameCache(scope) {
   netherscrollsSourceNamesById.clear();
   for (const [id, name] of NETHERSCROLLS_SOURCE_NAME_FALLBACKS) {
     netherscrollsSourceNamesById.set(id, name);
   }
-  netherscrollsSourceCatalogState.apiKey = apiKey;
+  netherscrollsSourceCatalogState.scope = scope;
   netherscrollsSourceCatalogState.loaded = false;
   netherscrollsSourceCatalogState.pending = null;
 }
@@ -1802,10 +2127,11 @@ async function collectNetherscrollsSourceIds(value) {
   return ids;
 }
 
-async function loadNetherscrollsSourceNameCatalog(apiKey) {
+async function loadNetherscrollsSourceNameCatalog(apiKey, { guildId = undefined } = {}) {
   if (!apiKey) return;
-  if (netherscrollsSourceCatalogState.apiKey !== apiKey) {
-    resetNetherscrollsSourceNameCache(apiKey);
+  const scope = getNetherscrollsGuildScope(apiKey, guildId);
+  if (netherscrollsSourceCatalogState.scope !== scope) {
+    resetNetherscrollsSourceNameCache(scope);
   }
   if (netherscrollsSourceCatalogState.loaded) return;
   if (netherscrollsSourceCatalogState.pending) {
@@ -1814,22 +2140,14 @@ async function loadNetherscrollsSourceNameCatalog(apiKey) {
   }
 
   netherscrollsSourceCatalogState.pending = (async () => {
-    const response = await fetch(NETHERSCROLLS_SOURCES_ENDPOINT, {
+    const data = await requestNetherscrollsJson(NETHERSCROLLS_SOURCES_ENDPOINT, {
       method: "GET",
-      headers: {
-        Accept: "application/json",
-        "x-api-key": apiKey,
-      },
+      apiKey,
+      guildId,
+      operation: "Source list",
     });
-    const data = await response.json().catch(() => null);
-    if (!response.ok) {
-      throw new Error(
-        data?.error?.message ?? data?.message ??
-        `Source list failed (${response.status} ${response.statusText}).`
-      );
-    }
     registerNetherscrollsSourceNames(data);
-    netherscrollsSourceCatalogState.loaded = true;
+    if (netherscrollsSourceCatalogState.scope === scope) netherscrollsSourceCatalogState.loaded = true;
   })().finally(() => {
     netherscrollsSourceCatalogState.pending = null;
   });
@@ -1883,27 +2201,38 @@ function activateNetherscrollsImportSettingsListeners(html, submitHandler = null
   const root = html?.[0] ?? html;
   const form = root?.matches?.("form") ? root : root?.querySelector?.("form");
   const listenerRoot = form ?? root;
+  if (!listenerRoot?.querySelector || listenerRoot.dataset?.netherscrollsTransferBound === "1") return;
+  listenerRoot.dataset.netherscrollsTransferBound = "1";
 
-  if (root === form || root?.classList?.contains("window-content")) {
-    root?.classList?.add("ns-import-form");
+  // Tabs.
+  for (const tab of listenerRoot.querySelectorAll("[data-ns-tab]")) {
+    tab.addEventListener("click", () => showNetherscrollsTransferTab(listenerRoot, tab.dataset.nsTab));
   }
-  form?.classList?.add("ns-import-form");
 
-  const sinceCheckbox = listenerRoot?.querySelector?.('[name="sinceEnabled"]');
-  const sinceDate = listenerRoot?.querySelector?.('[name="sinceDate"]');
-  const sincePanel = listenerRoot?.querySelector?.(".ns-import-since-panel");
+  // "Only what changed since" enables its date.
+  const sinceCheckbox = listenerRoot.querySelector('[name="sinceEnabled"]');
+  const sinceDate = listenerRoot.querySelector('[name="sinceDate"]');
+  sinceCheckbox?.addEventListener("change", () => {
+    if (sinceDate) sinceDate.disabled = !sinceCheckbox.checked;
+  });
 
-  const updateSinceState = () => {
-    if (!sinceCheckbox || !sinceDate) return;
-    const enabled = Boolean(sinceCheckbox.checked);
-    sinceDate.disabled = !enabled;
-    sincePanel?.classList?.toggle("is-since-enabled", enabled);
-  };
+  // Sources summary ("all" or "2 selected").
+  listenerRoot.querySelector(".ns-import-source-list")?.addEventListener("change", () => updateNetherscrollsSourceSummary(listenerRoot));
 
-  sinceCheckbox?.addEventListener?.("change", updateSinceState);
-  updateSinceState();
-  loadNetherscrollsImportSourcesIntoForm(listenerRoot, getNetherscrollsApiKey());
+  listenerRoot.querySelector('[data-ns-action="retry"]')?.addEventListener("click", () => {
+    initializeNetherscrollsTransferWindow(listenerRoot, { force: true });
+  });
+  listenerRoot.querySelector('[data-ns-action="change-guild"]')?.addEventListener("click", async () => {
+    try {
+      const state = await resolveNetherscrollsGuild({ force: true, notify: false });
+      renderNetherscrollsGuildStep(listenerRoot, state);
+    } catch (err) {
+      showNetherscrollsTransferStatus(listenerRoot, `Guilds unavailable: ${err?.message ?? err}`, { error: true, retry: true });
+    }
+  });
+
   activateNetherscrollsCharacterImportListeners(listenerRoot);
+  initializeNetherscrollsTransferWindow(listenerRoot);
 
   if (!submitHandler || !form || form.dataset.netherscrollsImportSubmitBound === "1") {
     return;
@@ -1913,21 +2242,191 @@ function activateNetherscrollsImportSettingsListeners(html, submitHandler = null
   form.addEventListener("submit", submitHandler);
 }
 
-async function loadNetherscrollsImportSourcesIntoForm(root, apiKey) {
-  const sourceList = root?.querySelector?.(".ns-import-source-list");
-  const message = root?.querySelector?.(".ns-import-source-message");
-  if (!sourceList || !apiKey || sourceList.dataset.netherscrollsSourcesBound === "1") return;
+function showNetherscrollsTransferTab(root, name) {
+  for (const tab of root.querySelectorAll("[data-ns-tab]")) {
+    const active = tab.dataset.nsTab === name;
+    tab.classList.toggle("is-active", active);
+    tab.setAttribute("aria-selected", active ? "true" : "false");
+  }
+  for (const panel of root.querySelectorAll("[data-ns-panel]")) {
+    panel.hidden = panel.dataset.nsPanel !== name;
+  }
+}
 
-  sourceList.dataset.netherscrollsSourcesBound = "1";
-  sourceList.classList.add("is-loading");
-  if (message) {
-    message.classList.remove("is-error");
-    message.textContent = "Connecting to the API server...";
+function showNetherscrollsTransferStatus(root, message, { busy = false, error = false, retry = false } = {}) {
+  const status = root.querySelector("[data-ns-status]");
+  if (!status) return;
+  status.hidden = false;
+  status.classList.toggle("is-error", Boolean(error));
+  const icon = status.querySelector("[data-ns-status-icon]");
+  if (icon) {
+    icon.className = busy ? "fa-solid fa-circle-notch fa-spin" : error ? "fa-solid fa-triangle-exclamation" : "fa-solid fa-circle-info";
+  }
+  const text = status.querySelector("[data-ns-status-text]");
+  if (text) text.textContent = message;
+  const retryButton = status.querySelector('[data-ns-action="retry"]');
+  if (retryButton) retryButton.hidden = !retry;
+  root.querySelector("[data-ns-guild-step]")?.setAttribute("hidden", "");
+  root.querySelector("[data-ns-workspace]")?.setAttribute("hidden", "");
+}
+
+// Step 0: key check and guild resolution. One guild (or a server without guilds)
+// goes straight to the workspace; several guilds without a valid choice ask first.
+async function initializeNetherscrollsTransferWindow(root, { force = false } = {}) {
+  if (!getNetherscrollsApiKey()) {
+    showNetherscrollsTransferStatus(root, "Add your Netherscrolls API key in Module Settings first.");
+    return;
+  }
+  showNetherscrollsTransferStatus(root, "Connecting to Netherscrolls…", { busy: true });
+  let state;
+  try {
+    state = await resolveNetherscrollsGuild({ force });
+  } catch (err) {
+    console.error(`${MODULE_ID} | Unable to load the Netherscrolls guilds.`, err);
+    showNetherscrollsTransferStatus(root, `Netherscrolls is unavailable: ${err?.message ?? err}`, { error: true, retry: true });
+    return;
+  }
+  if (state.guildMode && !state.guilds.length) {
+    showNetherscrollsTransferStatus(root, "This Netherscrolls account is not a member of any guild. Ask a guild admin to add you.", { error: true, retry: true });
+    return;
+  }
+  if (state.needsChoice) {
+    renderNetherscrollsGuildStep(root, state);
+    return;
+  }
+  showNetherscrollsWorkspace(root, state);
+}
+
+function renderNetherscrollsGuildStep(root, state) {
+  const step = root.querySelector("[data-ns-guild-step]");
+  const list = root.querySelector("[data-ns-guild-list]");
+  if (!step || !list) return;
+  root.querySelector("[data-ns-status]")?.setAttribute("hidden", "");
+  root.querySelector("[data-ns-workspace]")?.setAttribute("hidden", "");
+  step.hidden = false;
+  list.replaceChildren();
+  const current = getNetherscrollsSelectedGuildId();
+  for (const guild of state.guilds) {
+    const usable = isNetherscrollsGuildUsable(guild);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ns-guild-card";
+    button.setAttribute("role", "listitem");
+    button.disabled = !usable;
+    button.classList.toggle("is-current", guild.id === current);
+    const name = document.createElement("strong");
+    name.textContent = guild.name;
+    const access = document.createElement("span");
+    access.className = "ns-guild-card-access";
+    access.textContent = describeNetherscrollsGuildAccess(guild);
+    button.append(name, access);
+    if (guild.isDefault) {
+      const badge = document.createElement("span");
+      badge.className = "ns-guild-card-badge";
+      badge.textContent = "Default";
+      button.append(badge);
+    }
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      const chosen = await setNetherscrollsSelectedGuild(guild);
+      showNetherscrollsWorkspace(root, { ...state, guild: chosen, needsChoice: false });
+    });
+    list.appendChild(button);
+  }
+}
+
+// Step 1: the chosen guild's characters and library.
+function showNetherscrollsWorkspace(root, state) {
+  const workspace = root.querySelector("[data-ns-workspace]");
+  if (!workspace) return;
+  root.querySelector("[data-ns-status]")?.setAttribute("hidden", "");
+  root.querySelector("[data-ns-guild-step]")?.setAttribute("hidden", "");
+  workspace.hidden = false;
+
+  const guild = state.guild ?? null;
+  const guildId = guild?.id ?? "";
+  const bar = root.querySelector("[data-ns-guild-bar]");
+  if (bar) bar.hidden = !state.guildMode;
+  const name = root.querySelector("[data-ns-guild-name]");
+  if (name) name.textContent = guild?.name ?? "";
+  const access = root.querySelector("[data-ns-guild-access]");
+  if (access) access.textContent = describeNetherscrollsGuildAccess(guild);
+  const changeGuild = root.querySelector('[data-ns-action="change-guild"]');
+  if (changeGuild) changeGuild.hidden = !(state.guildMode && state.guilds.length > 1);
+
+  // Grey out what this key cannot do in this guild, with the reason as a tooltip.
+  const rights = getNetherscrollsGuildAccess(guild);
+  const guildLabel = guild?.name ? ` in ${guild.name}` : "";
+  const setAllowed = (selector, allowed, reason) => {
+    const button = root.querySelector(selector);
+    if (!button) return;
+    button.disabled = !allowed;
+    button.title = allowed ? "" : reason;
+  };
+  setAllowed('[data-ns-character-action="import-selected"]', rights.importCharacters,
+    guild && !guild.modules.campaigns ? `Campaigns are turned off${guildLabel}.` : `This key has no apikey.import${guildLabel}.`);
+  setAllowed('[data-ns-character-action="export-selected"]', rights.exportCharacters,
+    guild && !guild.modules.campaigns ? `Campaigns are turned off${guildLabel}.` : `This key has no apikey.export${guildLabel}.`);
+  setAllowed('[data-ns-import-action="library"]', rights.importLibrary,
+    guild && !guild.modules.library ? `The library is turned off${guildLabel}.` : `This key has no apikey.import${guildLabel}.`);
+
+  const sinceDate = root.querySelector('[name="sinceDate"]');
+  if (sinceDate) sinceDate.value = getNetherscrollsDefaultSinceDate(guildId);
+
+  const characterState = getNetherscrollsCharacterImportState(root);
+  const changed = characterState.guildId !== guildId || !characterState.initialized;
+  characterState.guildId = guildId;
+  characterState.initialized = true;
+  characterState.access = rights;
+  if (changed) {
+    characterState.campaigns = [];
+    characterState.charactersById.clear();
+    characterState.sourcesToken = (characterState.sourcesToken ?? 0) + 1;
+    root.querySelector("[data-ns-character-list]")?.replaceChildren();
   }
 
-  const sourceContext = await getNetherscrollsImportSourceContext(apiKey);
+  if (!state.guildMode || guild?.modules?.campaigns !== false) {
+    loadNetherscrollsCampaignsIntoForm(root, { force: changed });
+  } else {
+    setNetherscrollsCharacterImportMessage(root, `Campaigns are turned off${guildLabel}.`, { error: true });
+    const select = root.querySelector("[data-ns-campaign-select]");
+    if (select) {
+      select.replaceChildren(new Option("Campaigns are turned off", ""));
+      select.disabled = true;
+    }
+  }
+  if (rights.importLibrary) {
+    loadNetherscrollsImportSourcesIntoForm(root, getNetherscrollsApiKey(), { guildId });
+  } else {
+    const message = root.querySelector(".ns-import-source-message");
+    if (message) message.textContent = guild && !guild.modules.library ? `The library is turned off${guildLabel}.` : `This key cannot import${guildLabel}.`;
+  }
+}
+
+function updateNetherscrollsSourceSummary(root) {
+  const summary = root.querySelector("[data-ns-source-summary]");
+  if (!summary) return;
+  const selected = root.querySelectorAll('.ns-import-source-list input[name="sources"]:checked').length;
+  summary.textContent = selected ? `${selected} selected` : "all";
+}
+
+async function loadNetherscrollsImportSourcesIntoForm(root, apiKey, { guildId = undefined } = {}) {
+  const sourceList = root?.querySelector?.(".ns-import-source-list");
+  const message = root?.querySelector?.(".ns-import-source-message");
+  if (!sourceList || !apiKey) return;
+
+  // A guild switch while loading must not show the previous guild's sources.
+  const state = getNetherscrollsCharacterImportState(root);
+  const token = state.sourcesToken = (state.sourcesToken ?? 0) + 1;
   sourceList.replaceChildren();
-  sourceList.classList.remove("is-loading");
+  updateNetherscrollsSourceSummary(root);
+  if (message) {
+    message.classList.remove("is-error");
+    message.textContent = "Loading sources…";
+  }
+
+  const sourceContext = await getNetherscrollsImportSourceContext(apiKey, { guildId });
+  if (token !== state.sourcesToken) return;
 
   if (sourceContext.sourceLoadError) {
     if (message) {
@@ -1952,12 +2451,13 @@ async function loadNetherscrollsImportSourcesIntoForm(root, apiKey) {
     label.append(checkbox, text);
     sourceList.appendChild(label);
   }
+  updateNetherscrollsSourceSummary(root);
 
   if (message) {
     message.classList.remove("is-error");
     message.textContent = sourceContext.sources.length
-      ? "Pick any sources to limit the import. Leave all unchecked to import all sources."
-      : "No importable sources returned.";
+      ? `${sourceContext.sources.length} source${sourceContext.sources.length === 1 ? "" : "s"} available. Leave all unchecked to import everything.`
+      : "This guild has no importable sources yet.";
   }
 }
 
@@ -1974,8 +2474,9 @@ async function handleNetherscrollsImportSettingsSubmitEvent(event) {
   const originalButtonHtml = submitButton?.innerHTML;
   if (submitButton) {
     submitButton.disabled = true;
-    submitButton.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Connecting to the API server...`;
+    submitButton.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Importing the library…`;
   }
+  const libraryMessage = form?.querySelector?.("[data-ns-library-message]");
   try {
     const result = await submitNetherscrollsImportSettings(getNetherscrollsFormDataObject(form));
     if (result?.importedAny) {
@@ -1983,7 +2484,11 @@ async function handleNetherscrollsImportSettingsSubmitEvent(event) {
     }
   } catch (err) {
     console.error(`${MODULE_ID} | Netherscrolls import form submit failed.`, err);
-    ui?.notifications?.error?.(`Foundry Import failed: ${err?.message ?? err}`);
+    ui?.notifications?.error?.(`Library import failed: ${err?.message ?? err}`);
+    if (libraryMessage) {
+      libraryMessage.textContent = `Library import failed: ${err?.message ?? err}`;
+      libraryMessage.classList.add("is-error");
+    }
   } finally {
     if (submitButton) {
       submitButton.disabled = false;
@@ -2000,6 +2505,18 @@ async function submitNetherscrollsImportSettings(formData) {
     );
     return { importedAny: false };
   }
+  // Library content comes from the world's guild.
+  const guildState = await resolveNetherscrollsGuild({ notify: false });
+  if (guildState.guildMode && !guildState.guild) {
+    ui?.notifications?.warn?.("Choose your Netherscrolls guild first.");
+    return { importedAny: false };
+  }
+  const guildId = guildState.guild?.id ?? "";
+  if (!getNetherscrollsGuildAccess(guildState.guild).importLibrary) {
+    ui?.notifications?.warn?.(`This key cannot import the library of ${guildState.guild?.name ?? "this guild"}.`);
+    return { importedAny: false };
+  }
+  const startedAt = new Date().toISOString();
 
   const selectedTypes = IMPORT_TYPES.filter((type) =>
     isImportTypeSelected(formData, type.key)
@@ -2028,6 +2545,7 @@ async function submitNetherscrollsImportSettings(formData) {
     selectedTypes,
     sinceDate: since,
     selectedSources,
+    guildId,
   });
   const destinationPlan = buildNetherscrollsImportDestinationPlan(selectedTypes);
   if (isDebugEnabled()) {
@@ -2046,6 +2564,7 @@ async function submitNetherscrollsImportSettings(formData) {
   }
 
   let importedAny = false;
+  let failedAny = false;
   for (const request of requests) {
     try {
       const response = await sendNetherscrollsImportRequest(request);
@@ -2057,6 +2576,7 @@ async function submitNetherscrollsImportSettings(formData) {
           : formatNetherscrollsImportResult(request.typeKey, result)
       );
     } catch (err) {
+      failedAny = true;
       console.error(`${MODULE_ID} | Netherscrolls ${request.typeKey} import failed.`, err);
       ui?.notifications?.error?.(
         `Netherscrolls ${getNetherscrollsImportTypeLabel(request.typeKey)} import failed: ${err?.message ?? err}`
@@ -2064,6 +2584,10 @@ async function submitNetherscrollsImportSettings(formData) {
     }
   }
   if (importedAny) {
+    // Remember a complete, unfiltered import as the next "only what changed since" date.
+    if (!failedAny && !selectedSources.length && selectedTypes.length === IMPORT_TYPES.length) {
+      await rememberNetherscrollsLibraryImportDate(guildId, startedAt);
+    }
     return { importedAny: true };
   }
 
@@ -2112,15 +2636,13 @@ function activateNetherscrollsCharacterImportListeners(root) {
     rememberNetherscrollsImportQueueCampaignId(campaignSelect.value);
     loadNetherscrollsCampaignCharactersIntoForm(root, campaignSelect.value);
   });
-  panel.querySelector('[data-ns-character-action="select-all"]')?.addEventListener("click", () => {
-    panel.querySelectorAll('[name="characterIds"]:not(:disabled)').forEach((input) => {
-      input.checked = true;
-    });
-  });
-  panel.querySelector('[data-ns-character-action="clear-selection"]')?.addEventListener("click", () => {
-    panel.querySelectorAll('[name="characterIds"]').forEach((input) => {
-      input.checked = false;
-    });
+  // Select-all lives in the rendered table header.
+  panel.addEventListener("change", (event) => {
+    if (event.target?.matches?.("[data-ns-select-all]")) {
+      panel.querySelectorAll('[name="characterIds"]:not(:disabled)').forEach((input) => {
+        input.checked = event.target.checked;
+      });
+    }
   });
   root?.querySelector?.('[data-ns-character-action="import-selected"]')?.addEventListener("click", async (event) => {
     const selectedIds = Array.from(panel.querySelectorAll('[name="characterIds"]:checked')).map((input) => input.value);
@@ -2128,21 +2650,22 @@ function activateNetherscrollsCharacterImportListeners(root) {
       .map((id) => state.charactersById.get(id))
       .filter(Boolean);
     if (!selected.length) {
-      ui?.notifications?.warn?.("Select at least one Netherscrolls character for Foundry Import.");
+      ui?.notifications?.warn?.("Select at least one character to import.");
       return;
     }
 
     const button = event.currentTarget;
     const originalHtml = button.innerHTML;
     button.disabled = true;
-    button.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Running Foundry Import…';
+    button.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Importing…';
     try {
       await importNetherscrollsSelectedCampaignCharacters(root, selected);
     } catch (err) {
       console.error(`${MODULE_ID} | Character import failed.`, err);
       ui?.notifications?.error?.(`Foundry Import failed: ${err?.message ?? err}`);
+      setNetherscrollsCharacterImportMessage(root, `Import failed: ${err?.message ?? err}`, { error: true });
     } finally {
-      button.disabled = false;
+      button.disabled = state.access?.importCharacters === false;
       button.innerHTML = originalHtml;
     }
   });
@@ -2150,29 +2673,38 @@ function activateNetherscrollsCharacterImportListeners(root) {
     const campaignId = normalizeNetherscrollsReferenceValue(campaignSelect?.value);
     const selectedIds = Array.from(panel.querySelectorAll('[name="characterIds"]:checked')).map((input) => input.value);
     if (!campaignId) {
-      ui?.notifications?.warn?.("Select a campaign before running Foundry Export.");
+      ui?.notifications?.warn?.("Choose a campaign first.");
+      return;
+    }
+    if (!selectedIds.length) {
+      ui?.notifications?.warn?.("Select at least one character to send.");
       return;
     }
     const actors = selectedIds
       .map((characterId) => ({
-        actor: findNetherscrollsActorByCharacterId(characterId, state.charactersById.get(characterId)?.name),
+        actor: findNetherscrollsActorByCharacterId(characterId, state.charactersById.get(characterId)?.name, { guildId: state.guildId }),
         characterId,
       }))
       .filter((entry) => entry.actor);
     if (!actors.length) {
-      ui?.notifications?.warn?.("Select at least one character that already exists in Foundry.");
+      ui?.notifications?.warn?.("None of the selected characters are in Foundry yet. Import them first.");
       return;
     }
 
     const button = event.currentTarget;
     const originalHtml = button.innerHTML;
     button.disabled = true;
-    button.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Exporting characters…';
+    button.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Sending…';
     try {
-      const result = await exportNetherscrollsCampaignActors(campaignId, actors);
+      const result = await exportNetherscrollsCampaignActors(campaignId, actors, { guildId: state.guildId });
       const list = root.querySelector("[data-ns-character-list]");
-      if (list) renderNetherscrollsCampaignCharacterList(list, Array.from(state.charactersById.values()));
-      const summary = `Foundry Export: ${result.succeeded.length} succeeded, ${result.failed.length} failed.`;
+      if (list) renderNetherscrollsCampaignCharacterList(list, Array.from(state.charactersById.values()), { guildId: state.guildId });
+      const skipped = selectedIds.length - actors.length;
+      const summary = [
+        `Sent to Netherscrolls: ${result.succeeded.length}`,
+        result.failed.length ? `failed: ${result.failed.length}` : null,
+        skipped ? `not in Foundry: ${skipped}` : null,
+      ].filter(Boolean).join(" · ");
       const failureMessages = result.failed.map((entry) => (
         `${entry.actor?.name ?? "Character"}: ${formatNetherscrollsApiError(entry.error)}`
       ));
@@ -2183,15 +2715,14 @@ function activateNetherscrollsCharacterImportListeners(root) {
     } catch (err) {
       console.error(`${MODULE_ID} | Campaign Foundry Export failed.`, err);
       ui?.notifications?.error?.(`Campaign Foundry Export failed: ${err?.message ?? err}`);
+      setNetherscrollsCharacterImportMessage(root, `Sending failed: ${err?.message ?? err}`, { error: true });
     } finally {
-      button.disabled = false;
+      button.disabled = state.access?.exportCharacters === false;
       button.innerHTML = originalHtml;
     }
   });
 
-  if (getNetherscrollsApiKey()) {
-    loadNetherscrollsCampaignsIntoForm(root);
-  }
+  // Campaigns load once the guild is known (initializeNetherscrollsTransferWindow).
 }
 
 function getNetherscrollsCharacterImportState(root) {
@@ -2200,75 +2731,70 @@ function getNetherscrollsCharacterImportState(root) {
   state = {
     campaigns: [],
     charactersById: new Map(),
+    guildId: "",
+    initialized: false,
+    campaignToken: 0,
+    charactersToken: 0,
+    sourcesToken: 0,
   };
   netherscrollsCharacterImportState.set(root, state);
   return state;
 }
 
 async function refreshNetherscrollsCharacterImportAvailability(root) {
-  const panel = root?.querySelector?.("[data-ns-character-import-panel]");
-  if (!panel) return;
-  const state = await getNetherscrollsCompendiumReadiness();
-  const enabled = state.ready;
-
-  const status = root.querySelector("[data-ns-compendium-status]");
-  status?.classList.toggle("is-ready", enabled);
-  status?.classList.toggle("is-missing", !enabled);
-  if (status) {
-    status.replaceChildren();
-    const icon = document.createElement("i");
-    icon.className = enabled ? "fa-solid fa-boxes-stacked" : "fa-solid fa-cloud-arrow-down";
-    const text = document.createElement("span");
-    text.textContent = enabled
-      ? `Netherscrolls library ready (${state.documentCount} documents)`
-      : "Library empty; Foundry Import will fetch required linked records";
-    status.append(icon, text);
-  }
-
-  const prerequisite = panel.querySelector("[data-ns-character-prerequisite]");
-  prerequisite?.classList.add("is-ready");
-  prerequisite?.classList.remove("is-blocked");
-  if (prerequisite) {
-    prerequisite.textContent = enabled
-      ? "Select a campaign, then choose the Netherscrolls characters to create or update in Foundry."
-      : "Select a campaign. Missing linked records will be fetched through targeted Foundry Import selection.";
-  }
-  await loadNetherscrollsCampaignsIntoForm(root);
+  const message = root?.querySelector?.("[data-ns-library-message]");
+  if (!message) return;
+  message.classList.remove("is-error");
+  message.textContent = describeNetherscrollsCompendiumState(await getNetherscrollsCompendiumReadiness());
 }
 
 async function loadNetherscrollsCampaignsIntoForm(root, { force = false } = {}) {
   const panel = root?.querySelector?.("[data-ns-character-import-panel]");
   const select = panel?.querySelector?.("[data-ns-campaign-select]");
-  if (!panel || !select || panel.disabled) return;
+  if (!panel || !select) return;
   const state = getNetherscrollsCharacterImportState(root);
-  if (state.loadingCampaigns || (!force && state.campaigns.length)) return;
+  if (!force && state.campaigns.length) return;
 
-  state.loadingCampaigns = true;
-  setNetherscrollsCharacterImportMessage(root, "Loading campaigns available to this API key…");
+  // A guild switch while loading must not show the previous guild's campaigns.
+  const token = ++state.campaignToken;
+  const guildId = state.guildId;
+  setNetherscrollsCharacterImportMessage(root, "Loading your campaigns…");
   select.disabled = true;
   try {
-    const campaigns = await fetchNetherscrollsCampaigns({ force });
+    const campaigns = await fetchNetherscrollsCampaigns({ force, guildId });
+    if (token !== state.campaignToken) return;
     state.campaigns = campaigns;
-    const previousValue = select.value;
+    const persisted = getPersistedNetherscrollsImportQueueCampaignIds(getNetherscrollsApiKey(), guildId);
+    const previousValue = select.value || (persisted.length === 1 ? persisted[0] : "");
     select.replaceChildren();
     const placeholder = document.createElement("option");
     placeholder.value = "";
-    placeholder.textContent = campaigns.length ? "Select a campaign" : "No importable campaigns found";
+    placeholder.textContent = campaigns.length ? "Choose a campaign" : "No campaigns";
     select.appendChild(placeholder);
     for (const campaign of campaigns) {
       const option = document.createElement("option");
       option.value = campaign.id;
       option.textContent = campaign.label;
-      if (campaign.id === previousValue) option.selected = true;
       select.appendChild(option);
     }
-    setNetherscrollsCharacterImportMessage(
-      root,
-      campaigns.length
-        ? "Select a campaign to load its Netherscrolls characters."
-        : "This API key is not a DM for any importable Netherscrolls campaigns."
-    );
+    // One campaign, or the remembered one, opens directly.
+    const initial = campaigns.length === 1
+      ? campaigns[0].id
+      : campaigns.some((campaign) => campaign.id === previousValue) ? previousValue : "";
+    select.value = initial;
+    if (initial) {
+      loadNetherscrollsCampaignCharactersIntoForm(root, initial);
+    } else {
+      const guildName = getNetherscrollsGuildName(guildId);
+      setNetherscrollsCharacterImportMessage(
+        root,
+        campaigns.length
+          ? "Choose a campaign to see its characters."
+          : `You are not a DM of any active campaign${guildName ? ` in ${guildName}` : ""}.`
+      );
+    }
   } catch (err) {
+    if (token !== state.campaignToken) return;
     console.error(`${MODULE_ID} | Unable to load Netherscrolls campaigns.`, err);
     select.replaceChildren();
     const option = document.createElement("option");
@@ -2277,29 +2803,30 @@ async function loadNetherscrollsCampaignsIntoForm(root, { force = false } = {}) 
     select.appendChild(option);
     setNetherscrollsCharacterImportMessage(root, `Campaigns unavailable: ${err?.message ?? err}`, { error: true });
   } finally {
-    state.loadingCampaigns = false;
-    select.disabled = false;
+    if (token === state.campaignToken) select.disabled = false;
   }
 }
 
-async function fetchNetherscrollsCampaigns({ force = false } = {}) {
+async function fetchNetherscrollsCampaigns({ force = false, guildId = undefined } = {}) {
   const apiKey = getNetherscrollsApiKey();
   if (!apiKey) throw new Error("Netherscrolls API Key is missing. Set it in Module Settings.");
+  const requestGuildId = getNetherscrollsRequestGuildId(guildId);
+  const scope = getNetherscrollsGuildScope(apiKey, requestGuildId);
   const now = Date.now();
   if (
     !force &&
-    netherscrollsCampaignCache.apiKey === apiKey &&
+    netherscrollsCampaignCache.scope === scope &&
     Array.isArray(netherscrollsCampaignCache.campaigns) &&
     netherscrollsCampaignCache.expiresAt > now
   ) {
     return netherscrollsCampaignCache.campaigns;
   }
-  if (netherscrollsCampaignCache.apiKey === apiKey && netherscrollsCampaignCache.pending) {
+  if (netherscrollsCampaignCache.scope === scope && netherscrollsCampaignCache.pending) {
     return netherscrollsCampaignCache.pending;
   }
 
   const pending = (async () => {
-    const data = await fetchNetherscrollsApiJson(NETHERSCROLLS_CAMPAIGNS_ENDPOINT, apiKey);
+    const data = await fetchNetherscrollsApiJson(NETHERSCROLLS_CAMPAIGNS_ENDPOINT, apiKey, { guildId: requestGuildId });
     const rows = getNetherscrollsApiRows(data);
     const campaigns = rows
       .filter((campaign) => campaign?.active !== false)
@@ -2314,16 +2841,16 @@ async function fetchNetherscrollsCampaigns({ force = false } = {}) {
       })
       .filter(Boolean)
       .sort((a, b) => a.label.localeCompare(b.label));
-    if (netherscrollsCampaignCache.apiKey === apiKey) {
+    if (netherscrollsCampaignCache.scope === scope) {
       netherscrollsCampaignCache.campaigns = campaigns;
       netherscrollsCampaignCache.expiresAt = Date.now() + NETHERSCROLLS_CAMPAIGN_CACHE_TTL_MS;
     }
     if (campaigns.length === 1) {
-      await persistNetherscrollsImportQueueCampaignIds([campaigns[0].id], apiKey);
+      await persistNetherscrollsImportQueueCampaignIds([campaigns[0].id], apiKey, requestGuildId);
     }
     return campaigns;
   })();
-  netherscrollsCampaignCache.apiKey = apiKey;
+  netherscrollsCampaignCache.scope = scope;
   netherscrollsCampaignCache.pending = pending;
   try {
     return await pending;
@@ -2334,13 +2861,21 @@ async function fetchNetherscrollsCampaigns({ force = false } = {}) {
   }
 }
 
-function getPersistedNetherscrollsImportQueueCampaignIds(apiKey = getNetherscrollsApiKey()) {
+// The remembered queue campaign belongs to one key and one guild: campaign ids do
+// not exist in another guild. Without a guild the fingerprint stays the key's own,
+// which keeps campaigns remembered before guilds existed.
+function getNetherscrollsQueueCampaignFingerprint(apiKey, guildId) {
+  const guild = getNetherscrollsRequestGuildId(guildId);
+  return buildNetherscrollsStableId(guild ? `${apiKey}|${guild}` : apiKey);
+}
+
+function getPersistedNetherscrollsImportQueueCampaignIds(apiKey = getNetherscrollsApiKey(), guildId = undefined) {
   if (!apiKey) return [];
   const raw = game?.settings?.get?.(MODULE_ID, SETTINGS.importQueueCampaignIds);
   if (typeof raw !== "string" || !raw.trim()) return [];
   try {
     const stored = JSON.parse(raw);
-    if (stored?.apiKeyFingerprint !== buildNetherscrollsStableId(apiKey)) return [];
+    if (stored?.apiKeyFingerprint !== getNetherscrollsQueueCampaignFingerprint(apiKey, guildId)) return [];
     return Array.from(new Set(
       (Array.isArray(stored?.campaignIds) ? stored.campaignIds : [])
         .map(normalizeNetherscrollsReferenceValue)
@@ -2353,16 +2888,17 @@ function getPersistedNetherscrollsImportQueueCampaignIds(apiKey = getNetherscrol
 
 async function persistNetherscrollsImportQueueCampaignIds(
   campaignIds,
-  apiKey = getNetherscrollsApiKey()
+  apiKey = getNetherscrollsApiKey(),
+  guildId = undefined
 ) {
-  if (!apiKey || typeof game?.settings?.set !== "function") return;
+  if (!apiKey || !game?.user?.isGM || typeof game?.settings?.set !== "function") return;
   const ids = Array.from(new Set(
     (Array.isArray(campaignIds) ? campaignIds : [])
       .map(normalizeNetherscrollsReferenceValue)
       .filter(Boolean)
   ));
   const value = JSON.stringify({
-    apiKeyFingerprint: buildNetherscrollsStableId(apiKey),
+    apiKeyFingerprint: getNetherscrollsQueueCampaignFingerprint(apiKey, guildId),
     campaignIds: ids,
   });
   try {
@@ -2378,9 +2914,13 @@ function rememberNetherscrollsImportQueueCampaignId(campaignId) {
   persistNetherscrollsImportQueueCampaignIds([id]);
 }
 
-function getNetherscrollsActorCampaignIds() {
+// Campaigns of the world's Netherscrolls actors that belong to this guild.
+function getNetherscrollsActorCampaignIds(guildId = undefined) {
+  const guild = getNetherscrollsRequestGuildId(guildId);
   const ids = [];
   for (const actor of getWorldActors()) {
+    const actorGuild = getActorNetherscrollsGuildId(actor);
+    if (guild && actorGuild && actorGuild !== guild) continue;
     const nativeCharacter =
       actor?.getFlag?.(MODULE_ID, "nativeCharacter") ??
       actor?.flags?.[MODULE_ID]?.nativeCharacter;
@@ -2390,32 +2930,32 @@ function getNetherscrollsActorCampaignIds() {
   return Array.from(new Set(ids));
 }
 
-async function getNetherscrollsImportQueueCampaignIds(apiKey = getNetherscrollsApiKey()) {
-  const persisted = getPersistedNetherscrollsImportQueueCampaignIds(apiKey);
+async function getNetherscrollsImportQueueCampaignIds(apiKey = getNetherscrollsApiKey(), guildId = undefined) {
+  const persisted = getPersistedNetherscrollsImportQueueCampaignIds(apiKey, guildId);
   if (persisted.length === 1) return persisted;
 
-  const actorCampaignIds = getNetherscrollsActorCampaignIds();
+  const actorCampaignIds = getNetherscrollsActorCampaignIds(guildId);
   if (actorCampaignIds.length === 1) {
-    await persistNetherscrollsImportQueueCampaignIds(actorCampaignIds, apiKey);
+    await persistNetherscrollsImportQueueCampaignIds(actorCampaignIds, apiKey, guildId);
     return actorCampaignIds;
   }
   if (persisted.length > 1 && actorCampaignIds.length) {
     const matchingActorCampaignIds = actorCampaignIds.filter((id) => persisted.includes(id));
     if (matchingActorCampaignIds.length === 1) {
-      await persistNetherscrollsImportQueueCampaignIds(matchingActorCampaignIds, apiKey);
+      await persistNetherscrollsImportQueueCampaignIds(matchingActorCampaignIds, apiKey, guildId);
       return matchingActorCampaignIds;
     }
   }
 
-  const campaigns = await fetchNetherscrollsCampaigns();
+  const campaigns = await fetchNetherscrollsCampaigns({ guildId });
   if (campaigns.length === 1) {
-    await persistNetherscrollsImportQueueCampaignIds([campaigns[0].id], apiKey);
+    await persistNetherscrollsImportQueueCampaignIds([campaigns[0].id], apiKey, guildId);
     return [campaigns[0].id];
   }
   if (campaigns.length > 1) {
     console.warn(
-      `${MODULE_ID} | Foundry Import queue polling needs one campaign. ` +
-      "Select the campaign once in Foundry Import; its id will then be remembered."
+      `${MODULE_ID} | Foundry sync queue polling needs one campaign. ` +
+      "Select the campaign once in Netherscrolls import / export; it will then be remembered."
     );
   }
   return [];
@@ -2479,44 +3019,72 @@ async function pollNetherscrollsImportQueues() {
   let exported = 0;
   let failed = 0;
   try {
-    const campaignIds = await getNetherscrollsImportQueueCampaignIds(apiKey);
+    // Queues live in one guild's database: poll the world's guild only. If the guild
+    // list cannot be read, keep polling the saved guild; queue errors still surface.
+    let guildState;
+    try {
+      guildState = await resolveNetherscrollsGuild({ notify: false });
+    } catch (err) {
+      console.warn(`${MODULE_ID} | Foundry sync queue polling could not refresh the Netherscrolls guilds; using the saved guild.`, err);
+      const savedGuildId = getNetherscrollsSelectedGuildId();
+      guildState = {
+        guildMode: Boolean(savedGuildId),
+        guilds: [],
+        guild: savedGuildId ? { id: savedGuildId, name: getNetherscrollsSelectedGuildName(),
+          modules: { library: true, campaigns: true }, apikey: { import: true, export: true } } : null,
+      };
+    }
+    if (guildState.guildMode && !guildState.guild) {
+      console.warn(`${MODULE_ID} | Foundry sync queue polling waits until a guild is chosen in Netherscrolls import / export.`);
+      return { imported, exported, failed };
+    }
+    const guildId = guildState.guild?.id ?? "";
+    const access = getNetherscrollsGuildAccess(guildState.guild);
+    if (!access.importCharacters && !access.exportCharacters) return { imported, exported, failed };
+
+    const campaignIds = await getNetherscrollsImportQueueCampaignIds(apiKey, guildId);
     if (!campaignIds.length) return { imported, exported, failed };
     const validCampaignIds = new Set(campaignIds);
     let folder = null;
 
     for (const campaignId of campaignIds) {
       let queuedImports = [];
-      let importCampaignAccessRejected = false;
-      try {
-        queuedImports = await fetchNetherscrollsCampaignImports(campaignId);
-      } catch (err) {
-        if (err?.status === 403 || err?.status === 404) {
-          importCampaignAccessRejected = true;
+      let importCampaignAccessRejected = !access.importCharacters;
+      if (access.importCharacters) {
+        try {
+          queuedImports = await fetchNetherscrollsCampaignImports(campaignId, { guildId });
+        } catch (err) {
+          if (err?.status === 403 || err?.status === 404) {
+            importCampaignAccessRejected = true;
+          }
+          console.warn(`${MODULE_ID} | Unable to read a Foundry Import campaign queue.`, {
+            campaignId,
+            error: err,
+          });
         }
-        console.warn(`${MODULE_ID} | Unable to read a Foundry Import campaign queue.`, {
-          campaignId,
-          error: err,
-        });
       }
 
       let queuedExports = [];
-      let exportCampaignAccessRejected = false;
-      try {
-        queuedExports = await fetchNetherscrollsCampaignExports(campaignId);
-      } catch (err) {
-        if (err?.status === 403 || err?.status === 404) {
-          exportCampaignAccessRejected = true;
+      let exportCampaignAccessRejected = !access.exportCharacters;
+      if (access.exportCharacters) {
+        try {
+          queuedExports = await fetchNetherscrollsCampaignExports(campaignId, { guildId });
+        } catch (err) {
+          if (err?.status === 403 || err?.status === 404) {
+            exportCampaignAccessRejected = true;
+          }
+          console.warn(`${MODULE_ID} | Unable to read a Foundry Export campaign queue.`, {
+            campaignId,
+            error: err,
+          });
         }
-        console.warn(`${MODULE_ID} | Unable to read a Foundry Export campaign queue.`, {
-          campaignId,
-          error: err,
-        });
       }
       if (importCampaignAccessRejected && exportCampaignAccessRejected) {
         validCampaignIds.delete(campaignId);
         await persistNetherscrollsImportQueueCampaignIds(
           Array.from(validCampaignIds),
-          apiKey
+          apiKey,
+          guildId
         );
         continue;
       }
@@ -2536,7 +3104,7 @@ async function pollNetherscrollsImportQueues() {
         );
         if (netherscrollsPendingImportAcknowledgements.has(acknowledgementKey)) {
           try {
-            await acknowledgeNetherscrollsCampaignImport(campaignId, importedCharacter.id);
+            await acknowledgeNetherscrollsCampaignImport(campaignId, importedCharacter.id, { guildId });
             netherscrollsPendingImportAcknowledgements.delete(acknowledgementKey);
           } catch (err) {
             failed += 1;
@@ -2566,7 +3134,7 @@ async function pollNetherscrollsImportQueues() {
 
         netherscrollsPendingImportAcknowledgements.add(acknowledgementKey);
         try {
-          await acknowledgeNetherscrollsCampaignImport(campaignId, importedCharacter.id);
+          await acknowledgeNetherscrollsCampaignImport(campaignId, importedCharacter.id, { guildId });
           netherscrollsPendingImportAcknowledgements.delete(acknowledgementKey);
           imported += 1;
         } catch (err) {
@@ -2582,7 +3150,7 @@ async function pollNetherscrollsImportQueues() {
       const exportEntries = [];
       for (const queuedExport of queuedExports) {
         const syncToken = normalizeNetherscrollsReferenceValue(queuedExport?.raw?.queue?.syncToken);
-        const actor = findNetherscrollsActorForQueuedExport(queuedExport);
+        const actor = findNetherscrollsActorForQueuedExport(queuedExport, guildId);
         if (!syncToken || !actor) {
           failed += 1;
           console.error(`${MODULE_ID} | Foundry Export queue entry remains queued because its Actor or sync token is unavailable.`, {
@@ -2602,7 +3170,7 @@ async function pollNetherscrollsImportQueues() {
           result = await exportNetherscrollsCampaignActors(
             campaignId,
             chunk,
-            { retryFailedOnce: true }
+            { retryFailedOnce: true, guildId }
           );
         } catch (err) {
           failed += chunk.length;
@@ -2660,54 +3228,61 @@ function isPrimaryNetherscrollsQueuePoller() {
   return !activeGM || activeGM.id === game.user.id;
 }
 
-async function fetchNetherscrollsCampaignImports(campaignId) {
+async function fetchNetherscrollsCampaignImports(campaignId, { guildId = undefined } = {}) {
   const apiKey = getNetherscrollsApiKey();
+  const requestGuildId = getNetherscrollsRequestGuildId(guildId);
   const endpoint = `${NETHERSCROLLS_CAMPAIGNS_ENDPOINT}/${encodeURIComponent(campaignId)}/imports`;
   const data = await requestNetherscrollsJson(endpoint, {
     method: "GET",
     apiKey,
+    guildId: requestGuildId,
     cache: "no-store",
     operation: "Foundry Import queue read",
   });
   return getNetherscrollsApiRows(data)
-    .map(normalizeNetherscrollsImportedCharacter)
+    .map((entry) => normalizeNetherscrollsImportedCharacter(entry, { guildId: requestGuildId }))
     .filter(Boolean);
 }
 
-async function fetchNetherscrollsCampaignExports(campaignId) {
+async function fetchNetherscrollsCampaignExports(campaignId, { guildId = undefined } = {}) {
   const apiKey = getNetherscrollsApiKey();
+  const requestGuildId = getNetherscrollsRequestGuildId(guildId);
   const endpoint = `${NETHERSCROLLS_CAMPAIGNS_ENDPOINT}/${encodeURIComponent(campaignId)}/exports`;
   const data = await requestNetherscrollsJson(endpoint, {
     method: "GET",
     apiKey,
+    guildId: requestGuildId,
     cache: "no-store",
     operation: "Foundry Export queue read",
   });
   return getNetherscrollsApiRows(data)
-    .map(normalizeNetherscrollsImportedCharacter)
+    .map((entry) => normalizeNetherscrollsImportedCharacter(entry, { guildId: requestGuildId }))
     .filter(Boolean);
 }
 
-function findNetherscrollsActorForQueuedExport(queuedExport) {
-  const byCharacterId = findNetherscrollsActorByCharacterId(queuedExport?.id);
+function findNetherscrollsActorForQueuedExport(queuedExport, guildId = undefined) {
+  const byCharacterId = findNetherscrollsActorByCharacterId(queuedExport?.id, null, { guildId });
   if (byCharacterId) return byCharacterId;
   const foundryActorId = normalizeNetherscrollsReferenceValue(
     queuedExport?.character?.foundryFlag ?? queuedExport?.raw?.character?.foundryFlag
   );
+  const guild = getNetherscrollsRequestGuildId(guildId);
   const byFoundryId = foundryActorId ? getWorldActors().find(
     (actor) => actor?.type === "character" && String(actor?.id ?? actor?._id ?? "") === foundryActorId &&
-      (!getActorCharacterId(actor) || getActorCharacterId(actor) === queuedExport?.id)
+      (!getActorCharacterId(actor) || getActorCharacterId(actor) === queuedExport?.id) &&
+      (!guild || !getActorNetherscrollsGuildId(actor) || getActorNetherscrollsGuildId(actor) === guild)
   ) : null;
-  return byFoundryId ?? findNetherscrollsActorByCharacterId(queuedExport?.id, queuedExport?.name);
+  return byFoundryId ?? findNetherscrollsActorByCharacterId(queuedExport?.id, queuedExport?.name, { guildId });
 }
 
-async function acknowledgeNetherscrollsCampaignImport(campaignId, characterId) {
+async function acknowledgeNetherscrollsCampaignImport(campaignId, characterId, { guildId = undefined } = {}) {
   const endpoint = `${NETHERSCROLLS_CAMPAIGNS_ENDPOINT}/${encodeURIComponent(campaignId)}/imports/${encodeURIComponent(characterId)}`;
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     try {
       await requestNetherscrollsJson(endpoint, {
         method: "DELETE",
         apiKey: getNetherscrollsApiKey(),
+        guildId,
         cache: "no-store",
         operation: "Foundry Import acknowledgement",
       });
@@ -2734,40 +3309,46 @@ async function loadNetherscrollsCampaignCharactersIntoForm(root, campaignId) {
   if (!panel || !list) return;
   const id = normalizeNetherscrollsReferenceValue(campaignId);
   const state = getNetherscrollsCharacterImportState(root);
+  const token = ++state.charactersToken;
   state.charactersById.clear();
   list.replaceChildren();
   if (!id) {
-    setNetherscrollsCharacterImportMessage(root, "Select a campaign to load its Netherscrolls characters.");
+    setNetherscrollsCharacterImportMessage(root, "Choose a campaign to see its characters.");
     return;
   }
 
-  setNetherscrollsCharacterImportMessage(root, "Loading campaign characters…");
+  setNetherscrollsCharacterImportMessage(root, "Loading characters…");
   try {
-    const characters = await fetchNetherscrollsCampaignCharacters(id);
+    const characters = await fetchNetherscrollsCampaignCharacters(id, { guildId: state.guildId });
+    if (token !== state.charactersToken) return;
     for (const character of characters) state.charactersById.set(character.id, character);
-    renderNetherscrollsCampaignCharacterList(list, characters);
+    renderNetherscrollsCampaignCharacterList(list, characters, { guildId: state.guildId });
     setNetherscrollsCharacterImportMessage(
       root,
-      characters.length ? "Choose one or more characters for Foundry Import." : "This campaign has no characters available for Foundry Import."
+      characters.length
+        ? "Tick characters, then import them into Foundry or send their Foundry sheets back to Netherscrolls."
+        : "This campaign has no characters yet."
     );
   } catch (err) {
+    if (token !== state.charactersToken) return;
     console.error(`${MODULE_ID} | Unable to load Netherscrolls campaign characters.`, err);
     setNetherscrollsCharacterImportMessage(root, `Characters unavailable: ${err?.message ?? err}`, { error: true });
   }
 }
 
-async function fetchNetherscrollsCampaignCharacters(campaignId) {
+async function fetchNetherscrollsCampaignCharacters(campaignId, { guildId = undefined } = {}) {
   const apiKey = getNetherscrollsApiKey();
   if (!apiKey) throw new Error("Netherscrolls API Key is missing. Set it in Module Settings.");
+  const requestGuildId = getNetherscrollsRequestGuildId(guildId);
   const endpoint = `${NETHERSCROLLS_CAMPAIGNS_ENDPOINT}/${encodeURIComponent(campaignId)}/characters`;
-  const data = await fetchNetherscrollsApiJson(endpoint, apiKey);
+  const data = await fetchNetherscrollsApiJson(endpoint, apiKey, { guildId: requestGuildId });
   return getNetherscrollsApiRows(data)
-    .map(normalizeNetherscrollsImportedCharacter)
+    .map((entry) => normalizeNetherscrollsImportedCharacter(entry, { guildId: requestGuildId }))
     .filter(Boolean);
 }
 
-async function fetchNetherscrollsApiJson(url, apiKey) {
-  return requestNetherscrollsJson(url, { method: "GET", apiKey });
+async function fetchNetherscrollsApiJson(url, apiKey, { guildId = undefined } = {}) {
+  return requestNetherscrollsJson(url, { method: "GET", apiKey, guildId });
 }
 
 async function requestNetherscrollsJson(
@@ -2775,39 +3356,47 @@ async function requestNetherscrollsJson(
   {
     method = "GET",
     apiKey = getNetherscrollsApiKey(),
+    guildId = undefined,
     body = null,
     operation = "Request",
     includeStatus = false,
     cache = null,
   } = {}
 ) {
+  const requestGuildId = getNetherscrollsRequestGuildId(guildId);
   const response = await fetch(url, {
     method,
     ...(cache ? { cache } : {}),
-    headers: {
-      Accept: "application/json",
-      ...(body == null ? {} : { "Content-Type": "application/json" }),
-      "x-api-key": apiKey,
-    },
+    headers: buildNetherscrollsApiHeaders({ apiKey, guildId: requestGuildId, json: body != null }),
     ...(body == null ? {} : { body: JSON.stringify(body) }),
   });
-  const data = await response.json().catch(() => null);
+  // 204 (queue acknowledgements and cancellations) has no JSON body.
+  const data = response.status === 204 ? null : await response.json().catch(() => null);
   if (!response.ok) {
-    const message =
-      data?.error?.message ??
-      data?.message ??
-      (typeof data?.error === "string" ? data.error : null) ??
-      `${operation} failed (${response.status} ${response.statusText}).`;
-    const error = new Error(formatNetherscrollsApiError({ ...data?.error, message }));
-    error.status = response.status;
-    error.code = data?.error?.code ?? data?.code ?? null;
-    error.hint = data?.error?.hint ?? null;
-    error.requestId = data?.error?.requestId ?? null;
-    error.details = data?.error?.details ?? null;
-    error.data = data;
-    throw error;
+    throw await buildNetherscrollsApiError(response, data, operation, requestGuildId);
   }
   return includeStatus ? { data, status: response.status } : data;
+}
+
+async function buildNetherscrollsApiError(response, data, operation, requestGuildId) {
+  const message =
+    data?.error?.message ??
+    data?.message ??
+    (typeof data?.error === "string" ? data.error : null) ??
+    `${operation} failed (${response.status} ${response.statusText}).`;
+  const error = new Error(formatNetherscrollsApiError({ ...data?.error, message }));
+  error.status = response.status;
+  error.code = data?.error?.code ?? data?.code ?? null;
+  error.hint = data?.error?.hint ?? null;
+  error.requestId = data?.error?.requestId ?? response.headers?.get?.("x-request-id") ?? null;
+  error.details = data?.error?.details ?? null;
+  error.module = data?.error?.module ?? null;
+  error.guildName = data?.error?.guild?.name ?? getNetherscrollsGuildName(requestGuildId);
+  error.guildId = requestGuildId;
+  error.data = data;
+  try { await handleNetherscrollsGuildError(error, requestGuildId); }
+  catch (err) { console.warn(`${MODULE_ID} | Unable to process a guild error.`, err); }
+  return error;
 }
 
 function formatNetherscrollsApiError(error) {
@@ -2826,6 +3415,8 @@ function formatNetherscrollsApiError(error) {
     : [];
   return [
     error?.message ?? "Foundry Export failed.",
+    // Permission refusals explain, as text, which guild needs which apikey.* grant.
+    typeof details === "string" ? details : null,
     documentLabel ? `Document: ${documentLabel}.` : null,
     details?.stage ? `Stage: ${details.stage}.` : null,
     fields.length ? `Invalid fields: ${fields.join(", ")}.` : null,
@@ -2840,7 +3431,9 @@ function getNetherscrollsApiRows(data) {
   return Array.isArray(data?.data) ? data.data : [];
 }
 
-function normalizeNetherscrollsImportedCharacter(entry) {
+// `guildId` records the guild the character was read from: its Actor is tagged
+// with it, and its linked library records are resolved in that same guild.
+function normalizeNetherscrollsImportedCharacter(entry, { guildId = undefined } = {}) {
   const character = entry?.character;
   const foundryActor = entry?.foundryActor;
   const id = normalizeNetherscrollsReferenceValue(
@@ -2850,17 +3443,25 @@ function normalizeNetherscrollsImportedCharacter(entry) {
   );
   if (!id) return null;
   const name = toTrimmedStringOrNull(character?.name ?? entry?.name ?? foundryActor?.name) ?? "Unnamed Character";
-  return { id, name, character, foundryActor, raw: entry };
+  return { id, name, character, foundryActor, raw: entry, guildId: getNetherscrollsRequestGuildId(guildId) };
 }
 
-function renderNetherscrollsCampaignCharacterList(root, characters) {
+function renderNetherscrollsCampaignCharacterList(root, characters, { guildId = undefined } = {}) {
   root.replaceChildren();
   if (!characters.length) return;
   const table = document.createElement("table");
   table.className = "ns-character-table";
   const thead = document.createElement("thead");
   const headerRow = document.createElement("tr");
-  for (const label of ["", "Character", "Details", "Foundry"]) {
+  const selectAllCell = document.createElement("th");
+  const selectAll = document.createElement("input");
+  selectAll.type = "checkbox";
+  selectAll.dataset.nsSelectAll = "true";
+  selectAll.setAttribute("aria-label", "Select every character");
+  selectAll.title = "Select every character";
+  selectAllCell.appendChild(selectAll);
+  headerRow.appendChild(selectAllCell);
+  for (const label of ["Character", "In Foundry"]) {
     const cell = document.createElement("th");
     cell.textContent = label;
     headerRow.appendChild(cell);
@@ -2874,18 +3475,28 @@ function renderNetherscrollsCampaignCharacterList(root, characters) {
     checkbox.type = "checkbox";
     checkbox.name = "characterIds";
     checkbox.value = importedCharacter.id;
-    checkbox.setAttribute("aria-label", `Foundry Import ${importedCharacter.name}`);
+    checkbox.id = `ns-character-${importedCharacter.id}`;
     selectCell.appendChild(checkbox);
 
     const nameCell = document.createElement("td");
-    nameCell.textContent = importedCharacter.name;
-    const detailsCell = document.createElement("td");
-    detailsCell.textContent = getNetherscrollsCharacterImportDetail(importedCharacter);
+    const name = document.createElement("label");
+    name.htmlFor = checkbox.id;
+    name.textContent = importedCharacter.name;
+    nameCell.appendChild(name);
+    const detail = getNetherscrollsCharacterImportDetail(importedCharacter);
+    if (detail) {
+      const small = document.createElement("small");
+      small.textContent = detail;
+      nameCell.appendChild(small);
+    }
     const statusCell = document.createElement("td");
-    const existing = findNetherscrollsActorByCharacterId(importedCharacter.id, importedCharacter.name);
+    const existing = findNetherscrollsActorByCharacterId(importedCharacter.id, importedCharacter.name, { guildId });
     statusCell.className = `ns-character-status ${existing ? "is-existing" : "is-new"}`;
-    statusCell.textContent = existing ? "Will update" : "Will create";
-    row.append(selectCell, nameCell, detailsCell, statusCell);
+    statusCell.textContent = existing ? "Yes" : "Not yet";
+    statusCell.title = existing
+      ? `Importing updates the Foundry actor "${existing.name}". Sending writes it back to Netherscrolls.`
+      : "Importing creates a new Foundry actor.";
+    row.append(selectCell, nameCell, statusCell);
     tbody.appendChild(row);
   }
   table.append(thead, tbody);
@@ -2894,13 +3505,16 @@ function renderNetherscrollsCampaignCharacterList(root, characters) {
 
 function getNetherscrollsCharacterImportDetail(importedCharacter) {
   const source = importedCharacter?.character ?? {};
-  const parts = [
-    toTrimmedStringOrNull(source?.race?.name ?? source?.raceName),
-    toTrimmedStringOrNull(source?.class?.name ?? source?.className ?? source?.characterClass),
-  ].filter(Boolean);
-  const level = source?.level ?? source?.levels ?? source?.characterLevel;
-  if (level != null) parts.push(`Level ${level}`);
-  return parts.join(" · ") || "—";
+  // Character envelopes carry class references without names; the total level and
+  // class count are what can be shown without extra requests.
+  const classes = Array.isArray(source?.classes) ? source.classes : [];
+  const level = classes.length
+    ? classes.reduce((total, entry) => total + Math.max(0, Math.trunc(toNumber(entry?.level, 0))), 0)
+    : toNumberOrNull(source?.level ?? source?.characterLevel);
+  const parts = [];
+  if (level) parts.push(`Level ${level}`);
+  if (classes.length > 1) parts.push(`${classes.length} classes`);
+  return parts.join(" · ");
 }
 
 function setNetherscrollsCharacterImportMessage(root, message, { error = false } = {}) {
@@ -3008,7 +3622,7 @@ async function importNetherscrollsSelectedCampaignCharacters(root, selected) {
   const list = root?.querySelector?.("[data-ns-character-list]");
   const state = getNetherscrollsCharacterImportState(root);
   if (list) {
-    renderNetherscrollsCampaignCharacterList(list, Array.from(state.charactersById.values()));
+    renderNetherscrollsCampaignCharacterList(list, Array.from(state.charactersById.values()), { guildId: state.guildId });
     const failedIds = new Set(failed.map((result) => String(result.characterId ?? "")));
     list.querySelectorAll?.('[name="characterIds"]').forEach((input) => {
       input.checked = failedIds.has(String(input.value));
@@ -3024,10 +3638,11 @@ async function hydrateNetherscrollsImportedCharacter(importedCharacter, campaign
     return importedCharacter;
   }
   const apiKey = getNetherscrollsApiKey();
+  const guildId = getNetherscrollsRequestGuildId(importedCharacter?.guildId || undefined);
   const endpoint = `${NETHERSCROLLS_CAMPAIGNS_ENDPOINT}/${encodeURIComponent(campaignId)}/characters/${encodeURIComponent(importedCharacter.id)}`;
   debugNetherscrollsCharacterImport("Fetching full native character for Foundry Import.", { campaignId, characterId: importedCharacter.id, endpoint });
-  const data = await fetchNetherscrollsApiJson(endpoint, apiKey);
-  const direct = normalizeNetherscrollsImportedCharacter(data?.data ?? data);
+  const data = await fetchNetherscrollsApiJson(endpoint, apiKey, { guildId });
+  const direct = normalizeNetherscrollsImportedCharacter(data?.data ?? data, { guildId });
   if (!direct?.character) {
     throw new Error("The Foundry Import response did not include a native character payload.");
   }
@@ -3071,7 +3686,9 @@ async function importNetherscrollsCampaignCharacter(importedCharacter, folder, {
     if (netherscrollsCharacterImportLocks.get(characterId) === importPromise) {
       netherscrollsCharacterImportLocks.delete(characterId);
     }
-    scheduleNetherscrollsActorSheetRender(findNetherscrollsActorByCharacterId(characterId));
+    scheduleNetherscrollsActorSheetRender(findNetherscrollsActorByCharacterId(characterId, null, {
+      guildId: importedCharacter?.guildId || undefined,
+    }));
   }
 }
 
@@ -3107,6 +3724,9 @@ async function applyNetherscrollsCampaignCharacter(importedCharacter, folder, { 
   const classSourceCount = itemSources.filter((entry) => entry.dataset === "classes").length;
   const classFeatureSourceCount = itemSources.filter((entry) => entry.dataset === "classFeatures").length;
   const effectSources = buildNetherscrollsPortableActiveEffects(importedCharacter.character);
+  // The guild the character was read from. The Actor keeps it so later exports go
+  // back to this guild, and linked material is resolved in this guild too.
+  const guildId = getNetherscrollsRequestGuildId(importedCharacter?.guildId || undefined);
   actorPayload.type = "character";
   actorPayload.folder = folder.id;
   actorPayload.name = toTrimmedStringOrNull(actorPayload.name) ?? importedCharacter.name;
@@ -3114,6 +3734,7 @@ async function applyNetherscrollsCampaignCharacter(importedCharacter, folder, { 
   actorPayload.flags.netherscrolls = {
     ...(actorPayload.flags.netherscrolls ?? {}),
     characterId,
+    ...(guildId ? { guildId } : {}),
   };
   debugNetherscrollsCharacterImport("Prepared Actor payload for persistence.", {
     characterId,
@@ -3129,6 +3750,7 @@ async function applyNetherscrollsCampaignCharacter(importedCharacter, folder, { 
 
   onProgress?.("resolving items, spells, and features...");
   const content = await resolveNetherscrollsCharacterItemSources(itemSources, {
+    guildId,
     onProgress: (completed, total) => onProgress?.(`looking up imported library content (${completed}/${total})...`),
   });
   await yieldNetherscrollsMainThread();
@@ -3159,7 +3781,7 @@ async function applyNetherscrollsCampaignCharacter(importedCharacter, folder, { 
     fetched: content.fetched,
   });
 
-  let actor = findNetherscrollsActorByCharacterId(characterId, importedCharacter.name);
+  let actor = findNetherscrollsActorByCharacterId(characterId, importedCharacter.name, { guildId });
   const created = !actor;
   if (actor) {
     onProgress?.("updating existing Foundry actor...");
@@ -3197,8 +3819,14 @@ async function applyNetherscrollsCampaignCharacter(importedCharacter, folder, { 
     characterId,
     documentLinks,
   });
-  onProgress?.(`adding or updating ${effectSources.length} effect${effectSources.length === 1 ? "" : "s"}...`);
-  const effectResult = await reconcileNetherscrollsCharacterActorEffects(actor, effectSources, characterId);
+  // A character effect exported from a passive Foundry effect that is still on the actor
+  // (for example an item's own effect) must not be imported again as a second copy.
+  const isForeignMirror = globalThis.NetherscrollsEffects?.foundry?.isForeignMirror;
+  const importedEffectSources = typeof isForeignMirror === "function"
+    ? effectSources.filter((effect) => !isForeignMirror(actor, effect))
+    : effectSources;
+  onProgress?.(`adding or updating ${importedEffectSources.length} effect${importedEffectSources.length === 1 ? "" : "s"}...`);
+  const effectResult = await reconcileNetherscrollsCharacterActorEffects(actor, importedEffectSources, characterId);
   await yieldNetherscrollsMainThread();
   debugNetherscrollsCharacterImport("Reconciled character effects.", { characterId, effectResult });
   let repairedFeatures = 0;
@@ -3318,10 +3946,14 @@ function normalizeNetherscrollsCharacterActorCreationData(actorPayload, characte
       : {};
     delete normalizedAc.value;
     delete normalizedAc.total;
+    // The Netherscrolls effect runtime calculates the final AC (base, DEX cap, armor,
+    // shield, misc, bonus and effects). D&D5e's default calculation is only its fallback;
+    // a flat calculation would hide Foundry AC calculations such as Mage Armor.
     actorPayload.system.attributes.ac = {
       ...normalizedAc,
       flat: Math.trunc(armorClass),
-      calc: "flat",
+      calc: "default",
+      formula: "",
     };
   }
   console.info(`${MODULE_ID} | Foundry Import | ${actorPayload.name ?? "Character"}: armor class ${armorClass > 0 ? armorClass : "not supplied"}.`);
@@ -3737,25 +4369,15 @@ function getNetherscrollsCharacterSkillManualBonus(sourceSkill) {
     toNumber(sourceSkill?.bonuses?.check, 0);
 }
 
-function applyNetherscrollsCharacterEquipmentArmorClass(actorPayload, character, items, actorEffects = []) {
-  const hasArmor = items.some(item => item.type === "equipment" && item.system?.equipped &&
-    ["light", "medium", "heavy"].includes(item.system?.type?.value));
-  if (!hasArmor) return;
-  const effects = [...actorEffects, ...items.flatMap(item => item.effects ?? [])];
-  // An explicit native total override must still win over equipment calculation.
-  if (effects.some(effect => !effect.disabled && effect.transfer !== false &&
-    effect.changes?.some(change => change.key === "system.attributes.ac.flat" && change.mode === 5))) return;
-  const components = [character?.armorClass?.misc ?? 0, character?.armorClass?.bonus ?? 0];
-  if (!components.every(value => Number.isFinite(Number(value)))) {
-    // The native runtime resolves formulas after all equipment and effects exist.
-    actorPayload.system.attributes.ac.calc = "default";
-    return;
-  }
-  const manual = components.reduce((sum, value) => sum + Number(value), 0);
+function applyNetherscrollsCharacterEquipmentArmorClass(actorPayload) {
+  // The Netherscrolls effect runtime owns AC on imported characters: equipped armor and
+  // shield, the DEX cap, misc/bonus formulas and every effect. Baking misc/bonus into a
+  // custom D&D5e formula would count them twice, so keep D&D5e's default calculation.
+  actorPayload.system.attributes ??= {};
   actorPayload.system.attributes.ac = {
-    ...actorPayload.system.attributes.ac,
-    calc: manual ? "custom" : "default",
-    formula: manual ? `@attributes.ac.armor + @attributes.ac.dex + (${manual})` : "",
+    ...(actorPayload.system.attributes.ac ?? {}),
+    calc: "default",
+    formula: "",
   };
 }
 
@@ -3808,10 +4430,16 @@ function getWorldActors() {
   return [];
 }
 
-function findNetherscrollsActorByCharacterId(characterId, characterName = null) {
+function findNetherscrollsActorByCharacterId(characterId, characterName = null, { guildId = undefined } = {}) {
   const id = normalizeNetherscrollsReferenceValue(characterId);
   if (!id) return null;
-  const actors = getWorldActors();
+  // Character ids exist only inside their own guild: an Actor tagged with another
+  // guild is never the same character, even with the same id or name.
+  const guild = getNetherscrollsRequestGuildId(guildId);
+  const actors = getWorldActors().filter((actor) => {
+    const actorGuild = getActorNetherscrollsGuildId(actor);
+    return !guild || !actorGuild || actorGuild === guild;
+  });
   const linked = actors.find((actor) => String(getActorCharacterId(actor) ?? "") === id);
   if (linked) return linked;
   const normalizeName = (name) => String(name ?? "").normalize("NFC").trim().replace(/\s+/g, " ").toLowerCase();
@@ -3953,10 +4581,10 @@ function getNetherscrollsCharacterItemDataset(source, fallback = null) {
   return "items";
 }
 
-async function resolveNetherscrollsCharacterItemSources(sources, { onProgress = null } = {}) {
+async function resolveNetherscrollsCharacterItemSources(sources, { onProgress = null, guildId = undefined } = {}) {
   const items = [];
   let fetched = 0;
-  try { fetched = await importMissingNetherscrollsCharacterDocuments(sources); }
+  try { fetched = await importMissingNetherscrollsCharacterDocuments(sources, { guildId }); }
   catch (error) {
     if ([401, 403].includes(error?.status)) throw error;
     reportNetherscrollsTransferItemError("Library lookup", error);
@@ -4028,7 +4656,7 @@ async function resolveNetherscrollsCharacterItemSource(
   return { item };
 }
 
-async function fetchNetherscrollsCharacterSelection(selection) {
+async function fetchNetherscrollsCharacterSelection(selection, { guildId = undefined } = {}) {
   const entries = Object.entries(selection).flatMap(([dataset, ids]) => [...new Set(ids)].map(id => ({ dataset, id })));
   const result = { data: {} };
   const read = async entries => {
@@ -4036,7 +4664,7 @@ async function fetchNetherscrollsCharacterSelection(selection) {
     for (const { dataset, id } of entries) (body[dataset] ??= []).push(id);
     try {
       const response = await requestNetherscrollsJson(NETHERSCROLLS_IMPORT_SELECTION_ENDPOINT, {
-        method: "POST", apiKey: getNetherscrollsApiKey(), body, operation: "Character material lookup",
+        method: "POST", apiKey: getNetherscrollsApiKey(), guildId, body, operation: "Character material lookup",
       });
       for (const dataset of Object.keys(body)) (result.data[dataset] ??= []).push(...(getNetherscrollsResponseDataset(response, dataset) ?? []));
     } catch (error) {
@@ -4050,7 +4678,8 @@ async function fetchNetherscrollsCharacterSelection(selection) {
   return result;
 }
 
-async function importMissingNetherscrollsCharacterDocuments(sources) {
+async function importMissingNetherscrollsCharacterDocuments(sources, { guildId = undefined } = {}) {
+  const guildScope = getNetherscrollsRequestGuildId(guildId);
   const supportedDatasets = new Set([
     "items",
     "feats",
@@ -4083,7 +4712,7 @@ async function importMissingNetherscrollsCharacterDocuments(sources) {
   }
   const unique = [];
   for (const entry of candidates) {
-    const cacheKey = `${entry.dataset}:${entry.id}`;
+    const cacheKey = `${guildScope}:${entry.dataset}:${entry.id}`;
     const refreshedAt = netherscrollsCharacterSelectionRefreshes.get(cacheKey) ?? 0;
     if (now - refreshedAt >= NETHERSCROLLS_CHARACTER_SELECTION_CACHE_TTL_MS) {
       unique.push(entry);
@@ -4105,7 +4734,7 @@ async function importMissingNetherscrollsCharacterDocuments(sources) {
       selection[dataset] ??= [];
       selection[dataset].push(id);
     }
-    const response = await fetchNetherscrollsCharacterSelection(selection);
+    const response = await fetchNetherscrollsCharacterSelection(selection, { guildId: guildScope });
     // Apply records independently; a bad record must not remove a working cached definition.
     for (const dataset of Object.keys(selection)) {
       for (const row of getNetherscrollsResponseDataset(response, dataset) ?? []) {
@@ -4115,7 +4744,7 @@ async function importMissingNetherscrollsCharacterDocuments(sources) {
     }
     for (const entry of chunk) {
       const document = await findNetherscrollsCompendiumDocumentById(entry.dataset, entry.id);
-      const cacheKey = `${entry.dataset}:${entry.id}`;
+      const cacheKey = `${guildScope}:${entry.dataset}:${entry.id}`;
       if (document && !isStaleNetherscrollsCharacterLibraryDocument(document, entry.dataset)) {
         netherscrollsCharacterSelectionRefreshes.set(cacheKey, Date.now());
       } else {
@@ -5038,6 +5667,13 @@ Hooks.once("ready", async () => {
   initEnhanceDialogInputHandlers();
   initChatNumberActionHandlers();
   placeExistingNetherscrollsImportPacksInSidebarFolder();
+  // Check the world's guild once, quietly: warn if access was removed, and pick the
+  // only guild automatically. Several guilds wait for the import / export window.
+  if (game.user?.isGM && isPrimaryNetherscrollsQueuePoller() && getNetherscrollsApiKey()) {
+    resolveNetherscrollsGuild().catch((err) => {
+      console.warn(`${MODULE_ID} | Unable to check the Netherscrolls guild at startup.`, err);
+    });
+  }
   toggleNetherscrollsImportQueuePolling(
     game.settings.get(MODULE_ID, SETTINGS.importQueuePolling) === true
   );
@@ -5225,7 +5861,7 @@ function getSelectedNetherscrollsSourceValues(formData) {
   );
 }
 
-async function buildNetherscrollsImportRequests({ apiKey, selectedTypes, sinceDate, selectedSources = [] }) {
+async function buildNetherscrollsImportRequests({ apiKey, selectedTypes, sinceDate, selectedSources = [], guildId = undefined }) {
   if (selectedSources.length) {
     return selectedTypes
       .filter((type) => NETHERSCROLLS_IMPORT_ENDPOINTS[type.key])
@@ -5235,6 +5871,7 @@ async function buildNetherscrollsImportRequests({ apiKey, selectedTypes, sinceDa
           typeKey: type.key,
           selectedSources,
           sinceDate,
+          guildId,
         })
       )
       .filter(Boolean);
@@ -5246,6 +5883,7 @@ async function buildNetherscrollsImportRequests({ apiKey, selectedTypes, sinceDa
         apiKey,
         typeKey: type.key,
         sinceDate,
+        guildId,
       })
     )
     .filter(Boolean);
@@ -5256,6 +5894,7 @@ function buildNetherscrollsSourceImportRequest({
   typeKey,
   selectedSources,
   sinceDate,
+  guildId = undefined,
 }) {
   const url = new URL(NETHERSCROLLS_SOURCE_IMPORT_ENDPOINT);
   for (const source of selectedSources) {
@@ -5268,13 +5907,11 @@ function buildNetherscrollsSourceImportRequest({
     typeKey,
     typeKeys: [typeKey],
     sourceFiltered: true,
+    guildId: getNetherscrollsRequestGuildId(guildId),
     url: url.toString(),
     options: {
       method: "GET",
-      headers: {
-        Accept: "application/json",
-        "x-api-key": apiKey,
-      },
+      headers: buildNetherscrollsApiHeaders({ apiKey, guildId }),
     },
     payload: {
       dataset: typeKey,
@@ -5297,7 +5934,7 @@ function getNetherscrollsSourceImportDataset(typeKey) {
   return datasets[typeKey] ?? typeKey;
 }
 
-function buildNetherscrollsImportRequest({ apiKey, typeKey, sinceDate }) {
+function buildNetherscrollsImportRequest({ apiKey, typeKey, sinceDate, guildId = undefined }) {
   const endpoint = NETHERSCROLLS_IMPORT_ENDPOINTS[typeKey];
   if (!endpoint) return null;
 
@@ -5306,13 +5943,11 @@ function buildNetherscrollsImportRequest({ apiKey, typeKey, sinceDate }) {
 
   return {
     typeKey,
+    guildId: getNetherscrollsRequestGuildId(guildId),
     url: url.toString(),
     options: {
       method: "GET",
-      headers: {
-        Accept: "application/json",
-        "x-api-key": apiKey,
-      },
+      headers: buildNetherscrollsApiHeaders({ apiKey, guildId }),
     },
     payload: {
       dataset: typeKey,
@@ -5408,13 +6043,7 @@ async function sendNetherscrollsImportRequest(importRequest) {
   const response = await fetch(importRequest.url, importRequest.options);
   const data = await response.json().catch(() => null);
   if (!response.ok) {
-    const message =
-      data?.error?.message ??
-      data?.message ??
-      `Import failed (${response.status} ${response.statusText}).`;
-    const error = new Error(message);
-    error.code = data?.error?.code ?? null;
-    throw error;
+    throw await buildNetherscrollsApiError(response, data, "Import", importRequest.guildId ?? "");
   }
 
   return data;
@@ -12398,7 +13027,20 @@ function injectFoundryExportButtonV2(app, element) {
 async function exportActorToNetherscrolls(actor) {
   if (!actor) return;
   const actorName = toTrimmedStringOrNull(actor.name) ?? "your character";
-  ui?.notifications?.info?.(`Sending ${actorName} through the Netherscrolls...`);
+  if (!getNetherscrollsApiKey()) {
+    ui?.notifications?.warn?.("Netherscrolls API Key is missing. Set it in Module Settings.");
+    return;
+  }
+  // An Actor always returns to the guild it came from.
+  let guildId;
+  try {
+    guildId = await resolveNetherscrollsActorGuildId(actor);
+  } catch (err) {
+    ui?.notifications?.warn?.(`Foundry Export: ${err?.message ?? err}`);
+    throw err;
+  }
+  const guildName = getNetherscrollsGuildName(guildId);
+  ui?.notifications?.info?.(`Sending ${actorName} through the Netherscrolls${guildName ? ` (${guildName})` : ""}...`);
   try {
     const repairResult = await repairNetherscrollsActorClassFeatures(actor, { notify: false });
     if (repairResult.created > 0) {
@@ -12422,6 +13064,7 @@ async function exportActorToNetherscrolls(actor) {
   let payload;
   try {
     payload = await prepareNetherscrollsFoundryExportImages(actor, exportPayload, {
+      guildId,
       onImageProgress: ({ label }) => {
         preparedImageCount += 1;
         ui?.notifications?.info?.(`${actorName}: moving image ${preparedImageCount} of ${imageJobs.length} (${label})...`);
@@ -12446,7 +13089,7 @@ async function exportActorToNetherscrolls(actor) {
       console.warn(`${MODULE_ID} | Unable to post Foundry Export debug payload.`, err);
     }
   }
-  return sendFoundryActorExport(actor, payload);
+  return sendFoundryActorExport(actor, payload, { guildId });
 }
 
 async function importActorFromNetherscrolls(actor) {
@@ -12462,7 +13105,12 @@ async function importActorFromNetherscrolls(actor) {
 
   try {
     ui?.notifications?.info?.(`Foundry Import: locating ${actor.name ?? "character"}...`);
-    const resolved = await findNetherscrollsCampaignCharacterById(characterId);
+    // The character lives in the guild the Actor came from.
+    const guildId = await resolveNetherscrollsActorGuildId(actor);
+    const resolved = await findNetherscrollsCampaignCharacterById(characterId, {
+      guildId,
+      campaignId: actor?.flags?.[MODULE_ID]?.nativeCharacter?.campaignId ?? actor?.flags?.netherscrolls?.campaignId,
+    });
     const importedCharacter = await hydrateNetherscrollsImportedCharacter(
       resolved.character,
       resolved.campaignId
@@ -12481,17 +13129,34 @@ async function importActorFromNetherscrolls(actor) {
   }
 }
 
-async function findNetherscrollsCampaignCharacterById(characterId) {
+async function findNetherscrollsCampaignCharacterById(characterId, { guildId = undefined, campaignId = null } = {}) {
   const canonicalCharacterId = normalizeNetherscrollsReferenceValue(characterId);
   if (!canonicalCharacterId) throw new Error("A Netherscrolls character id is required for Foundry Import.");
+  const requestGuildId = getNetherscrollsRequestGuildId(guildId);
 
-  const campaigns = await fetchNetherscrollsCampaigns();
+  // The character's own campaign answers with one request; fall back to a search
+  // when it moved or the stored campaign is unknown.
+  const knownCampaignId = normalizeNetherscrollsReferenceValue(campaignId);
+  if (knownCampaignId) {
+    try {
+      const endpoint = `${NETHERSCROLLS_CAMPAIGNS_ENDPOINT}/${encodeURIComponent(knownCampaignId)}/characters/${encodeURIComponent(canonicalCharacterId)}`;
+      const data = await fetchNetherscrollsApiJson(endpoint, getNetherscrollsApiKey(), { guildId: requestGuildId });
+      const character = normalizeNetherscrollsImportedCharacter(data?.data ?? data, { guildId: requestGuildId });
+      if (character?.id === canonicalCharacterId) return { campaignId: knownCampaignId, character };
+    } catch (err) {
+      if (err?.status !== 404 && err?.status !== 403) throw err;
+    }
+  }
+
+  const campaigns = await fetchNetherscrollsCampaigns({ guildId: requestGuildId });
   for (const campaign of campaigns) {
-    const characters = await fetchNetherscrollsCampaignCharacters(campaign.id);
+    if (campaign.id === knownCampaignId) continue;
+    const characters = await fetchNetherscrollsCampaignCharacters(campaign.id, { guildId: requestGuildId });
     const character = characters.find((entry) => entry.id === canonicalCharacterId);
     if (character) return { campaignId: campaign.id, character };
   }
-  throw new Error("The linked Netherscrolls character is not available in any campaign accessible to this API key.");
+  const guildName = getNetherscrollsGuildName(requestGuildId);
+  throw new Error(`The linked Netherscrolls character is not available in any campaign you manage${guildName ? ` in ${guildName}` : ""}.`);
 }
 
 function queueNetherscrollsClassFeatureRepairForItem(item, { delay = 150 } = {}) {
@@ -13017,9 +13682,16 @@ function buildFoundryExportPayload(actor) {
   const ignoredIds = new Set(sourceItems.filter((item) =>
     ["race", "class", "subclass"].includes(item.type) || isNetherscrollsExcludedExportFeature(item)
   ).map((item) => item._id).filter(Boolean));
-  const activeBonuses = extractNetherscrollsPortableActiveBonuses((sourceActor.effects ?? []).filter((effect) =>
-    effect.flags?.[MODULE_ID]?.nsRuntimeEffect || !ignoredIds.has(String(effect.origin ?? "").split(".Item.")[1]?.split(".")[0])
+  // Passive effects are exported; active ones (applied through an activity) stay in
+  // Foundry. Foundry-authored passive effects are translated by the effect runtime, and
+  // their earlier Netherscrolls copies are replaced rather than sent twice.
+  const effectRuntime = globalThis.NetherscrollsEffects?.foundry;
+  const nativeBonuses = extractNetherscrollsPortableActiveBonuses((sourceActor.effects ?? []).filter((effect) =>
+    !effect.flags?.[MODULE_ID]?.appliedActivation &&
+    !effectRuntime?.isForeignMirror?.(actor, effect) &&
+    (effect.flags?.[MODULE_ID]?.nsRuntimeEffect || !ignoredIds.has(String(effect.origin ?? "").split(".Item.")[1]?.split(".")[0]))
   ));
+  const activeBonuses = [...nativeBonuses, ...(effectRuntime?.exportEffects?.(actor) ?? [])];
   const items = sourceItems.filter((item) => (
     item?.flags?.[MODULE_ID]?.nativeCharacterResource !== true && !isNetherscrollsExcludedExportFeature(item)
   )).map((item) => ["race", "class", "subclass"].includes(item.type)
@@ -13061,10 +13733,37 @@ function buildFoundryExportPayload(actor) {
     },
     netherscrolls: {
       ...buildNetherscrollsExportPlayState(sourceActor, preparedSystem),
+      // Netherscrolls stores the BASE armor class and adds DEX, the equipped armor and
+      // shield and every effect itself. Without an explicit base the API would store
+      // Foundry's calculated total, and that total would be counted again on the sheet.
+      armorClass: getNetherscrollsExportArmorClassBase(actor),
       ...(globalThis.NetherscrollsEffects.foundry?.exportState(actor) ?? {}),
       ...(activeBonuses.length || sourceActor.flags?.[MODULE_ID]?.nativeCharacter ? { effects: activeBonuses, activeBonuses } : {}),
     },
   };
+}
+
+// Base AC of an Actor not imported from Netherscrolls (imported Actors export their
+// native armorClass block instead): the unarmored or flat base, never the total.
+// With body armor equipped the Netherscrolls sheet uses that armor's own value.
+function getNetherscrollsExportArmorClassBase(actor) {
+  const ac = actor?.system?.attributes?.ac ?? {};
+  const sourceAc = actor?._source?.system?.attributes?.ac ?? actor?.toObject?.()?.system?.attributes?.ac ?? {};
+  const calc = toTrimmedStringOrNull(ac.calc ?? sourceAc.calc) ?? "default";
+  const dexMod = toNumber(actor?.system?.abilities?.dex?.mod, 0);
+  const wearsArmor = getNetherscrollsActorItems(actor).some((item) => item?.type === "equipment" &&
+    item.system?.equipped === true && ["light", "medium", "heavy"].includes(item.system?.type?.value));
+  let value = 10;
+  let maxDexBonus;
+  if (calc === "flat" || calc === "natural") {
+    // Flat and natural armor already are the whole base; DEX is not added to them.
+    value = toNumber(sourceAc.flat ?? ac.flat, 10);
+    maxDexBonus = 0;
+  } else if (calc !== "default" && !wearsArmor && Number.isFinite(Number(ac.base))) {
+    // Mage Armor, unarmored defense, custom formulas: D&D5e's base includes DEX.
+    value = Number(ac.base) - dexMod;
+  }
+  return { value: Math.trunc(value), ...(maxDexBonus === undefined ? {} : { maxDexBonus }) };
 }
 
 function buildNetherscrollsCharacterSystemProjection(system = null) {
@@ -13207,7 +13906,7 @@ async function buildNetherscrollsImageReadyFoundryExportPayload(actor, options =
 async function prepareNetherscrollsFoundryExportImages(
   actor,
   payload,
-  { apiKey = getNetherscrollsApiKey(), cache = new Map(), onImageProgress = null } = {}
+  { apiKey = getNetherscrollsApiKey(), cache = new Map(), onImageProgress = null, guildId = undefined } = {}
 ) {
   const actorData = payload?.actor;
   if (!actorData || typeof actorData !== "object") return payload;
@@ -13217,6 +13916,7 @@ async function prepareNetherscrollsFoundryExportImages(
   try {
   await replaceNetherscrollsExportImage(actor, actorData, {
     apiKey,
+    guildId,
     cache,
     label: `${actorData.name ?? actor?.name ?? "character"} portrait`,
     isCharacter: true,
@@ -13227,6 +13927,7 @@ async function prepareNetherscrollsFoundryExportImages(
   }
   await replaceNetherscrollsExportActorTokenImage(actor, actorData, payload?.preparedActor, {
     apiKey,
+    guildId,
     cache,
     label: `${actorData.name ?? actor?.name ?? "character"} token`,
     onImageProgress,
@@ -13243,6 +13944,7 @@ async function prepareNetherscrollsFoundryExportImages(
     try {
     await replaceNetherscrollsExportImage(itemsById.get(foundryId) ?? null, itemData, {
       apiKey,
+      guildId,
       cache,
       label: itemData.name ?? itemData.type ?? "item",
       onImageProgress,
@@ -13287,7 +13989,7 @@ function isNetherscrollsFoundryExportUploadCandidate(value) {
     isFoundryServerImageReference(image)
   );
 }
-async function replaceNetherscrollsExportImage(document, data, { apiKey, cache, label, isCharacter = false, onImageProgress = null }) {
+async function replaceNetherscrollsExportImage(document, data, { apiKey, guildId = undefined, cache, label, isCharacter = false, onImageProgress = null }) {
   const image = toTrimmedStringOrNull(data?.img);
   if (!image || image === NETHERSCROLLS_DEFAULT_IMAGE || isNetherscrollsExportSvg(image)) return;
 
@@ -13302,7 +14004,7 @@ async function replaceNetherscrollsExportImage(document, data, { apiKey, cache, 
   const cacheKey = `${module}:${image}`;
   const cachedUpload = cachedImage || cache.get(cacheKey);
   if (!cachedUpload) onImageProgress?.({ label, module });
-  const uploadedImage = cachedUpload || await uploadNetherscrollsExportImage(image, { apiKey, label, module });
+  const uploadedImage = cachedUpload || await uploadNetherscrollsExportImage(image, { apiKey, guildId, label, module });
   cache.set(cacheKey, uploadedImage);
 
   data.img = uploadedImage.url;
@@ -13310,7 +14012,7 @@ async function replaceNetherscrollsExportImage(document, data, { apiKey, cache, 
   await cacheNetherscrollsExportImage(document, image, uploadedImage, { isCharacter });
 }
 
-async function replaceNetherscrollsExportActorTokenImage(actor, actorData, preparedActor, { apiKey, cache, label, onImageProgress = null }) {
+async function replaceNetherscrollsExportActorTokenImage(actor, actorData, preparedActor, { apiKey, guildId = undefined, cache, label, onImageProgress = null }) {
   const image = toTrimmedStringOrNull(actorData?.prototypeToken?.texture?.src);
   if (!isNetherscrollsFoundryExportUploadCandidate(image)) return;
 
@@ -13319,6 +14021,7 @@ async function replaceNetherscrollsExportActorTokenImage(actor, actorData, prepa
   if (!cachedUpload) onImageProgress?.({ label, module: "characters" });
   const uploadedImage = cachedUpload || await uploadNetherscrollsExportImage(image, {
     apiKey,
+    guildId,
     label,
     module: "characters",
   });
@@ -13404,7 +14107,7 @@ function getNetherscrollsExportImageModule(data, isCharacter) {
 }
 
 
-async function uploadNetherscrollsExportImage(image, { apiKey, label, module }) {
+async function uploadNetherscrollsExportImage(image, { apiKey, label, module, guildId = undefined }) {
   if (!apiKey) throw new Error("Netherscrolls API Key is missing. Set it in Module Settings.");
   const imageResponse = await fetch(image);
   if (!imageResponse?.ok) {
@@ -13416,17 +14119,19 @@ async function uploadNetherscrollsExportImage(image, { apiKey, label, module }) 
   formData.append("image", blob, getNetherscrollsExportImageFilename(image, blob?.type));
   formData.append("module", module);
   formData.append("sha256", sha256);
+  formData.append("sourceRef", image);
 
+  // Images belong to a guild: upload in the same guild as the export that uses them.
+  // No Content-Type header: the browser adds the multipart boundary.
+  const requestGuildId = getNetherscrollsRequestGuildId(guildId);
   const response = await fetch(NETHERSCROLLS_MEDIA_IMAGE_ENDPOINT, {
     method: "POST",
-    headers: { Accept: "application/json", "x-api-key": apiKey },
+    headers: buildNetherscrollsApiHeaders({ apiKey, guildId: requestGuildId }),
     body: formData,
   });
   const result = await response.json().catch(() => null);
   if (!response.ok) {
-    throw new Error(
-      result?.error?.message ?? result?.message ?? `Netherscrolls image upload failed for ${label ?? "this export"}.`
-    );
+    throw await buildNetherscrollsApiError(response, result, `Image upload for ${label ?? "this export"}`, requestGuildId);
   }
   const key = toTrimmedStringOrNull(result?.data?.key ?? result?.key);
   if (!key) throw new Error(`Netherscrolls did not return an image key for ${label ?? "this export"}.`);
@@ -13572,18 +14277,23 @@ function getActorCharacterId(actor) {
   return normalizeNetherscrollsReferenceValue(actor?.flags?.netherscrolls?.characterId);
 }
 
-async function setActorCharacterId(actor, characterId) {
+// Links an Actor to its Netherscrolls character and, in guild mode, to the guild
+// that character lives in (flags.netherscrolls.guildId, a module-side convention).
+async function setActorCharacterId(actor, characterId, { guildId = undefined } = {}) {
   try {
     const canonicalId = normalizeNetherscrollsReferenceValue(characterId);
     if (!actor?.update || !canonicalId) return;
+    const canonicalGuildId = guildId === undefined ? "" : normalizeNetherscrollsGuildId(guildId);
     const current = normalizeNetherscrollsReferenceValue(
       actor?.flags?.netherscrolls?.characterId
     );
-    if (current === canonicalId) return;
+    const currentGuildId = getActorNetherscrollsGuildId(actor);
+    if (current === canonicalId && (!canonicalGuildId || currentGuildId === canonicalGuildId)) return;
     const flags = duplicateNetherscrollsData(actor?.flags ?? {});
     flags.netherscrolls = {
       ...(flags.netherscrolls ?? {}),
       characterId: canonicalId,
+      ...(canonicalGuildId ? { guildId: canonicalGuildId } : {}),
     };
     await actor.update({ flags }, { render: false });
   } catch (err) {
@@ -13608,7 +14318,7 @@ function reportNetherscrollsExportWarnings(actor, response) {
   return true;
 }
 
-async function sendFoundryActorExport(actor, payload = null) {
+async function sendFoundryActorExport(actor, payload = null, { guildId = undefined } = {}) {
   const apiKey = getNetherscrollsApiKey();
   if (!apiKey) {
     ui?.notifications?.warn?.(
@@ -13617,13 +14327,14 @@ async function sendFoundryActorExport(actor, payload = null) {
     throw new Error("Netherscrolls API Key is missing.");
   }
 
-  if (!payload) payload = await buildNetherscrollsImageReadyFoundryExportPayload(actor);
-
   try {
+    if (guildId === undefined) guildId = await resolveNetherscrollsActorGuildId(actor);
+    if (!payload) payload = await buildNetherscrollsImageReadyFoundryExportPayload(actor, { guildId });
     await yieldNetherscrollsMainThread();
     const data = await requestNetherscrollsJson(NETHERSCROLLS_EXPORT_ENDPOINT, {
       method: "POST",
       apiKey,
+      guildId,
       body: payload,
       operation: "Foundry Export",
     });
@@ -13635,7 +14346,12 @@ async function sendFoundryActorExport(actor, payload = null) {
         content: responseContent,
       });
     }
-    await applyFoundryExportCanonicalIds(actor, data);
+    // A linked Actor is expected to match by id; anything else means the guild found
+    // the character by its Foundry id or name, which is worth a look (cookbook).
+    if (getActorCharacterId(actor) && data?.data?.matchedBy && data.data.matchedBy !== "id") {
+      ui?.notifications?.warn?.(`${actor?.name ?? "Character"} matched by ${data.data.matchedBy}, not by id. Check that it went to the right guild.`);
+    }
+    await applyFoundryExportCanonicalIds(actor, data, { guildId });
     scheduleNetherscrollsActorSheetRender(actor);
     const name = data?.data?.name ?? actor?.name ?? "actor";
     if (!reportNetherscrollsExportWarnings(actor, data)) {
@@ -13649,11 +14365,14 @@ async function sendFoundryActorExport(actor, payload = null) {
   }
 }
 
-async function exportNetherscrollsCampaignActors(campaignId, actors, { retryFailedOnce = true } = {}) {
+// A campaign belongs to one guild, so a batch is sent to that guild only.
+async function exportNetherscrollsCampaignActors(campaignId, actors, { retryFailedOnce = true, guildId = undefined } = {}) {
   const canonicalCampaignId = normalizeNetherscrollsReferenceValue(campaignId);
   if (!canonicalCampaignId) throw new Error("A Netherscrolls campaign id is required for batch Foundry Export.");
   const apiKey = getNetherscrollsApiKey();
   if (!apiKey) throw new Error("Netherscrolls API Key is missing. Set it in Module Settings.");
+  const requestGuildId = getNetherscrollsRequestGuildId(guildId);
+  const nonRetryableFailures = [];
 
   let pending = Array.from(actors ?? [])
     .map((candidate, originalIndex) => {
@@ -13667,6 +14386,21 @@ async function exportNetherscrollsCampaignActors(campaignId, actors, { retryFail
       if (characterId && linkedId && characterId !== linkedId) {
         throw new Error(`${actor.name}: this Actor is already linked to another Netherscrolls character.`);
       }
+      // An Actor from another guild must never be written into this guild.
+      const actorGuildId = getActorNetherscrollsGuildId(actor);
+      if (requestGuildId && actorGuildId && actorGuildId !== requestGuildId) {
+        const actorGuildName = getNetherscrollsGuildName(actorGuildId) || "another guild";
+        nonRetryableFailures.push({
+          actor,
+          originalIndex,
+          characterId,
+          error: {
+            code: "NETHERSCROLLS_ACTOR_OTHER_GUILD",
+            message: `${actor.name} belongs to ${actorGuildName}; switch to that guild to send it.`,
+          },
+        });
+        return null;
+      }
       return {
         actor,
         originalIndex,
@@ -13675,12 +14409,11 @@ async function exportNetherscrollsCampaignActors(campaignId, actors, { retryFail
       };
     })
     .filter(Boolean);
-  if (!pending.length) throw new Error("No Foundry character Actors were selected for Export.");
+  if (!pending.length && !nonRetryableFailures.length) throw new Error("No Foundry character Actors were selected for Export.");
   if (pending.length > 100) throw new Error("Foundry Export supports at most 100 characters per campaign batch.");
 
   const succeeded = [];
   let failed = [];
-  const nonRetryableFailures = [];
   const imageUploadCache = new Map();
   const maximumAttempts = retryFailedOnce ? 2 : 1;
   for (let attempt = 1; attempt <= maximumAttempts && pending.length; attempt += 1) {
@@ -13689,6 +14422,7 @@ async function exportNetherscrollsCampaignActors(campaignId, actors, { retryFail
     for (const entry of pending) {
       entry.payload ??= await buildNetherscrollsImageReadyFoundryExportPayload(entry.actor, {
         apiKey,
+        guildId: requestGuildId,
         cache: imageUploadCache,
       });
       if (entry.syncToken) entry.payload.syncToken = entry.syncToken;
@@ -13703,6 +14437,7 @@ async function exportNetherscrollsCampaignActors(campaignId, actors, { retryFail
     const { data: responseBody, status } = await requestNetherscrollsJson(endpoint, {
       method: "POST",
       apiKey,
+      guildId: requestGuildId,
       body: requestPayload,
       operation: "Campaign Foundry Export",
       includeStatus: true,
@@ -13737,7 +14472,7 @@ async function exportNetherscrollsCampaignActors(campaignId, actors, { retryFail
         continue;
       }
       reportNetherscrollsExportWarnings(pendingEntry.actor, result);
-      await applyFoundryExportCanonicalIds(pendingEntry.actor, result);
+      await applyFoundryExportCanonicalIds(pendingEntry.actor, result, { guildId: requestGuildId });
       scheduleNetherscrollsActorSheetRender(pendingEntry.actor);
       succeeded.push({
         actor: pendingEntry.actor,
@@ -13905,10 +14640,10 @@ async function rollNpcDeathSave(actor) {
   });
 }
 
-async function applyFoundryExportCanonicalIds(actor, response) {
+async function applyFoundryExportCanonicalIds(actor, response, { guildId = undefined } = {}) {
   if (!actor || !response) return;
   const characterId = normalizeNetherscrollsReferenceValue(response?.data?.characterId);
-  if (characterId) await setActorCharacterId(actor, characterId);
+  if (characterId) await setActorCharacterId(actor, characterId, { guildId });
 
   const repairs = [
     ...collectFoundryExportItemRepairs(response?.linked),
