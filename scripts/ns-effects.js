@@ -597,10 +597,30 @@
     const ownerEntries = owner => list(owner.effects).length || Array.isArray(owner.effects) ? list(owner.effects) : list(owner.activeBonuses ?? owner.activeEffects);
     const hasNativeDefinitions = owners.some(owner => ownerEntries(owner).some(entry => entry?.stat)) ||
       projections.some(projection => projection.flags?.netherscrolls?.nativeEffect);
-    // Foundry-authored effects are kept. Passive ones are dropped only when native
-    // definitions exist, because the API projects those definitions as Foundry effects too.
-    const retained = original.filter(e => !isNative(e) && (e.transfer === false || linked.has(e._id) || !hasNativeDefinitions))
-      .map(e => ({ ...clone(e), transfer: e.transfer === false || linked.has(e._id) ? false : e.transfer ?? true }));
+    // Replace only numerical changes owned by a native definition. A resistance,
+    // language, status or unrelated bonus on the same item must survive.
+    const ownershipTarget = stat => canonicalTarget(stat).replace(/\.(misc|bonus)$/, "");
+    const ownedTargets = new Set(owners.flatMap(owner => ownerEntries(owner)).filter(e => e?.stat)
+      .concat(projections.map(e => e.flags?.netherscrolls?.nativeEffect).filter(Boolean))
+      .flatMap(e => {
+        const target = ownershipTarget(e.stat);
+        return target === "savingThrows.all" ? ABILITIES.map(a => `savingThrows.${a}`) : [target];
+      }));
+    const mirrored = change => {
+      const targets = change.key === "system.bonuses.abilities.save"
+        ? ABILITIES.map(a => ({ stat: `savingThrows.${a}` })) : foundryTargets(change.key);
+      return targets?.length && targets.every(t => ownedTargets.has(ownershipTarget(t.stat)));
+    };
+    const retained = original.filter(e => !isNative(e)).map(e => {
+      const result = clone(e);
+      result.transfer = e.transfer === false || linked.has(e._id) ? false : e.transfer ?? true;
+      if (hasNativeDefinitions && result.transfer) {
+        for (const container of [result, result.system].filter(Boolean)) {
+          if (Array.isArray(container.changes)) container.changes = container.changes.filter(change => !mirrored(change));
+        }
+      }
+      return result;
+    });
     const translated = new Map();
     for (const owner of owners) {
       for (const entry of ownerEntries(owner)) {
@@ -610,6 +630,7 @@
         const featureId = owner === source ? flags?.featureId ?? "" : owner.id ?? owner._id ?? owner.name ?? owner.title ?? "";
         const application = owner.effectApplication ?? flags?.effectApplication ?? { mode: "passive", requirement: "selected" };
         const effect = createEffect(entry, { sourceId: flags?.sourceId ?? sourceId, featureId, application, projection, name: owner.name ?? owner.title });
+        if (owner.subtype === "profFeature") effect.flags[MODULE].proficiencyFeature = true;
         translated.set(effect.flags[MODULE].effectKey, effect);
         if (application.mode === "activated") {
           let activity = activities.find(a => {
@@ -629,7 +650,7 @@
       }
     }
     // Feature-only projections carry native definitions when the outer payload does not.
-    if (!Array.isArray(source.features)) for (const projection of projections) {
+    if (!Array.isArray(source.features) && !Array.isArray(source.effects)) for (const projection of projections) {
       const flags = projection.flags?.netherscrolls;
       if (!flags?.nativeEffect) continue;
       if ([...translated.values()].some(e => e.flags.netherscrolls.nativeEffect._id === flags.nativeEffect._id)) continue;

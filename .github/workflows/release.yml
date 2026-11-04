@@ -35,9 +35,12 @@ jobs:
         if: env.SKIP_RELEASE != 'true'
         shell: bash
         run: |
-          zip -r Netherscrolls_Module.zip . \
-            -x ".git/*" \
-            -x ".github/*"
+          zip -r Netherscrolls_Module.zip \
+            module.json index.js Elturian_grey.webp \
+            lang styles templates \
+            scripts/ns-effects.js \
+            scripts/ns-effects-foundry.js \
+            scripts/ns-features.js
 
       - name: Publish release
         if: env.SKIP_RELEASE != 'true'

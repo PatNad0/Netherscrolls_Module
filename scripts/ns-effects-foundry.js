@@ -103,6 +103,13 @@
       const flags = effect.flags?.netherscrolls;
       const native = flags?.nativeEffect ?? effect.flags?.[MODULE]?.nativeActiveBonus;
       if (!native?.stat || effect.disabled || native.active === false || !NS.eligible(flags?.effectApplication, item)) return;
+      if (item && effect.flags?.[MODULE]?.proficiencyFeature &&
+          /^(skills|savingThrows|tools)\.[A-Za-z0-9]+\.prof(?:\.totalOverride)?$/.test(native.stat)) {
+        const character = nativeFlags(actor);
+        const reconciled = character?.featureSelectionState || list(character?.featureSelectionGrants).some(grant =>
+          grant.featureId === flags.featureId && grant.type === "proficiency");
+        if (reconciled) return;
+      }
       if (native.expiresAt && Date.parse(native.expiresAt) <= now) return;
       // Item definitions never expire while eligible. Duration starts on activation.
       if (!item && effect.duration?.remaining != null && effect.duration.remaining <= 0 && effect.duration.type !== "none") return;
@@ -268,10 +275,50 @@
   function collectState(actor, context = {}) {
     const collected = collect(actor);
     const character = sourceCharacter(actor, collected);
+    collected.effects.push(...mechanicEffects(actor, character, collected.effects, context));
     const result = resolve(character, collected.effects, context);
     for (const problem of collected.problems) report(actor, problem);
     for (const error of result.errors) report(actor, error);
     return { character, effects: collected.effects, collected, result };
+  }
+  // Numerical class mechanics are returned separately from library effect
+  // definitions by NS. Recompute from the current actor so equipment, HP and
+  // ability changes take effect immediately, without exporting derived passives.
+  function mechanicEffects(actor, character, effects, context = {}) {
+    const base = resolve(character, effects, context).values;
+    const rows = [], seen = new Set();
+    const unconscious = context.unconscious || list(actor.statuses).some(s => ["unconscious", "dead"].includes(s));
+    const equipped = list(actor.items).filter(i => i.type === "equipment" && i.system?.equipped);
+    const armored = equipped.some(i => ["light", "medium", "heavy"].includes(i.system?.type?.value));
+    const shield = equipped.some(i => i.system?.type?.value === "shield");
+    for (const item of list(actor.items)) {
+      const flags = item.flags?.[MODULE], mechanic = flags?.nativeMechanics;
+      if (!mechanic?.type) continue;
+      const scope = ownerScope(item, character._nsLevels);
+      if (number(flags.level) > scope.classLevel) continue;
+      const add = (stat, bonus) => {
+        const featureId = item.flags?.netherscrolls?.id ?? item.id;
+        const key = `mechanic:${featureId}:${stat}`;
+        rows.push({ stat, bonus: String(bonus), active: true, source: item.name,
+          origin: { sourceType: flags.parentSubclassNetherscrollsId ? "subclass" : "class",
+            sourceId: flags.parentSubclassNetherscrollsId || flags.parentClassNetherscrollsId, featureId },
+          _nsKey: key, _nsKind: "passive" });
+      };
+      if (seen.has(mechanic.type) && ["unarmoredDefense", "jackOfAllTrades", "auraOfProtection"].includes(mechanic.type)) continue;
+      seen.add(mechanic.type);
+      if (mechanic.type === "unarmoredDefense" && !armored && !(mechanic.noShield && shield) && !character.transformation && !character._nsAcBase) {
+        add("armorClass", Math.max(0, 10 + number(base[`abilities.${mechanic.ability}.mod`]) - number(character.armorClass?.value ?? 10)));
+      }
+      if (mechanic.type === "jackOfAllTrades") {
+        const bonus = Math.floor(number(base.proficiencyBonus) / 2);
+        for (const skill of Object.keys(SKILLS)) if (!character.skills?.[skill]?.prof) add(`skills.${skill}.bonus`, bonus);
+        if (!character.initiative?.prof) add("initiative.bonus", bonus);
+      }
+      if (mechanic.type === "auraOfProtection" && number(base["hp.current"]) > 0 && !unconscious) {
+        add("savingThrows.all.bonus", Math.max(1, number(base["abilities.cha.mod"])));
+      }
+    }
+    return rows;
   }
   const val = (result, path, fallback = 0) => result.values[path] ?? fallback;
   const expression = (result, path, fallback = 0) => result.formulas[path] ?? String(val(result, path, fallback));
@@ -289,6 +336,8 @@
       const global = system.bonuses?.abilities ?? {};
       const checkBonus = ability => numeric(system.abilities?.[ability]?.bonuses?.check) + numeric(global.check);
       const pb = val(result, "proficiencyBonus", number(system.attributes?.prof));
+      const jackOfAllTrades = list(actor.items).some(item => item.flags?.[MODULE]?.nativeMechanics?.type === "jackOfAllTrades" &&
+        number(item.flags[MODULE].level) <= ownerScope(item, character._nsLevels).classLevel);
       system.attributes ??= {}; system.attributes.prof = pb;
       system.details ??= {}; system.details.xp ??= {}; system.details.xp.value = val(result, "xp", system.details.xp.value);
       system.attributes.exhaustion = val(result, "exhaustion", system.attributes.exhaustion);
@@ -304,12 +353,13 @@
         const total = val(result, path, data.mod + prof.flat);
         data.bonuses ??= {};
         data.bonuses.save = `(${expression(result, path)}) - (${data.mod + prof.flat})`;
-        const shown = total + numeric(global.save);
+        const cover = ability === "dex" ? Math.max(number(system.attributes.ac?.cover), number(actor.coverBonus)) : 0;
+        const shown = total + numeric(global.save) + cover;
         if (data.save && typeof data.save === "object") Object.assign(data.save, { value: shown, prof, bonus: shown - data.mod - prof.flat });
         else data.save = shown;
         data.saveProf = prof;
         data.saveBonus = shown - data.mod - prof.flat;
-        data.checkProf = proficiency(data.checkProf, pb, data.checkProf?.multiplier ?? 0);
+        data.checkProf = proficiency(data.checkProf, pb, Math.max(data.checkProf?.multiplier ?? 0, jackOfAllTrades ? 0.5 : 0));
         if (data.check && typeof data.check === "object") data.check.value = data.mod + checkBonus(ability) + data.checkProf.flat;
         data.attack = data.mod + pb;
         data.dc = 8 + data.mod + pb + val(result, "SaveDC") - (8 + val(result, `abilities.${character.advanced?.spellcastingAbility || "int"}.mod`) + pb);
@@ -392,6 +442,7 @@
         system.attributes.hd.sizes = new Set(Object.keys(maxima).filter(die => maxima[die] > 0 || bySize[die] > 0).map(die => Number(die.slice(1))));
       }
       states.set(actor, state);
+      NS.features?.prepareActor(actor, state);
       for (const item of list(actor.items)) for (const activity of list(item.system?.activities)) prepareDC(actor, activity);
     } catch (error) { report(actor, error); } finally { preparing.delete(actor); }
   }
@@ -451,7 +502,9 @@
         character[type === "skill" ? "skills" : "tools"][target.split(".")[1]].ability = roll.data.abilityId;
       }
       // Re-collect at roll time: an instance may have expired since the sheet opened.
-      const contextual = resolve(character, collect(actor).effects, context);
+      const currentEffects = collect(actor).effects;
+      currentEffects.push(...mechanicEffects(actor, character, currentEffects, context));
+      const contextual = resolve(character, currentEffects, context);
       for (const error of contextual.errors) report(actor, error);
       const base = expression(state.result, target), desired = expression(contextual, target);
       if (base === desired) return;
@@ -493,6 +546,13 @@
     if (!state) return;
     const context = contextFor(activity, "dc");
     const result = resolve(state.character, state.effects, context);
+    const feature = NS.features?.definition(activity);
+    if (feature) {
+      const levels = levelsOf(actor), scope = { ...levels, ...ownerScope(activity.item, levels) };
+      activity.save.dc.formula = NS.features.formula(feature.dc, scope, result);
+      activity.save.dc.value = NS.formulaValue(activity.save.dc.formula, () => undefined).value;
+      return;
+    }
     const ability = activity.save.dc.calculation;
     const castingAbility = state.character.advanced?.spellcastingAbility || "int";
     const bonus = val(result, "SaveDC") - (8 + val(result, `abilities.${castingAbility}.mod`) + val(result, "proficiencyBonus"));
@@ -548,6 +608,19 @@
     Hooks.on("dnd5e.preConfigureInitiative", (actor, roll) => modifyRoll("initiative", { subject: actor }, roll));
     Hooks.on("dnd5e.preUseActivity", (activity, config) => {
       if (config?.nsEffectContext) contextChoices.set(activity, config.nsEffectContext);
+      if (hasNative(activity.actor)) {
+        try {
+          const state = collectState(activity.actor);
+          NS.features?.prepareActor(activity.actor, state);
+          NS.features?.prepareActivity(activity, state);
+        }
+        catch (error) { report(activity.actor,error); return false; }
+      }
+      const nativeFeature = NS.features?.definition(activity);
+      if (nativeFeature && !NS.eligible({ ...nativeFeature.effectApplication, mode: "passive" },activity.item)) {
+        report(activity.actor,new Error(`${activity.name}: its NS equipment requirement is not satisfied.`));
+        return false;
+      }
       const effects = list(activity.effects).map(link => activity.item?.effects?.get?.(link._id ?? link.id)).filter(Boolean);
       for (const effect of effects) {
         const application = effect.flags?.netherscrolls?.effectApplication;

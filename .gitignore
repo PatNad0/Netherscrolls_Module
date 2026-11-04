@@ -8,8 +8,8 @@ restructure.md
 docs/
 .env.dev-readonly.local
 fetch-api.ps1
-tests/character-importer.test.cjs
-
-tests/ns-effects.test.cjs
-tests/ns-live-check.cjs
+tests/
 *.local.txt
+tmp/
+scripts/verify-ns-fetch.ps1
+scripts/verify-ns-translation.cjs

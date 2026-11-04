@@ -1,4 +1,5 @@
 import "./scripts/ns-effects.js";
+import "./scripts/ns-features.js";
 import "./scripts/ns-effects-foundry.js";
 
 const MODULE_ID = "netherscrolls-module";
@@ -3833,6 +3834,9 @@ async function applyNetherscrollsCampaignCharacter(importedCharacter, folder, { 
   try {
     onProgress?.("repairing class features...");
     const repair = await repairNetherscrollsActorClassFeatures(actor, { notify: false });
+    if (repair.missingSources) {
+      throw new Error(`Netherscrolls import is incomplete: ${repair.missingSources} class feature source(s) could not be resolved. The sync remains queued.`);
+    }
     repairedFeatures = repair.created ?? 0;
     console.info(`${MODULE_ID} | Foundry Import | ${actorPayload.name}: class feature repair result.`, repair);
     debugNetherscrollsCharacterImport("Repaired class features after import.", { characterId, repair });
@@ -3843,8 +3847,10 @@ async function applyNetherscrollsCampaignCharacter(importedCharacter, folder, { 
       stack: err?.stack,
     });
     reportNetherscrollsTransferItemError("Class features", err);
+    throw err;
   }
 
+  await globalThis.NetherscrollsEffects.features.initializeActor(actor, importedCharacter.character);
   onProgress?.("complete.");
 
   return {
@@ -4583,6 +4589,7 @@ function getNetherscrollsCharacterItemDataset(source, fallback = null) {
 
 async function resolveNetherscrollsCharacterItemSources(sources, { onProgress = null, guildId = undefined } = {}) {
   const items = [];
+  const failures = [];
   let fetched = 0;
   try { fetched = await importMissingNetherscrollsCharacterDocuments(sources, { guildId }); }
   catch (error) {
@@ -4608,8 +4615,12 @@ async function resolveNetherscrollsCharacterItemSources(sources, { onProgress = 
       }
     );
     if (resolved?.item && descriptor.embed !== false) items.push(resolved.item);
-    } catch (error) { reportNetherscrollsTransferItemError(descriptor.source?.name ?? descriptor.netherscrollsId ?? "Item", error); }
+    } catch (error) {
+      reportNetherscrollsTransferItemError(descriptor.source?.name ?? descriptor.netherscrollsId ?? "Item", error);
+      if (descriptor.embed !== false) failures.push(error);
+    }
   }
+  if (failures.length) throw new AggregateError(failures, `Netherscrolls import is incomplete: ${failures.length} required document(s) could not be resolved. The sync remains queued.`);
   return { items, fetched };
 }
 
@@ -7332,6 +7343,8 @@ function normalizeNetherscrollsClassFeatureData(descriptor) {
     selectable: Math.max(0, Math.trunc(toNumber(feature?.selectable, 0))),
     choiceType: toTrimmedStringOrNull(descriptor.choiceType ?? feature?.choiceType) ?? "",
     choices: normalizeNetherscrollsFeatureChoices(feature),
+    autoGrantChoices: feature.selectable === 0 ? getNetherscrollsFeatureChoices(feature).map(getNetherscrollsSourceId).filter(Boolean) : [],
+    ...(feature.mechanics ? { nativeMechanics: duplicateNetherscrollsData(feature.mechanics) } : {}),
   };
   if (descriptor.scope === "choice") {
     itemData.flags[MODULE_ID].parentFeatureKey = descriptor.parentFeatureKey ?? "";
@@ -7374,9 +7387,12 @@ function getNetherscrollsClassFeatureDescriptors(classes) {
 
 function getNetherscrollsClassFeatureItemDescriptors(classes) {
   const descriptors = [];
-  for (const descriptor of getNetherscrollsClassFeatureDescriptors(classes)) {
+  const visit = descriptor => {
     descriptors.push(descriptor);
-    descriptors.push(...buildNetherscrollsFeatureChoiceDescriptors(descriptor));
+    for (const choice of buildNetherscrollsFeatureChoiceDescriptors(descriptor)) visit(choice);
+  };
+  for (const descriptor of getNetherscrollsClassFeatureDescriptors(classes)) {
+    visit(descriptor);
   }
   return descriptors;
 }
@@ -7461,7 +7477,7 @@ function buildNetherscrollsFeatureChoiceDescriptors(parentDescriptor) {
 
     const choiceKey = getNetherscrollsFeatureChoiceKey(parentDescriptor, choice, index);
     const netherscrollsId = getNetherscrollsSourceId(choice) ?? buildNetherscrollsSyntheticSourceId("feature-choice", choiceKey);
-    descriptors.push({
+    const choiceDescriptor = {
       key: choiceKey,
       scope: "choice",
       netherscrollsId,
@@ -7472,9 +7488,12 @@ function buildNetherscrollsFeatureChoiceDescriptors(parentDescriptor) {
       choiceIndex: index,
       choiceType: toTrimmedStringOrNull(parentDescriptor.feature?.choiceType) ?? "",
       feature: buildNetherscrollsFeatureChoiceItem(parentDescriptor, choice, index, netherscrollsId),
-      level: parentDescriptor.level,
+      level: Math.max(parentDescriptor.level, toNumber(choice?.level, 1)),
       deleted: parentDescriptor.deleted || isNetherscrollsDeleted(choice),
-    });
+    };
+    choiceDescriptor.feature.choices = getNetherscrollsFeatureChoices(choice);
+    choiceDescriptor.feature.selectable = choice?.selectable ?? 0;
+    descriptors.push(choiceDescriptor);
   }
 
   return descriptors;
@@ -7489,7 +7508,7 @@ function buildNetherscrollsFeatureChoiceItem(parentDescriptor, choice, index, ne
     _id: netherscrollsId,
     title,
     name: title,
-    level: parentDescriptor.level,
+    level: Math.max(parentDescriptor.level, toNumber(source.level, 1)),
     descriptionHtml: buildNetherscrollsFeatureChoiceDescription(choice),
     choices: [],
     selectable: 0,
@@ -9672,7 +9691,7 @@ function getNetherscrollsFoundrySourceValue(source) {
 }
 
 function normalizeNetherscrollsActivities(source) {
-  const activities = getNetherscrollsSystemValue(source, "activities");
+  const activities = getNetherscrollsSystemValue(source, "activities") ?? source?.foundryActivities;
   return activities && typeof activities === "object" && !Array.isArray(activities) ? activities : {};
 }
 
@@ -9742,6 +9761,7 @@ function applyNetherscrollsImportFlags(documentData, source, netherscrollsId) {
   if (Array.isArray(source?.classes)) documentData.flags[MODULE_ID].classes = source.classes;
   if (source?.demifeat != null) documentData.flags[MODULE_ID].demifeat = Boolean(source.demifeat);
   if (source?.isHomebrew != null) documentData.flags[MODULE_ID].isHomebrew = Boolean(source.isHomebrew);
+  globalThis.NetherscrollsEffects.features.translateItem(documentData, source);
 }
 
 function buildNetherscrollsPortableActiveEffects(source, { excludedIds = null } = {}) {
@@ -13240,6 +13260,7 @@ async function repairNetherscrollsActorClassFeatures(actor, { notify = false } =
 
   const createData = [];
   const considered = new Set();
+  let choiceDocuments;
   for (const ref of refs) {
     const uuid = toTrimmedStringOrNull(ref.uuid);
     if (!uuid || considered.has(uuid)) continue;
@@ -13255,6 +13276,19 @@ async function repairNetherscrollsActorClassFeatures(actor, { notify = false } =
     if (featureLevel > ref.classLevel || (isNetherscrollsOptionalClassFeature(feature) && !ref.selected)) {
       result.skipped += 1;
       continue;
+    }
+
+    const automaticChoices = getNetherscrollsDocumentFlag(feature, "autoGrantChoices") ?? [];
+    if (automaticChoices.length) {
+      if (!choiceDocuments) {
+        const pack = await getNetherscrollsImportPack("classFeatures");
+        choiceDocuments = new Map((await pack.getDocuments()).map(document => [getItemNetherId(document),document]));
+      }
+      for (const id of automaticChoices) {
+        const choice = choiceDocuments.get(id);
+        if (choice?.uuid) refs.push({ ...ref, uuid: choice.uuid, selected: true });
+        else result.missingSources += 1;
+      }
     }
 
     if (actorHasNetherscrollsClassFeature(actor, feature, uuid)) {
