@@ -459,7 +459,11 @@
     const grants = [...list(native?.featureGrants), ...list(native?.featureSelectionGrants), ...list(native?.spells)]
       .filter(grant => (grant.id ?? grant.spellId) === itemFlags.id && grant.castAsClass);
     const classes = [...new Set(grants.map(grant => grant.castAsClass))];
-    const classReference = config.spellClass ?? flags.spellClass ?? item?.system?.sourceClass ?? itemFlags.castAsClass ??
+    // D&D5e resolves sourceItem (including subclass parentage) through classIdentifier.
+    // Only read a stored legacy value, never the deprecated sourceClass getter.
+    const systemClass = item?.system?.classIdentifier ||
+      Object.getOwnPropertyDescriptor(item?.system ?? {}, "sourceClass")?.value || undefined;
+    const classReference = config.spellClass ?? flags.spellClass ?? systemClass ?? itemFlags.castAsClass ??
       item?.flags?.[MODULE]?.castAsClass ?? (classes.length === 1 ? classes[0] : undefined);
     const classId = typeof classReference === "object" ? classReference?.identifier ?? classReference?.id ?? classReference?._id ?? classReference?.name : classReference;
     const classItem = list(actor?.items).find(entry => entry.type === "class" &&
@@ -650,7 +654,7 @@
     });
     const module = globalThis.game?.modules?.get(MODULE);
     if (module) module.api = { ...module.api, effects: { resolve: (actor, context) => collectState(actor, context).result,
-      roll: rollNative, rollHitDie, inspect: inspect, refresh: actor => actor.prepareData(), adjustPool, endEffect, event: expireEvent,
+      roll: rollNative, rollHitDie, inspect: inspect, refresh: actor => actor.reset(), adjustPool, endEffect, event: expireEvent,
       exportEffects } };
   }
 
@@ -738,12 +742,14 @@
         } else if (currentActorId === life.sourceActorId) updates.push({ _id: effect.id, disabled: true });
       }
       if (updates.length) await actor.updateEmbeddedDocuments("ActiveEffect", updates);
-      actor.prepareData();
+      actor.reset();
     }
   }
   function refreshActors() {
     for (const actor of worldActors()) if (hasNative(actor)) {
-      try { actor.prepareData(); if (actor.sheet?.rendered) actor.sheet.render(false); } catch (error) { report(actor, error); }
+      // reset rebuilds the data model before preparation. Preparing it twice
+      // redefines D&D5e's non-configurable senses getters (e.g. darkvision).
+      try { actor.reset(); if (actor.sheet?.rendered) actor.sheet.render(false); } catch (error) { report(actor, error); }
     }
   }
   async function adjustPool(actor, stat, amount) {
