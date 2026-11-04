@@ -1,7 +1,15 @@
 # Local debug/reference files
+fetchDoc
 .env
 Character_element.txt
 séléné.txt
 README.md
 restructure.md
 docs/
+.env.dev-readonly.local
+fetch-api.ps1
+tests/character-importer.test.cjs
+
+tests/ns-effects.test.cjs
+tests/ns-live-check.cjs
+*.local.txt
