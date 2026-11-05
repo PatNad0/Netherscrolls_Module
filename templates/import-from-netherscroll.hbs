@@ -1,0 +1,89 @@
+<form class="ns-transfer" autocomplete="off" data-ns-transfer>
+  {{!-- Shown while connecting, and when nothing else can be shown (no key, no guild, network error). --}}
+  <div class="ns-transfer-status" data-ns-status>
+    <i class="fa-solid fa-circle-notch fa-spin" data-ns-status-icon aria-hidden="true"></i>
+    <span data-ns-status-text>{{#if hasApiKey}}Connecting to Netherscrolls…{{else}}Add your Netherscrolls API key in Module Settings first.{{/if}}</span>
+    <button type="button" data-ns-action="retry" hidden><i class="fa-solid fa-rotate" aria-hidden="true"></i> Try again</button>
+  </div>
+
+  {{!-- Step 1, only when the account has several guilds and none is chosen yet. --}}
+  <section class="ns-guild-step" data-ns-guild-step hidden>
+    <h2>Which guild does this world play in?</h2>
+    <p class="ns-hint">Your Netherscrolls account belongs to several guilds. Characters and library content come from the guild you pick. You can change it later.</p>
+    <div class="ns-guild-list" data-ns-guild-list role="list"></div>
+  </section>
+
+  {{!-- Step 2: characters and library of the chosen guild. --}}
+  <section class="ns-workspace" data-ns-workspace hidden>
+    <header class="ns-workspace-bar" data-ns-guild-bar>
+      <i class="fa-solid fa-shield-halved" aria-hidden="true"></i>
+      <strong data-ns-guild-name></strong>
+      <span class="ns-guild-access" data-ns-guild-access></span>
+      <button type="button" class="ns-link-button" data-ns-action="change-guild" hidden>Change guild</button>
+    </header>
+
+    <nav class="ns-tabs" role="tablist">
+      <button type="button" class="ns-tab is-active" role="tab" aria-selected="true" data-ns-tab="characters">
+        <i class="fa-solid fa-users" aria-hidden="true"></i> Characters
+      </button>
+      <button type="button" class="ns-tab" role="tab" aria-selected="false" data-ns-tab="library">
+        <i class="fa-solid fa-book" aria-hidden="true"></i> Library
+      </button>
+    </nav>
+
+    <div class="ns-panel" role="tabpanel" data-ns-panel="characters" data-ns-character-import-panel>
+      <div class="ns-field-row">
+        <label class="ns-field">
+          <span>Campaign</span>
+          <select name="campaignId" data-ns-campaign-select>
+            <option value="">Loading campaigns…</option>
+          </select>
+        </label>
+        <button type="button" class="ns-icon-button" data-ns-character-action="refresh-campaigns" title="Reload campaigns" aria-label="Reload campaigns">
+          <i class="fa-solid fa-rotate" aria-hidden="true"></i>
+        </button>
+      </div>
+      <div class="ns-character-list" data-ns-character-list></div>
+      <p class="ns-message" data-ns-character-message>Choose a campaign.</p>
+      <footer class="ns-actions">
+        <button type="button" data-ns-character-action="import-selected">
+          <i class="fa-solid fa-cloud-arrow-down" aria-hidden="true"></i> Import to Foundry
+        </button>
+        <button type="button" data-ns-character-action="export-selected">
+          <i class="fa-solid fa-cloud-arrow-up" aria-hidden="true"></i> Send to Netherscrolls
+        </button>
+      </footer>
+    </div>
+
+    <div class="ns-panel" role="tabpanel" data-ns-panel="library" hidden>
+      <div class="ns-chip-group" role="group" aria-label="Content to import">
+        {{#each importTypes}}
+          <label class="ns-chip">
+            <input type="checkbox" name="importTypes.{{key}}" value="1" {{#if checked}}checked{{/if}}>
+            <i class="{{icon}}" aria-hidden="true"></i>
+            <span>{{label}}</span>
+          </label>
+        {{/each}}
+      </div>
+
+      <details class="ns-sources" data-ns-sources>
+        <summary>Sources: <span data-ns-source-summary>all</span></summary>
+        <div class="ns-import-source-list" role="group" aria-label="Netherscrolls sources"></div>
+      </details>
+      <p class="ns-import-source-message ns-hint">Loading sources…</p>
+
+      <label class="ns-since">
+        <input type="checkbox" name="sinceEnabled" value="1">
+        <span>Only what changed since</span>
+        <input type="date" name="sinceDate" value="{{defaultSinceDate}}" disabled>
+      </label>
+
+      <p class="ns-message" data-ns-library-message>{{libraryStatus}}</p>
+      <footer class="ns-actions">
+        <button type="submit" data-ns-import-action="library">
+          <i class="fa-solid fa-boxes-stacked" aria-hidden="true"></i> Import library
+        </button>
+      </footer>
+    </div>
+  </section>
+</form>
