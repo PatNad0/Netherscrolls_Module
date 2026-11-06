@@ -3,6 +3,8 @@ import "./scripts/ns-features.js";
 import "./scripts/ns-effects-foundry.js";
 
 const MODULE_ID = "netherscrolls-module";
+// Temporary local-development check: confirms this script was executed, not just served.
+globalThis.NETHERSCROLLS_DEV_CHECK = "kiwi12";
 const PLACEHOLDER_CHARACTER_ID = "PLACEHOLDER";
 const ABILITY_KEYS = ["str", "dex", "con", "int", "wis", "cha"];
 const IMPORT_TYPES = [
@@ -3444,7 +3446,7 @@ function normalizeNetherscrollsImportedCharacter(entry, { guildId = undefined } 
   );
   if (!id) return null;
   const name = toTrimmedStringOrNull(character?.name ?? entry?.name ?? foundryActor?.name) ?? "Unnamed Character";
-  return { id, name, character, foundryActor, raw: entry, guildId: getNetherscrollsRequestGuildId(guildId) };
+  return { id, name, character, foundryActor, spellcasting: entry?.spellcasting, raw: entry, guildId: getNetherscrollsRequestGuildId(guildId) };
 }
 
 function renderNetherscrollsCampaignCharacterList(root, characters, { guildId = undefined } = {}) {
@@ -3699,6 +3701,19 @@ async function applyNetherscrollsCampaignCharacter(importedCharacter, folder, { 
     throw new Error("The Foundry Import response has no native character payload.");
   }
 
+  try {
+    const MessageClass = globalThis.CONFIG?.ChatMessage?.documentClass ??
+      globalThis.foundry?.documents?.ChatMessage ?? globalThis.ChatMessage;
+    if (typeof MessageClass?.create !== "function") throw new Error("Foundry ChatMessage API is unavailable.");
+    await MessageClass.create({
+      speaker: { alias: "Netherscrolls" },
+      content: `<p>Importing ${escapeHtml(String(importedCharacter.name ?? importedCharacter.character.name ?? "character"))}...</p>`,
+    });
+  } catch (error) {
+    console.warn(`${MODULE_ID} | Unable to post character import message.`, error);
+    ui?.notifications?.warn?.(`Netherscrolls import chat failed: ${error?.message ?? error}`);
+  }
+
   await sanitizeNetherscrollsImportResponseImages({
     character: importedCharacter.character,
     foundryItems: importedCharacter.foundryActor?.items,
@@ -3721,6 +3736,8 @@ async function applyNetherscrollsCampaignCharacter(importedCharacter, folder, { 
     name: importedCharacter.name,
   });
   normalizeNetherscrollsCharacterActorCreationData(actorPayload, importedCharacter.character);
+  const spellcasting = getNetherscrollsCharacterSpellcasting(importedCharacter);
+  actorPayload.flags[MODULE_ID].spellcasting = spellcasting ? duplicateNetherscrollsData(spellcasting) : null;
   const itemSources = collectNetherscrollsCharacterItemSources(importedCharacter);
   const classSourceCount = itemSources.filter((entry) => entry.dataset === "classes").length;
   const classFeatureSourceCount = itemSources.filter((entry) => entry.dataset === "classFeatures").length;
@@ -3765,6 +3782,7 @@ async function applyNetherscrollsCampaignCharacter(importedCharacter, folder, { 
   );
   applyNetherscrollsCharacterHitDiceToClassItems(content.items, importedCharacter.character);
   applyNetherscrollsCharacterPreparedSpellsToItems(content.items, importedCharacter.character);
+  applyNetherscrollsSpellContextClasses(content.items);
   for (const item of content.items) {
     if (!NETHERSCROLLS_ITEM_TYPES.has(item.type) && !["facility", "vehicle", "backpack"].includes(item.type)) continue;
     const flags = item.flags?.netherscrolls ?? {};
@@ -4507,8 +4525,16 @@ function collectNetherscrollsCharacterItemSources(importedCharacter) {
     }
   };
   add(character.items, "items");
-  add(character.spells, "spells");
-  add(character.preparedSpells, "spells");
+  const spellcasting = getNetherscrollsCharacterSpellcasting(importedCharacter);
+  if (spellcasting) {
+    for (const context of spellcasting.contexts) {
+      if (context.casting?.access === "spellList") continue;
+      add({ netherscrollsId: context.spellId, spellContext: context }, "spells");
+    }
+  } else {
+    add(character.spells, "spells");
+    add(character.preparedSpells, "spells");
+  }
   add(character.feats, "feats");
   addClassWithNestedContent(character.classes);
   addClassWithNestedContent(character.class);
@@ -4519,7 +4545,7 @@ function collectNetherscrollsCharacterItemSources(importedCharacter) {
   add(character.raceId, "races");
   // Character-level Foundry metadata is ignored. Embedded content may retain
   // its complete Foundry document and Actor-owned state.
-  add(actor.items, null, { allowRecordId: false });
+  add(spellcasting ? (actor.items ?? []).filter(item => getNetherscrollsCharacterItemDataset(item) !== "spells") : actor.items, null, { allowRecordId: false });
 
   const deduplicated = [];
   const byKey = new Map();
@@ -4536,7 +4562,7 @@ function collectNetherscrollsCharacterItemSources(importedCharacter) {
       getNetherscrollsFoundryItemPayload(source)?._id ?? source?._id
     );
     const inventoryId = source?.kind ? source.id : source?.flags?.netherscrolls?.inventoryId;
-    const key = inventoryId
+    const key = source.spellContext?.entryId ? `spell-entry:${source.spellContext.entryId}` : inventoryId
       ? `inventory:${inventoryId}`
       : id
       ? `${dataset}:id:${id}`.toLowerCase()
@@ -4652,6 +4678,12 @@ async function resolveNetherscrollsCharacterItemSource(
   );
   const hasCompleteFoundryItem = direct && typeof direct === "object" && toTrimmedStringOrNull(direct.type) && direct.system && typeof direct.system === "object";
   if (!document && !hasCompleteFoundryItem) {
+    if (source.spellContext && source.spellContext.casting?.available !== true) {
+      return { item: prepareNetherscrollsCharacterActorItemData(null, {
+        name: source.spellContext.casting?.spellName ?? `Unavailable spell (${netherscrollsId})`,
+        type: "spell", system: { level: source.spellContext.casting?.spellLevel ?? 0, activities: {} },
+      }, source, netherscrollsId, "spells") };
+    }
     const message = `Could not resolve required Netherscrolls ${dataset} ${netherscrollsId ?? "reference"} through Foundry Import selection.`;
     if (required) throw new Error(message);
     console.warn(`${MODULE_ID} | ${message}`);
@@ -4978,7 +5010,44 @@ function prepareNetherscrollsCharacterActorItemData(
       Object.assign(data.flags.netherscrolls, { kind: "catalogue", inventoryId: source.id, itemId: netherscrollsId });
     }
   }
+  if (data.type === "spell" && source.spellContext) applyNetherscrollsSpellContext(data, source.spellContext);
   return data;
+}
+
+function getNetherscrollsCharacterSpellcasting(importedCharacter) {
+  const bundle = importedCharacter?.spellcasting ?? importedCharacter?.raw?.spellcasting;
+  return Array.isArray(bundle?.contexts) ? bundle : null;
+}
+
+function applyNetherscrollsSpellContext(item, context) {
+  const casting = context.casting ?? {};
+  item.flags.netherscrolls = { ...item.flags.netherscrolls,
+    spellEntryId: context.entryId, spellId: context.spellId, classId: context.classId ?? null };
+  item.flags[MODULE_ID].spellContext = duplicateNetherscrollsData(context);
+  item.system.ability = normalizeNetherscrollsSaveAbility(casting.ability) ?? "";
+  item.system.sourceItem = "";
+  item.system.method = ({ spellSlots: "spell", atWill: "atwill", ritualOnly: "ritual",
+    limitedUses: "innate", resource: "innate" })[casting.method] ?? "innate";
+  item.system.prepared = casting.alwaysPrepared || (casting.available && !casting.requiresPreparation)
+    ? 2 : context.prepared ? 1 : 0;
+  delete item.system.preparation;
+  for (const activity of Object.values(item.system.activities ?? {})) {
+    if (activity.attack) activity.attack.ability = item.system.ability;
+    if (activity.save?.dc) activity.save.dc = { ...activity.save.dc, calculation: item.system.ability };
+    activity.consumption ??= {};
+    activity.consumption.spellSlot = casting.requiresSpellSlot === true ||
+      (casting.method === "spellSlots" && item.system.level > 0);
+  }
+}
+
+function applyNetherscrollsSpellContextClasses(items) {
+  for (const item of items) {
+    const context = item.flags?.[MODULE_ID]?.spellContext;
+    if (!context) continue;
+    const owner = items.find(candidate => candidate.type === "class" &&
+      getItemNetherId(candidate) === context.classId);
+    item.system.sourceItem = owner?.system?.identifier ? `class:${owner.system.identifier}` : "";
+  }
 }
 
 function getNetherscrollsSubclassClassId(...sources) {
@@ -5032,6 +5101,7 @@ function applyNetherscrollsCharacterPreparedSpellsToItems(items, character = nul
   )).filter(Boolean));
   for (const item of items) {
     if (item?.type !== "spell") continue;
+    if (item.flags?.netherscrolls?.spellEntryId) continue;
     const prepared = preparedIds.has(getItemNetherId(item));
     item.system ??= {};
     item.system.prepared = prepared ? (item.system.prepared === 2 ? 2 : 1) : 0;
@@ -5190,6 +5260,7 @@ function reportNetherscrollsTransferItemError(label, error) {
 
 function getNetherscrollsInventoryDocumentKey(item) {
   const flags = item?.flags?.netherscrolls ?? {};
+  if (flags.spellEntryId) return `spell-entry:${flags.spellEntryId}`;
   return flags.inventoryId ? `inventory:${flags.inventoryId}` :
     getItemNetherId(item) ? `library:${getItemNetherId(item)}` : item?.flags?.[MODULE_ID]?.nativeCharacterResource ? `resource:${item.flags[MODULE_ID].resourceIndex}` : null;
 }
@@ -5229,11 +5300,12 @@ async function reconcileNetherscrollsCharacterItemsSafely(actor, rows, character
   for (const descriptor of expectedSources ?? []) {
     const source = descriptor.source;
     const inventoryId = source?.kind ? source.id : source?.flags?.netherscrolls?.inventoryId;
-    const key = inventoryId ? `inventory:${inventoryId}` : descriptor.netherscrollsId ? `library:${descriptor.netherscrollsId}` : null;
+    const key = source?.spellContext?.entryId ? `spell-entry:${source.spellContext.entryId}` :
+      inventoryId ? `inventory:${inventoryId}` : descriptor.netherscrollsId ? `library:${descriptor.netherscrollsId}` : null;
     if (key) wanted.add(key);
   }
   const protectedIds = new Set();
-  const requestedLibraryIds = new Set((expectedSources ?? []).map(source => source.netherscrollsId).filter(Boolean));
+  const requestedLibraryIds = new Set((expectedSources ?? []).filter(source => !source.source?.spellContext).map(source => source.netherscrollsId).filter(Boolean));
   const result = { created: 0, updated: 0, deletedLinked: 0, deletedEffects: 0, embeddedIds: {}, failed: 0 };
   for (const row of rows) {
     const data = duplicateNetherscrollsData(row);
@@ -5271,7 +5343,7 @@ async function reconcileNetherscrollsCharacterItemsSafely(actor, rows, character
   // Missing/unreadable requested Items and unrelated local Items remain intact.
   for (const item of existing) {
     const key = getNetherscrollsInventoryDocumentKey(item);
-    if (!key || wanted.has(key) || protectedIds.has(item.id) ||
+    if (result.failed || !key || wanted.has(key) || protectedIds.has(item.id) ||
       (!item.flags?.netherscrolls?.inventoryId && requestedLibraryIds.has(getItemNetherId(item))) ||
       !isNetherscrollsImportedCharacterDocument(item, "importedCharacterItem", characterId)) continue;
     try { await actor.deleteEmbeddedDocuments("Item", [item.id], { render: false, netherscrollsTransfer: true }); result.deletedLinked++; }
@@ -13644,6 +13716,7 @@ function buildNetherscrollsLinkedExportItem(item) {
       ...(flags.inventoryId ? { inventoryId: flags.inventoryId } : {}),
       ...(flags.kind ? { kind: flags.kind } : {}),
       ...(flags.itemId ? { itemId: flags.itemId } : {}),
+      ...(flags.spellEntryId ? { spellEntryId: flags.spellEntryId, spellId: flags.spellId, classId: flags.classId ?? null } : {}),
     } }, system,
   };
 }
@@ -13692,6 +13765,7 @@ function buildFoundryExportPayload(actor) {
   }
 
   const sourceActor = actor.toObject();
+  const spellcasting = buildNetherscrollsSpellcastingExport(sourceActor);
   const transformedActor = actor.toObject(false);
   const preparedSystem = duplicateNetherscrollsData(transformedActor?.system ?? sourceActor?.system ?? {});
   preparedSystem.attributes ??= {};
@@ -13727,6 +13801,7 @@ function buildFoundryExportPayload(actor) {
   if (sourceFlags[MODULE_ID]) {
     delete sourceFlags[MODULE_ID].nativeCharacter;
     delete sourceFlags[MODULE_ID].nativeEffectState;
+    delete sourceFlags[MODULE_ID].spellcasting;
   }
   const sourceItems = sourceActor?.items ?? [];
   const ignoredIds = new Set(sourceItems.filter((item) =>
@@ -13782,6 +13857,7 @@ function buildFoundryExportPayload(actor) {
       prototypeToken: duplicateNetherscrollsData(preparedPrototypeToken ?? {}),
     },
     netherscrolls: {
+      ...(spellcasting ? { spellcasting } : {}),
       ...buildNetherscrollsExportPlayState(sourceActor, preparedSystem),
       // Netherscrolls stores the BASE armor class and adds DEX, the equipped armor and
       // shield and every effect itself. Without an explicit base the API would store
@@ -13791,6 +13867,34 @@ function buildFoundryExportPayload(actor) {
       ...(activeBonuses.length || sourceActor.flags?.[MODULE_ID]?.nativeCharacter ? { effects: activeBonuses, activeBonuses } : {}),
     },
   };
+}
+
+function buildNetherscrollsSpellcastingExport(sourceActor) {
+  const bundle = sourceActor.flags?.[MODULE_ID]?.spellcasting;
+  if (!Array.isArray(bundle?.contexts)) return null;
+  if (!Number.isSafeInteger(bundle.characterVersion) || bundle.characterVersion < 0) {
+    throw new Error("Reimport this character before exporting spell preparation: the character version is missing.");
+  }
+  const contexts = new Map(bundle.contexts.map(context => [context.entryId, context]));
+  const seen = new Set();
+  const preparations = [];
+  for (const item of sourceActor.items ?? []) {
+    const flags = item.flags?.netherscrolls;
+    if (item.type !== "spell" || !flags?.spellEntryId) continue;
+    const context = contexts.get(flags.spellEntryId);
+    if (!context || context.spellId !== getItemNetherId(item) || seen.has(context.entryId)) {
+      throw new Error("Spell entries changed or were duplicated locally. Reimport the character before exporting preparation.");
+    }
+    seen.add(context.entryId);
+    const casting = context.casting ?? {};
+    const importedPrepared = Boolean(context.prepared || casting.alwaysPrepared ||
+      (casting.available && !casting.requiresPreparation));
+    const prepared = getNetherscrollsSpellPreparedState(item) > 0;
+    if (prepared !== importedPrepared) preparations.push({ entryId: context.entryId, spellId: context.spellId, prepared });
+  }
+  if (preparations.length > 100) throw new Error("At most 100 spell preparations can be exported at once.");
+  // Omitted entries are retained by the API; deleting a local item is not a forget operation.
+  return { expectedVersion: bundle.characterVersion, preparations };
 }
 
 // Base AC of an Actor not imported from Netherscrolls (imported Actors export their

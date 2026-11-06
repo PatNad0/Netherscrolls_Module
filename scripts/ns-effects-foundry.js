@@ -322,6 +322,9 @@
   }
   const val = (result, path, fallback = 0) => result.values[path] ?? fallback;
   const expression = (result, path, fallback = 0) => result.formulas[path] ?? String(val(result, path, fallback));
+  const residualBonus = (result, path, included) => result.formulas[path] == null
+    ? String(val(result, path) - included)
+    : `(${expression(result, path)}) - (${included})`;
   function proficiency(current, value, multiplier, roundDown = true) {
     if (current?.clone) return current.clone({ proficiency: value, multiplier, roundDown });
     return { multiplier, flat: (roundDown ? Math.floor : Math.ceil)(value * multiplier), term: String((roundDown ? Math.floor : Math.ceil)(value * multiplier)), hasProficiency: multiplier > 0 };
@@ -352,7 +355,7 @@
         const prof = proficiency(oldProf, pb, multiplier);
         const total = val(result, path, data.mod + prof.flat);
         data.bonuses ??= {};
-        data.bonuses.save = `(${expression(result, path)}) - (${data.mod + prof.flat})`;
+        data.bonuses.save = residualBonus(result, path, data.mod + prof.flat);
         const cover = ability === "dex" ? Math.max(number(system.attributes.ac?.cover), number(actor.coverBonus)) : 0;
         const shown = total + numeric(global.save) + cover;
         if (data.save && typeof data.save === "object") Object.assign(data.save, { value: shown, prof, bonus: shown - data.mod - prof.flat });
@@ -383,7 +386,7 @@
           data.ability = ability; data.value = multiplier; data.mod = mod;
           data.prof = proficiency(data.prof, pb, multiplier, entry.proficiencyRounding !== "up");
           data.bonuses ??= {};
-          data.bonuses.check = `(${expression(result, path)}) - (${mod + data.prof.flat})`;
+          data.bonuses.check = residualBonus(result, path, mod + data.prof.flat);
           const extra = checkBonus(ability) + numeric(family === "skills" ? global.skill : global.tool);
           data.total = val(result, path) + extra; data.bonus = data.total - mod - data.prof.flat;
           if (family === "skills") data.passive = 10 + data.total + numeric(data.bonuses.passive);
@@ -396,12 +399,12 @@
       system.attributes.init.prof = proficiency(system.attributes.init.prof, pb, number(character.initiative?.prof));
       system.attributes.init.total = val(result, "initiative") + checkBonus(initAbility);
       system.attributes.init.mod = initMod;
-      system.attributes.init.bonus = `(${expression(result, "initiative")}) - (${initMod + system.attributes.init.prof.flat})`;
+      system.attributes.init.bonus = residualBonus(result, "initiative", initMod + system.attributes.init.prof.flat);
       system.attributes.spelldc = val(result, "SaveDC");
       system.bonuses ??= {};
       for (const [stat, keys, ability] of [["ToHitStr", ["mwak"], "str"], ["ToHitDext", ["rwak"], "dex"],
         ["ToHitMagic", ["msak", "rsak"], character.advanced?.spellcastingAbility || "int"]]) {
-        for (const key of keys) { system.bonuses[key] ??= {}; system.bonuses[key].attack = `(${expression(result, stat)}) - (${val(result, `abilities.${ability}.mod`) + pb})`; }
+        for (const key of keys) { system.bonuses[key] ??= {}; system.bonuses[key].attack = residualBonus(result, stat, val(result, `abilities.${ability}.mod`) + pb); }
       }
       system.bonuses.spell ??= {};
       system.bonuses.spell.dc = String(val(result, "SaveDC") - (8 + val(result, `abilities.${character.advanced?.spellcastingAbility || "int"}.mod`) + pb));
@@ -463,8 +466,10 @@
     // Only read a stored legacy value, never the deprecated sourceClass getter.
     const systemClass = item?.system?.classIdentifier ||
       Object.getOwnPropertyDescriptor(item?.system ?? {}, "sourceClass")?.value || undefined;
-    const classReference = config.spellClass ?? flags.spellClass ?? systemClass ?? itemFlags.castAsClass ??
-      item?.flags?.[MODULE]?.castAsClass ?? (classes.length === 1 ? classes[0] : undefined);
+    const classReference = config.spellClass ?? flags.spellClass ?? (itemFlags.spellEntryId
+      ? itemFlags.classId
+      : systemClass ?? itemFlags.castAsClass ?? item?.flags?.[MODULE]?.castAsClass ??
+        (classes.length === 1 ? classes[0] : undefined));
     const classId = typeof classReference === "object" ? classReference?.identifier ?? classReference?.id ?? classReference?._id ?? classReference?.name : classReference;
     const classItem = list(actor?.items).find(entry => entry.type === "class" &&
       [entry.id, entry.flags?.netherscrolls?.id, entry.system?.identifier, entry.name].includes(classId));
@@ -611,6 +616,13 @@
     }
     Hooks.on("dnd5e.preConfigureInitiative", (actor, roll) => modifyRoll("initiative", { subject: actor }, roll));
     Hooks.on("dnd5e.preUseActivity", (activity, config) => {
+      const spellContext = activity.item?.flags?.[MODULE]?.spellContext;
+      if (spellContext && (spellContext.casting?.available !== true ||
+        (spellContext.casting.requiresPreparation && !spellContext.casting.alwaysPrepared &&
+          !activity.item.system?.prepared))) {
+        report(activity.actor, new Error(`${activity.name}: this NS spell context is unavailable or unprepared.`));
+        return false;
+      }
       if (config?.nsEffectContext) contextChoices.set(activity, config.nsEffectContext);
       if (hasNative(activity.actor)) {
         try {
