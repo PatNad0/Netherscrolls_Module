@@ -905,466 +905,10 @@ const SETTINGS = {
   importQueueCampaignIds: "foundryImportQueueCampaignIdsV1",
   debug: "debugMode",
   devEnhancedDamage: "devEnhancedDamage",
-  hardVision: "enableHardVision",
 };
 
-const HARD_VISION_SVG_NS = "http://www.w3.org/2000/svg";
-const HARD_VISION_SIDEBAR_TAB = "netherscrolls-hard-vision";
-const HARD_VISION_SCENE_FLAG = "hardVision";
-const HARD_VISION_SOCKET_EVENT = `module.${MODULE_ID}`;
-const hardVisionController = createHardVisionController();
-const NetherscrollsHardVisionSidebarTab = createNetherscrollsHardVisionSidebarTabClass();
-function createHardVisionController() {
-  return {
-    active: false,
-    range: 30,
-    tokenIds: [],
-    rangesByTokenId: new Map(),
-    sceneManaged: false,
-    svg: null,
-    mask: null,
-    maskBackground: null,
-    blackout: null,
-    circles: new Map(),
-    animationFrame: null,
-
-    getBoard() {
-      return canvas?.app?.canvas ?? canvas?.app?.view ?? document.querySelector("#board");
-    },
-
-    getToken(tokenId) {
-      return canvas?.tokens?.placeables?.find((token) => token.document.id === tokenId);
-    },
-
-    createSvgElement(name) {
-      return document.createElementNS(HARD_VISION_SVG_NS, name);
-    },
-
-    ensureOverlay() {
-      if (this.svg?.isConnected) return this.svg;
-
-      const board = this.getBoard();
-      if (!board) return null;
-
-      const maskId = `${MODULE_ID}-hard-vision-mask-${Math.random().toString(36).slice(2)}`;
-      const svg = this.createSvgElement("svg");
-      svg.id = `${MODULE_ID}-hard-vision-overlay`;
-      svg.setAttribute("aria-hidden", "true");
-      Object.assign(svg.style, {
-        position: "fixed",
-        left: "0px",
-        top: "0px",
-        width: "0px",
-        height: "0px",
-        pointerEvents: "none",
-        userSelect: "none",
-        overflow: "hidden",
-        zIndex: "5",
-      });
-
-      const definitions = this.createSvgElement("defs");
-      const mask = this.createSvgElement("mask");
-      mask.id = maskId;
-      mask.setAttribute("maskUnits", "userSpaceOnUse");
-      mask.setAttribute("maskContentUnits", "userSpaceOnUse");
-      mask.setAttribute("mask-type", "luminance");
-
-      const maskBackground = this.createSvgElement("rect");
-      maskBackground.setAttribute("x", "0");
-      maskBackground.setAttribute("y", "0");
-      maskBackground.setAttribute("fill", "white");
-      mask.append(maskBackground);
-      definitions.append(mask);
-
-      const blackout = this.createSvgElement("rect");
-      blackout.setAttribute("x", "0");
-      blackout.setAttribute("y", "0");
-      blackout.setAttribute("fill", "#000000");
-      blackout.setAttribute("mask", `url(#${maskId})`);
-      svg.append(definitions, blackout);
-      document.body.append(svg);
-
-      this.svg = svg;
-      this.mask = mask;
-      this.maskBackground = maskBackground;
-      this.blackout = blackout;
-      return svg;
-    },
-
-    removeOverlay() {
-      this.svg?.remove();
-      this.svg = null;
-      this.mask = null;
-      this.maskBackground = null;
-      this.blackout = null;
-      this.circles.clear();
-    },
-
-    getCircle(tokenId) {
-      let circle = this.circles.get(tokenId);
-      if (circle?.isConnected) return circle;
-
-      circle = this.createSvgElement("circle");
-      circle.setAttribute("fill", "black");
-      this.mask.append(circle);
-      this.circles.set(tokenId, circle);
-      return circle;
-    },
-
-    removeUnusedCircles(activeTokenIds) {
-      for (const [tokenId, circle] of this.circles.entries()) {
-        if (activeTokenIds.has(tokenId)) continue;
-        circle.remove();
-        this.circles.delete(tokenId);
-      }
-    },
-
-    updateOverlay() {
-      if (!this.active) return;
-      if (!isNetherscrollsHardVisionEnabled()) {
-        this.stop();
-        return;
-      }
-      if (!canvas?.ready) {
-        if (this.svg) this.svg.style.display = "none";
-        return;
-      }
-
-      if (this.sceneManaged) {
-        const sceneRestrictions = getNetherscrollsOwnedSceneVisionRestrictions();
-        const changed =
-          sceneRestrictions.length !== this.rangesByTokenId.size ||
-          sceneRestrictions.some(({ tokenId, range }) => this.rangesByTokenId.get(tokenId) !== range);
-        if (changed) {
-          this.applyRestrictions(sceneRestrictions, { sceneManaged: true });
-          return;
-        }
-      }
-
-      const board = this.getBoard();
-      const svg = this.ensureOverlay();
-      if (!board || !svg || !canvas.dimensions) return;
-
-      const boardRectangle = board.getBoundingClientRect();
-      if (boardRectangle.width <= 0 || boardRectangle.height <= 0) {
-        svg.style.display = "none";
-        return;
-      }
-
-      Object.assign(svg.style, {
-        display: "block",
-        left: `${boardRectangle.left}px`,
-        top: `${boardRectangle.top}px`,
-        width: `${boardRectangle.width}px`,
-        height: `${boardRectangle.height}px`,
-      });
-      svg.setAttribute("viewBox", `0 0 ${boardRectangle.width} ${boardRectangle.height}`);
-      svg.setAttribute("width", String(boardRectangle.width));
-      svg.setAttribute("height", String(boardRectangle.height));
-      for (const rectangle of [this.maskBackground, this.blackout]) {
-        rectangle.setAttribute("width", String(boardRectangle.width));
-        rectangle.setAttribute("height", String(boardRectangle.height));
-      }
-
-      const activeTokenIds = new Set();
-      for (const tokenId of this.tokenIds) {
-        const token = this.getToken(tokenId);
-        if (!token) continue;
-
-        activeTokenIds.add(tokenId);
-        const range = this.rangesByTokenId.get(tokenId) ?? this.range;
-        const canvasRadius = range * canvas.dimensions.distancePixels;
-        const center = token.center;
-        const clientCenter = canvas.clientCoordinatesFromCanvas({ x: center.x, y: center.y });
-        const clientEdge = canvas.clientCoordinatesFromCanvas({
-          x: center.x + canvasRadius,
-          y: center.y,
-        });
-        const radius = Math.hypot(clientEdge.x - clientCenter.x, clientEdge.y - clientCenter.y);
-        const circle = this.getCircle(tokenId);
-        circle.setAttribute("cx", String(clientCenter.x - boardRectangle.left));
-        circle.setAttribute("cy", String(clientCenter.y - boardRectangle.top));
-        circle.setAttribute("r", String(radius));
-      }
-
-      this.removeUnusedCircles(activeTokenIds);
-      if (!activeTokenIds.size) svg.style.display = "none";
-    },
-
-    animationLoop() {
-      if (!this.active) {
-        this.animationFrame = null;
-        return;
-      }
-      this.updateOverlay();
-      this.animationFrame = requestAnimationFrame(() => this.animationLoop());
-    },
-
-    applyRestrictions(restrictions, { sceneManaged = false } = {}) {
-      this.sceneManaged = sceneManaged;
-      const validRestrictions = Array.from(restrictions ?? [])
-        .map(({ tokenId, range }) => ({ tokenId: String(tokenId ?? ""), range: Number(range) }))
-        .filter(({ tokenId, range }) => tokenId && Number.isFinite(range) && range >= 0);
-      if (!validRestrictions.length) {
-        this.stop();
-        return;
-      }
-
-      this.tokenIds = validRestrictions.map(({ tokenId }) => tokenId);
-      this.rangesByTokenId = new Map(
-        validRestrictions.map(({ tokenId, range }) => [tokenId, range])
-      );
-      this.range = validRestrictions[0].range;
-      this.start();
-    },
-    start() {
-      this.active = true;
-      this.ensureOverlay();
-      if (!this.animationFrame) this.animationLoop();
-      refreshNetherscrollsHardVisionTab();
-    },
-
-    stop() {
-      this.active = false;
-      this.tokenIds = [];
-      this.rangesByTokenId.clear();
-      this.sceneManaged = false;
-      if (this.animationFrame) cancelAnimationFrame(this.animationFrame);
-      this.animationFrame = null;
-      this.removeOverlay();
-      refreshNetherscrollsHardVisionTab();
-    },
-
-    async removeSelectedRestrictions() {
-      if (!isNetherscrollsHardVisionEnabled()) {
-        return ui?.notifications?.warn?.("Player vision limit is disabled in Netherscrolls settings.");
-      }
-      if (!canvas?.ready) return ui?.notifications?.warn?.("The canvas is not ready.");
-
-      const isGM = game.user?.isGM === true;
-      const selectedTokens = canvas.tokens.controlled.filter(
-        (token) => isGM || token.document.isOwner
-      );
-      if (!selectedTokens.length) {
-        return ui?.notifications?.warn?.(
-          isGM
-            ? "Select at least one player token first."
-            : "Select a token you control first."
-        );
-      }
-
-      if (!isGM) {
-        this.stop();
-        return ui?.notifications?.info?.("Local vision limit removed.");
-      }
-
-      try {
-        await updateNetherscrollsSceneVisionRestrictions({
-          tokenIds: selectedTokens.map((token) => token.document.id),
-          enabled: false,
-        });
-        return ui?.notifications?.info?.("Player vision limit removed from the selected token(s).");
-      } catch (error) {
-        console.error(`${MODULE_ID} | Failed to remove player vision limit.`, error);
-        return ui?.notifications?.error?.("Unable to remove the player vision limit. See the console for details.");
-      }
-    },
-
-    async openMenu() {
-      if (!isNetherscrollsHardVisionEnabled()) {
-        return ui?.notifications?.warn?.("Player vision limit is disabled in Netherscrolls settings.");
-      }
-      if (!canvas?.ready) return ui?.notifications?.warn?.("The canvas is not ready.");
-
-      const DialogV2 = foundry?.applications?.api?.DialogV2;
-      if (!DialogV2?.input) {
-        return ui?.notifications?.error?.("Player vision limit requires Foundry VTT's DialogV2 API.");
-      }
-
-      const existingRange = Number.isFinite(this.range) ? this.range : 30;
-      const result = await DialogV2.input({
-        window: { title: "Player Vision Limit" },
-        content: `
-          <div class="form-group">
-            <label>Vision</label>
-            <div class="form-fields">
-              <select name="mode">
-                <option value="limited">Limited</option>
-                <option value="unlimited">No Limit</option>
-              </select>
-            </div>
-          </div>
-          <div data-ns-hard-vision-range></div>
-        `,
-        render: (_event, dialog) => {
-          const root = dialog.element ?? dialog.form;
-          const modeSelect = root?.querySelector?.('[name="mode"]');
-          const container = root?.querySelector?.("[data-ns-hard-vision-range]");
-          if (!modeSelect || !container) return;
-
-          let rememberedRange = String(existingRange);
-          const refreshRangeInput = () => {
-            const oldInput = root.querySelector('[name="range"]');
-            if (oldInput) rememberedRange = oldInput.value;
-            container.replaceChildren();
-            if (modeSelect.value === "unlimited") return;
-
-            const group = document.createElement("div");
-            group.className = "form-group";
-            group.innerHTML = `
-              <label>Maximum Range</label>
-              <div class="form-fields">
-                <input type="number" name="range" value="${rememberedRange}" min="0" step="1" autofocus>
-              </div>
-              <p class="hint">Uses the scene's distance units.</p>
-            `;
-            container.append(group);
-          };
-          modeSelect.addEventListener("change", refreshRangeInput);
-          refreshRangeInput();
-        },
-        ok: { label: "Apply" },
-        rejectClose: false,
-      });
-
-      if (!result) return;
-
-      const isGM = game.user?.isGM === true;
-      const selectedTokens = canvas.tokens.controlled.filter(
-        (token) => isGM || token.document.isOwner
-      );
-
-      if (result.mode === "unlimited") return this.removeSelectedRestrictions();
-
-      const range = Number(result.range);
-      if (!Number.isFinite(range) || range < 0) {
-        return ui?.notifications?.error?.("Enter a valid vision range.");
-      }
-      if (!selectedTokens.length) {
-        return ui?.notifications?.warn?.(
-          isGM
-            ? "Select at least one player token first."
-            : "Select a token you control first."
-        );
-      }
-
-      const tokenIds = selectedTokens.map((token) => token.document.id);
-      if (isGM) {
-        await updateNetherscrollsSceneVisionRestrictions({ tokenIds, range, enabled: true });
-        return ui?.notifications?.info?.(
-          `Player vision limited to ${range} ${canvas.dimensions.units || "units"}.`
-        );
-      }
-
-      this.applyRestrictions(tokenIds.map((tokenId) => ({ tokenId, range })));
-      return ui?.notifications?.info?.(
-        `Local vision limited to ${range} ${canvas.dimensions.units || "units"}.`
-      );
-    },
-  };
-}
-
-function isNetherscrollsHardVisionEnabled() {
-  try {
-    return game?.settings?.get(MODULE_ID, SETTINGS.hardVision) === true;
-  } catch (_err) {
-    return false;
-  }
-}
-function getNetherscrollsSceneVisionRestrictions(scene) {
-  const stored =
-    scene?.getFlag?.(MODULE_ID, HARD_VISION_SCENE_FLAG) ??
-    scene?.flags?.[MODULE_ID]?.[HARD_VISION_SCENE_FLAG];
-  const tokenRanges = stored?.tokenRanges;
-  if (!tokenRanges || typeof tokenRanges !== "object") return [];
-
-  return Object.entries(tokenRanges)
-    .map(([tokenId, range]) => ({ tokenId: String(tokenId), range: Number(range) }))
-    .filter(({ tokenId, range }) => tokenId && Number.isFinite(range) && range >= 0);
-}
-
-function getNetherscrollsOwnedSceneVisionRestrictions(scene = canvas?.scene) {
-  if (game.user?.isGM) return [];
-  return getNetherscrollsSceneVisionRestrictions(scene).filter(({ tokenId }) => {
-    const token = hardVisionController.getToken(tokenId);
-    return token?.document?.isOwner === true;
-  });
-}
-
-function syncNetherscrollsSceneVisionRestrictions(scene = canvas?.scene) {
-  if (
-    !isNetherscrollsHardVisionEnabled() ||
-    !canvas?.ready ||
-    !scene ||
-    scene.id !== canvas.scene?.id ||
-    game.user?.isGM
-  ) {
-    hardVisionController.stop();
-    return;
-  }
-
-  hardVisionController.applyRestrictions(getNetherscrollsOwnedSceneVisionRestrictions(scene), { sceneManaged: true });
-}
-function broadcastNetherscrollsSceneVisionRestrictions(scene, tokenRanges) {
-  game.socket?.emit?.(HARD_VISION_SOCKET_EVENT, {
-    action: "syncHardVision",
-    sceneId: scene?.id,
-    tokenRanges,
-  });
-}
-
-function handleNetherscrollsSceneVisionSync({ action, sceneId, tokenRanges } = {}) {
-  if (
-    action !== "syncHardVision" ||
-    game.user?.isGM ||
-    sceneId !== canvas?.scene?.id ||
-    !isNetherscrollsHardVisionEnabled()
-  ) {
-    return;
-  }
-
-  const ownedRestrictions = Object.entries(tokenRanges ?? {})
-    .map(([tokenId, range]) => ({ tokenId: String(tokenId), range: Number(range) }))
-    .filter(({ tokenId, range }) => {
-      const token = hardVisionController.getToken(tokenId);
-      return token?.document?.isOwner === true && Number.isFinite(range) && range >= 0;
-    });
-  hardVisionController.applyRestrictions(ownedRestrictions, { sceneManaged: true });
-}
-
-async function updateNetherscrollsSceneVisionRestrictions({ tokenIds, range = null, enabled }) {
-  if (!game.user?.isGM) {
-    throw new Error("Only a GM can set player vision limits.");
-  }
-
-  const scene = canvas?.scene;
-  if (!scene?.setFlag) throw new Error("Open a scene before setting a player vision limit.");
-
-  const nextTokenRanges = Object.fromEntries(
-    getNetherscrollsSceneVisionRestrictions(scene).map(({ tokenId, range: currentRange }) => [
-      tokenId,
-      currentRange,
-    ])
-  );
-
-  for (const tokenId of new Set(tokenIds ?? [])) {
-    if (enabled) nextTokenRanges[tokenId] = Number(range);
-    else delete nextTokenRanges[tokenId];
-  }
-
-  if (!Object.keys(nextTokenRanges).length) {
-    await scene.unsetFlag(MODULE_ID, HARD_VISION_SCENE_FLAG);
-    broadcastNetherscrollsSceneVisionRestrictions(scene, nextTokenRanges);
-    return;
-  }
-
-  await scene.setFlag(MODULE_ID, HARD_VISION_SCENE_FLAG, { tokenRanges: nextTokenRanges });
-  broadcastNetherscrollsSceneVisionRestrictions(scene, nextTokenRanges);
-}
-
-function refreshNetherscrollsHardVisionTab() {
-  ui?.[HARD_VISION_SIDEBAR_TAB]?.render?.({ force: false });
-}
+const NETHERSCROLLS_SIDEBAR_TAB = "netherscrolls-sidebar";
+const NetherscrollsSidebarTab = createNetherscrollsSidebarTabClass();
 
 function openNetherscrollsModuleConfiguration() {
   const SettingsConfig = globalThis.foundry?.applications?.settings?.SettingsConfig;
@@ -1376,16 +920,16 @@ function openNetherscrollsImporter() {
   return new NetherscrollsImportSettings().render({ force: true });
 }
 
-function createNetherscrollsHardVisionSidebarTabClass() {
+function createNetherscrollsSidebarTabClass() {
   const HandlebarsApplicationMixin = globalThis.foundry?.applications?.api?.HandlebarsApplicationMixin;
   const AbstractSidebarTab = globalThis.foundry?.applications?.sidebar?.AbstractSidebarTab;
   if (!HandlebarsApplicationMixin || !AbstractSidebarTab) return null;
 
-  return class NetherscrollsHardVisionSidebarTab extends HandlebarsApplicationMixin(AbstractSidebarTab) {
-    static tabName = HARD_VISION_SIDEBAR_TAB;
+  return class NetherscrollsSidebarTab extends HandlebarsApplicationMixin(AbstractSidebarTab) {
+    static tabName = NETHERSCROLLS_SIDEBAR_TAB;
 
     static DEFAULT_OPTIONS = {
-      id: HARD_VISION_SIDEBAR_TAB,
+      id: NETHERSCROLLS_SIDEBAR_TAB,
       classes: ["netherscrolls-sidebar-tab"],
       window: {
         title: "Netherscrolls",
@@ -1394,7 +938,6 @@ function createNetherscrollsHardVisionSidebarTabClass() {
       actions: {
         openModuleConfig: () => openNetherscrollsModuleConfiguration(),
         openImporter: () => openNetherscrollsImporter(),
-        openHardVision: () => hardVisionController.openMenu(),
       },
     };
 
@@ -1404,24 +947,16 @@ function createNetherscrollsHardVisionSidebarTabClass() {
         root: true,
       },
     };
-
-    async _prepareContext(options) {
-      const context = await super._prepareContext(options);
-      return {
-        ...context,
-        visionLimitEnabled: isNetherscrollsHardVisionEnabled(),
-      };
-    }
   };
 }
 
-function registerNetherscrollsHardVisionSidebarTab() {
-  if (!NetherscrollsHardVisionSidebarTab) return;
+function registerNetherscrollsSidebarTab() {
+  if (!NetherscrollsSidebarTab) return;
 
   const uiConfig = globalThis.CONFIG?.ui;
   if (!uiConfig) return;
 
-  uiConfig[HARD_VISION_SIDEBAR_TAB] = NetherscrollsHardVisionSidebarTab;
+  uiConfig[NETHERSCROLLS_SIDEBAR_TAB] = NetherscrollsSidebarTab;
   const Sidebar = uiConfig.sidebar;
   if (!Sidebar?.TABS) return;
 
@@ -1431,11 +966,42 @@ function registerNetherscrollsHardVisionSidebarTab() {
   };
   const settingsTab = Sidebar.TABS.settings;
   if (settingsTab) delete Sidebar.TABS.settings;
-  Sidebar.TABS[HARD_VISION_SIDEBAR_TAB] = descriptor;
+  Sidebar.TABS[NETHERSCROLLS_SIDEBAR_TAB] = descriptor;
   if (settingsTab) Sidebar.TABS.settings = settingsTab;
 }
 Hooks.once("init", () => {
-  registerNetherscrollsHardVisionSidebarTab();
+  registerNetherscrollsSidebarTab();
+  game.settings.registerMenu(MODULE_ID, SETTINGS.importFromNetherscroll, {
+    name: "Import / Export",
+    label: "Open Netherscrolls import / export",
+    hint: "Choose your guild, then bring characters and library content from Netherscrolls or send characters back.",
+    icon: "fa-solid fa-right-left",
+    type: NetherscrollsImportSettings,
+    restricted: true,
+  });
+
+  game.settings.register(MODULE_ID, SETTINGS.apiKey, {
+    name: "Netherscrolls API Key",
+    hint: "Your account key from Netherscrolls. It works in every guild you belong to; import and export rights are granted per guild. Campaign actions need a campaign DM or guild administrator.",
+    scope: "world",
+    config: true,
+    restricted: true,
+    type: String,
+    default: "",
+    onChange: () => resetNetherscrollsGuildState(),
+  });
+
+  game.settings.register(MODULE_ID, SETTINGS.importQueuePolling, {
+    name: "Poll the Foundry sync queues",
+    hint: "Periodically apply queued imports and send queued exports using the DM or administrator API key.",
+    scope: "world",
+    config: true,
+    restricted: true,
+    type: Boolean,
+    default: false,
+    onChange: (value) => toggleNetherscrollsImportQueuePolling(Boolean(value)),
+  });
+
   game.settings.register(MODULE_ID, SETTINGS.rerollInit, {
     name: "Reroll initiative each round",
     hint: "When a new combat round starts, reset and reroll all initiatives.",
@@ -1456,16 +1022,6 @@ Hooks.once("init", () => {
     onChange: (value) => toggleNpcDeathSaveHook(Boolean(value)),
   });
 
-  game.settings.register(MODULE_ID, SETTINGS.apiKey, {
-    name: "Netherscrolls API Key",
-    hint: "Your account key from Netherscrolls. It works in every guild you belong to; import and export rights are granted per guild. Campaign actions need a campaign DM or guild administrator.",
-    scope: "world",
-    config: true,
-    restricted: true,
-    type: String,
-    default: "",
-    onChange: () => resetNetherscrollsGuildState(),
-  });
   // The guild this world plays in (GET /foundry/guilds id), chosen in the import/export window.
   game.settings.register(MODULE_ID, SETTINGS.guildId, {
     scope: "world",
@@ -1490,15 +1046,6 @@ Hooks.once("init", () => {
     default: "",
   });
 
-  game.settings.registerMenu(MODULE_ID, SETTINGS.importFromNetherscroll, {
-    name: "Import / Export",
-    label: "Open Netherscrolls import / export",
-    hint: "Choose your guild, then bring characters and library content from Netherscrolls or send characters back.",
-    icon: "fa-solid fa-right-left",
-    type: NetherscrollsImportSettings,
-    restricted: true,
-  });
-
   game.settings.register(MODULE_ID, SETTINGS.exportButton, {
     name: "Foundry Export button",
     hint: "Show the Foundry Export button on linked character sheets.",
@@ -1509,16 +1056,6 @@ Hooks.once("init", () => {
     onChange: () => rerenderActorSheets(),
   });
 
-  game.settings.register(MODULE_ID, SETTINGS.importQueuePolling, {
-    name: "EXPERIMENTAL: Poll the Foundry sync queues",
-    hint: "Experimental: periodically apply queued imports and send queued exports using the DM or administrator API key.",
-    scope: "world",
-    config: true,
-    restricted: true,
-    type: Boolean,
-    default: false,
-    onChange: (value) => toggleNetherscrollsImportQueuePolling(Boolean(value)),
-  });
   game.settings.register(MODULE_ID, SETTINGS.importQueuePollingSafetyReset, {
     scope: "world",
     config: false,
@@ -1533,6 +1070,14 @@ Hooks.once("init", () => {
     default: "",
   });
 
+  game.settings.register(MODULE_ID, SETTINGS.devEnhancedDamage, {
+    name: "Enhance rolls",
+    hint: "Adds an Enhance option to chat messages for rerolling the lowest dice of any roll.",
+    scope: "world",
+    config: true,
+    type: Boolean,
+    default: false,
+  });
 
   game.settings.register(MODULE_ID, SETTINGS.debug, {
     name: "Debug mode",
@@ -1541,29 +1086,6 @@ Hooks.once("init", () => {
     config: true,
     type: Boolean,
     default: false,
-  });
-
-  game.settings.register(MODULE_ID, SETTINGS.devEnhancedDamage, {
-    name: "Enhanced damage",
-    hint: "Developer toggle for enhanced damage behavior.",
-    scope: "world",
-    config: true,
-    type: Boolean,
-    default: false,
-  });
-
-  game.settings.register(MODULE_ID, SETTINGS.hardVision, {
-    name: "Enable player vision limit",
-    hint: "Show the Netherscrolls scene-control tab that lets players locally limit vision around selected tokens.",
-    scope: "world",
-    config: true,
-    type: Boolean,
-    default: false,
-    onChange: (value) => {
-      if (!value) hardVisionController.stop();
-      else syncNetherscrollsSceneVisionRestrictions();
-      refreshNetherscrollsHardVisionTab();
-    },
   });
 });
 
@@ -2529,24 +2051,12 @@ async function submitNetherscrollsImportSettings(formData) {
     return { importedAny: false };
   }
 
-  const sinceEnabled = Boolean(formData?.sinceEnabled);
-  const sinceDate = String(formData?.sinceDate ?? "").trim();
-  if (sinceEnabled && !sinceDate) {
-    ui?.notifications?.warn?.("Choose a date or disable Since.");
-    return { importedAny: false };
-  }
-
-  const since = sinceEnabled ? normalizeNetherscrollsSinceDate(sinceDate) : null;
-  if (sinceEnabled && !since) {
-    ui?.notifications?.warn?.("Choose a valid Since date.");
-    return { importedAny: false };
-  }
-
+  // Library imports rebuild the selected library, so a delta cannot be used.
   const selectedSources = getSelectedNetherscrollsSourceValues(formData);
   const requests = await buildNetherscrollsImportRequests({
     apiKey,
     selectedTypes,
-    sinceDate: since,
+    sinceDate: null,
     selectedSources,
     guildId,
   });
@@ -2566,40 +2076,105 @@ async function submitNetherscrollsImportSettings(formData) {
     ui?.notifications?.warn?.(`Foundry Import endpoint not configured for: ${labels}.`);
   }
 
-  let importedAny = false;
-  let failedAny = false;
-  for (const request of requests) {
-    try {
-      const response = await sendNetherscrollsImportRequest(request);
-      const result = await applyNetherscrollsImportResponse(response, request.typeKey, request.typeKeys);
-      importedAny = true;
+  try {
+    const imports = await replaceNetherscrollsLibrary(requests);
+    for (const { request, result } of imports) {
       ui?.notifications?.info?.(
         request.sourceFiltered
           ? formatNetherscrollsSourceImportResult(result, request.typeKeys)
           : formatNetherscrollsImportResult(request.typeKey, result)
       );
-    } catch (err) {
-      failedAny = true;
-      console.error(`${MODULE_ID} | Netherscrolls ${request.typeKey} import failed.`, err);
-      ui?.notifications?.error?.(
-        `Netherscrolls ${getNetherscrollsImportTypeLabel(request.typeKey)} import failed: ${err?.message ?? err}`
-      );
     }
-  }
-  if (importedAny) {
     // Remember a complete, unfiltered import as the next "only what changed since" date.
-    if (!failedAny && !selectedSources.length && selectedTypes.length === IMPORT_TYPES.length) {
+    if (imports.length && !selectedSources.length && selectedTypes.length === IMPORT_TYPES.length) {
       await rememberNetherscrollsLibraryImportDate(guildId, startedAt);
     }
-    return { importedAny: true };
+    return { importedAny: imports.length > 0 };
+  } catch (err) {
+    console.error(`${MODULE_ID} | Netherscrolls library replacement failed.`, err);
+    throw err;
   }
+}
 
-  const range = sinceEnabled ? `since ${sinceDate}` : "since forever";
-  const labels = selectedTypes.map((type) => type.label.toLowerCase()).join(", ");
-  ui?.notifications?.info?.(
-    `Netherscrolls import request prepared: ${labels} ${range}.`
-  );
-  return { importedAny: false };
+let netherscrollsLibraryReplacementActive = false;
+
+async function replaceNetherscrollsLibrary(requests) {
+  if (!requests.length) return [];
+  if (!game?.user?.isGM) throw new Error("Only a GM can replace the Netherscrolls library.");
+  if (netherscrollsLibraryReplacementActive) throw new Error("A Netherscrolls library import is already running.");
+  if (netherscrollsCharacterImportLocks.size || netherscrollsImportQueuePollRunning) {
+    throw new Error("Wait for the current character transfer to finish before replacing the library.");
+  }
+  netherscrollsLibraryReplacementActive = true;
+  try {
+    const staged = [];
+    // No destructive work until every requested endpoint returned a valid dataset.
+    for (const request of requests) {
+      const response = await sendNetherscrollsImportRequest(request);
+      for (const typeKey of request.typeKeys ?? [request.typeKey]) {
+        if (!Array.isArray(getNetherscrollsResponseDataset(response, typeKey, request.typeKey))) {
+          throw new Error(`The ${typeKey} library response is incomplete; the existing library was not cleared.`);
+        }
+      }
+      await prepareNetherscrollsImportSourceNames(response);
+      await sanitizeNetherscrollsImportResponseImages(response);
+      staged.push({ request, response });
+    }
+    await clearNetherscrollsLibrary();
+    const imported = [];
+    for (const { request, response } of staged) {
+      const result = await applyNetherscrollsImportResponse(response, request.typeKey, request.typeKeys);
+      imported.push({ request, result });
+    }
+    return imported;
+  } finally {
+    netherscrollsLibraryReplacementActive = false;
+  }
+}
+
+async function clearNetherscrollsLibrary() {
+  const plans = [];
+  // Exact managed world Item-pack IDs, never world actors/items or arbitrary
+  // compendiums that happen to be placed in the same sidebar folder.
+  for (const [typeKey, definition] of Object.entries(NETHERSCROLLS_WORLD_IMPORT_PACKS)) {
+    if (definition.type !== "Item") continue;
+    const collection = getNetherscrollsImportPackCollection(typeKey);
+    const pack = game?.packs?.get?.(collection);
+    if (!pack) continue;
+    if (pack.collection !== collection || (pack.documentName ?? pack.metadata?.type ?? "Item") !== "Item") {
+      throw new Error(`Unexpected library destination: ${collection}`);
+    }
+    await ensureNetherscrollsImportPackWritable(pack);
+    const ids = getPackIndexEntries(await pack.getIndex()).map(getDocumentId).filter(Boolean);
+    const DocumentClass = getPackDocumentClass(pack);
+    const folders = getPackFolders(pack);
+    if (ids.length && typeof DocumentClass?.deleteDocuments !== "function") throw new Error(`Cannot clear ${collection}: deletion API unavailable.`);
+    if (folders.some(folder => typeof folder.delete !== "function")) throw new Error(`Cannot clear folders in ${collection}.`);
+    const byId = new Map(folders.map(folder => [getDocumentId(folder), folder]));
+    const depth = folder => {
+      const seen = new Set();
+      while (folder) {
+        const id = getDocumentId(folder);
+        if (seen.has(id)) throw new Error(`Cyclic library folders in ${collection}.`);
+        seen.add(id); folder = byId.get(getDocumentId(folder.folder));
+      }
+      return seen.size;
+    };
+    const orderedFolders = folders.map(folder => ({ folder, depth: depth(folder) })).sort((a, b) => b.depth - a.depth);
+    plans.push({ typeKey, pack, DocumentClass, ids, orderedFolders });
+  }
+  for (const { typeKey, pack, DocumentClass, ids, orderedFolders } of plans) {
+    // Invalidate even when a partial deletion fails.
+    invalidateNetherscrollsCompendiumDocumentIdCache(typeKey);
+    for (let offset = 0; offset < ids.length; offset += NETHERSCROLLS_COMPENDIUM_WRITE_BATCH_SIZE) {
+      await DocumentClass.deleteDocuments(ids.slice(offset, offset + NETHERSCROLLS_COMPENDIUM_WRITE_BATCH_SIZE),
+        { pack: pack.collection, render: false, netherscrollsTransfer: true });
+    }
+    if (getPackIndexEntries(await pack.getIndex()).length) throw new Error(`The ${pack.collection} library could not be fully cleared.`);
+    for (const { folder } of orderedFolders) {
+      await folder.delete({ pack: pack.collection, render: false, netherscrollsTransfer: true });
+    }
+  }
 }
 
 async function getNetherscrollsCompendiumReadiness() {
@@ -3009,7 +2584,7 @@ function toggleNetherscrollsImportQueuePolling(enabled) {
 }
 
 async function pollNetherscrollsImportQueues() {
-  if (netherscrollsImportQueuePollRunning || !isPrimaryNetherscrollsQueuePoller()) return {
+  if (netherscrollsLibraryReplacementActive || netherscrollsImportQueuePollRunning || !isPrimaryNetherscrollsQueuePoller()) return {
     imported: 0,
     exported: 0,
     failed: 0,
@@ -3674,6 +3249,7 @@ async function findOrCreateNetherscrollsCharacterFolder() {
 }
 
 async function importNetherscrollsCampaignCharacter(importedCharacter, folder, { onProgress = null } = {}) {
+  if (netherscrollsLibraryReplacementActive) throw new Error("Wait for the library replacement to finish before importing characters.");
   const characterId = normalizeNetherscrollsReferenceValue(importedCharacter?.id);
   if (!characterId) throw new Error("The Foundry Import character has no Netherscrolls character id.");
   const activeImport = netherscrollsCharacterImportLocks.get(characterId);
@@ -5745,9 +5321,6 @@ function isNetherscrollsImportedCharacterDocument(document, markerFlag, characte
 }
 
 Hooks.once("ready", async () => {
-  game.socket?.on?.(HARD_VISION_SOCKET_EVENT, handleNetherscrollsSceneVisionSync);
-  refreshNetherscrollsHardVisionTab();
-  syncNetherscrollsSceneVisionRestrictions();
   await disableLegacyNetherscrollsImportQueuePolling();
   installNetherscrollsSpellbookSectionOrdering();
   toggleRerollInitHook(game.settings.get(MODULE_ID, SETTINGS.rerollInit) === true);
@@ -5767,12 +5340,6 @@ Hooks.once("ready", async () => {
   );
 });
 
-Hooks.on("canvasReady", () => syncNetherscrollsSceneVisionRestrictions());
-Hooks.on("updateScene", (scene) => {
-  if (scene.id !== canvas?.scene?.id) return;
-  syncNetherscrollsSceneVisionRestrictions(scene);
-});
-Hooks.on("canvasTearDown", () => hardVisionController.stop());
 Hooks.on("renderApplicationV1", (app, html) => {
   injectFoundryExportButtonV1(app, html);
 });
@@ -5807,14 +5374,14 @@ Hooks.on("updateUser", () => {
 });
 
 Hooks.on("getChatLogEntryContext", (_html, options) => {
-  registerEnhancedDamageContextOption(options);
+  registerEnhanceContextOption(options);
 });
 Hooks.on("getChatMessageContextOptions", (_app, options) => {
-  registerEnhancedDamageContextOption(options);
+  registerEnhanceContextOption(options);
 });
 Hooks.on("getDocumentContextOptions", (app, options) => {
   if (!isChatContextApplication(app)) return;
-  registerEnhancedDamageContextOption(options);
+  registerEnhanceContextOption(options);
 });
 
 let rerollInitHandler = null;
@@ -11719,7 +11286,7 @@ function isChatContextApplication(app) {
   return tabName === "chat";
 }
 
-function registerEnhancedDamageContextOption(options) {
+function registerEnhanceContextOption(options) {
   if (!Array.isArray(options)) return;
   if (options.some((option) => option?.name === "Enhance")) return;
 
@@ -11729,12 +11296,12 @@ function registerEnhancedDamageContextOption(options) {
     condition: (li) => {
       if (!isEnhancedDamageEnabled()) return false;
       const message = getContextMenuMessage(li);
-      return canEnhanceDamageMessage(message);
+      return canEnhanceMessage(message);
     },
     callback: async (li) => {
       const message = getContextMenuMessage(li);
-      if (!canEnhanceDamageMessage(message)) return;
-      await runEnhanceDamageFlow(message);
+      if (!canEnhanceMessage(message)) return;
+      await runEnhanceFlow(message);
     },
   });
 }
@@ -11762,29 +11329,79 @@ function getContextMenuMessage(li) {
   return game?.messages?.get(messageId) ?? null;
 }
 
-function canEnhanceDamageMessage(message) {
-  if (!message) return false;
-
-  const type = String(message?.flags?.dnd5e?.roll?.type ?? "");
-  if (/(damage|healing)/i.test(type)) return true;
-
-  const flaggedRolls = message?.flags?.dnd5e?.rolls;
-  if (
-    Array.isArray(flaggedRolls) &&
-    flaggedRolls.some((entry) => /(damage|healing)/i.test(String(entry?.type ?? "")))
-  ) {
-    return true;
-  }
-
-  const messageRolls = Array.isArray(message?.rolls) ? message.rolls : [];
-  return messageRolls.some((roll) => {
-    const rollName = String(roll?.constructor?.name ?? "");
-    const rollType = String(roll?.options?.type ?? "");
-    return /damage/i.test(rollName) || /(damage|healing)/i.test(rollType);
-  });
+function canEnhanceMessage(message) {
+  // Hidden rolls stay hidden: the dialog would otherwise reveal blind and whispered dice.
+  if (!message?.isContentVisible) return false;
+  return getEnhanceRolls(message).some((roll) =>
+    getEnhanceDiceTerms(roll).some((term) => term.results.some(isEnhanceableResult))
+  );
 }
 
-async function runEnhanceDamageFlow(message) {
+function isEnhanceableResult(result) {
+  return (
+    result?.active !== false &&
+    result?.discarded !== true &&
+    Number.isFinite(Number(result?.result))
+  );
+}
+
+function getEnhanceRolls(message) {
+  const messageRolls = Array.isArray(message?.rolls) ? message.rolls : [];
+  const inlineRolls = parseEnhanceInlineRolls(message?.content).entries.map((entry) => entry.roll);
+  return [...messageRolls, ...inlineRolls];
+}
+
+// Results of [[1d6]] style rolls live in the message HTML rather than in message.rolls.
+function parseEnhanceInlineRolls(content) {
+  const html = String(content ?? "");
+  const container = document.createElement("div");
+  if (html.includes("inline-result")) container.innerHTML = html;
+
+  const entries = [];
+  for (const anchor of container.querySelectorAll("a.inline-roll.inline-result[data-roll]")) {
+    try {
+      entries.push({ anchor, roll: Roll.fromData(JSON.parse(unescape(anchor.dataset.roll))) });
+    } catch (err) {
+      console.warn(`${MODULE_ID} | Skipping unreadable inline roll.`, err);
+    }
+  }
+  return { container, entries };
+}
+
+// Every die in a roll, including those nested in (...), {...} and math functions. Dice that decide
+// how many dice or faces another term has, as in (1d4)d6, are left out: changing them would leave
+// that term's results out of step with its formula.
+function getEnhanceDiceTerms(roll) {
+  const diceTerms = [];
+  for (const term of Array.isArray(roll?.terms) ? roll.terms : []) {
+    if (Array.isArray(term?.results) && Number(term?.faces) > 0) diceTerms.push(term);
+    if (term?.roll) diceTerms.push(...getEnhanceDiceTerms(term.roll));
+    if (Array.isArray(term?.rolls)) {
+      for (const inner of term.rolls) diceTerms.push(...getEnhanceDiceTerms(inner));
+    }
+  }
+  return diceTerms;
+}
+
+function getEnhanceDieLabel(term) {
+  const denomination = toTrimmedStringOrNull(term?.constructor?.DENOMINATION);
+  return denomination && denomination !== "d" ? `d${denomination}` : `d${Number(term?.faces)}`;
+}
+
+function getEnhanceRollLabel(message, roll) {
+  const candidates = [roll?.options?.flavor, message?.flavor, message?.flags?.dnd5e?.roll?.type];
+  for (const candidate of candidates) {
+    const raw = toTrimmedStringOrNull(candidate);
+    if (!raw) continue;
+    const text = toTrimmedStringOrNull(
+      foundry?.utils?.stripHTML?.(raw) ?? raw.replace(/<[^>]*>/g, " ")
+    );
+    if (text) return text;
+  }
+  return "Roll";
+}
+
+async function runEnhanceFlow(message) {
   const typeResolution = [];
   const buckets = collectEnhanceBuckets(message, typeResolution);
   if (isDebugEnabled()) {
@@ -11795,7 +11412,7 @@ async function runEnhanceDamageFlow(message) {
     );
   }
   if (!buckets.length) {
-    ui?.notifications?.warn?.("Enhance: no damage dice were found in this message.");
+    ui?.notifications?.warn?.("Enhance: no dice were found in this message.");
     return;
   }
 
@@ -11811,7 +11428,7 @@ async function runEnhanceDamageFlow(message) {
     });
   }
 
-  const result = await repostDamageMessage(message, buckets, selectedCounts);
+  const result = await repostEnhancedMessage(message, buckets, selectedCounts);
   if (isDebugEnabled()) {
     await postEnhanceDebugMessage(message, "Enhance | Repost Result", result ?? null);
   }
@@ -11819,40 +11436,34 @@ async function runEnhanceDamageFlow(message) {
 
 function collectEnhanceBuckets(message, typeResolutionLog = null) {
   const buckets = new Map();
-  const messageRolls = Array.isArray(message?.rolls) ? message.rolls : [];
+  const rolls = getEnhanceRolls(message);
 
-  for (let rollIndex = 0; rollIndex < messageRolls.length; rollIndex += 1) {
-    const roll = messageRolls[rollIndex];
-    if (!isDamageLikeRoll(message, roll, rollIndex)) continue;
+  for (let rollIndex = 0; rollIndex < rolls.length; rollIndex += 1) {
+    const roll = rolls[rollIndex];
+    const isDamage = isDamageLikeRoll(message, roll, rollIndex);
+    const rollLabel = isDamage
+      ? getRollDamageType(message, roll, rollIndex, typeResolutionLog)
+      : getEnhanceRollLabel(message, roll);
+    const diceTerms = getEnhanceDiceTerms(roll);
 
-    const damageType = getRollDamageType(message, roll, rollIndex, typeResolutionLog);
-    const terms = Array.isArray(roll?.terms) ? roll.terms : [];
+    for (let termIndex = 0; termIndex < diceTerms.length; termIndex += 1) {
+      const term = diceTerms[termIndex];
+      const label = isDamage
+        ? rollLabel
+        : toTrimmedStringOrNull(term?.flavor ?? term?.options?.flavor) ?? rollLabel;
+      const dieLabel = getEnhanceDieLabel(term);
+      const faces = Number(term.faces);
 
-    for (let termIndex = 0; termIndex < terms.length; termIndex += 1) {
-      const term = terms[termIndex];
-      const faces = Number(term?.faces);
-      const results = Array.isArray(term?.results) ? term.results : null;
-      if (!Number.isFinite(faces) || faces <= 0 || !results?.length) continue;
-
-      const key = buildEnhanceBucketKey(damageType, faces);
-      const bucket =
-        buckets.get(key) ??
-        {
-          key,
-          damageType,
-          faces,
-          dice: [],
-        };
+      const key = buildEnhanceBucketKey(label, dieLabel);
+      const bucket = buckets.get(key) ?? { key, label, dieLabel, faces, dice: [] };
       buckets.set(key, bucket);
 
-      for (let resultIndex = 0; resultIndex < results.length; resultIndex += 1) {
-        const result = results[resultIndex];
-        if (result?.active === false || result?.discarded === true) continue;
-        const value = Number(result?.result);
-        if (!Number.isFinite(value)) continue;
+      for (let resultIndex = 0; resultIndex < term.results.length; resultIndex += 1) {
+        const result = term.results[resultIndex];
+        if (!isEnhanceableResult(result)) continue;
 
         bucket.dice.push({
-          value,
+          value: Number(result.result),
           rollIndex,
           termIndex,
           resultIndex,
@@ -11874,8 +11485,8 @@ function collectEnhanceBuckets(message, typeResolutionLog = null) {
   }
 
   list.sort((a, b) => {
-    const byType = String(a.damageType).localeCompare(String(b.damageType));
-    return byType || a.faces - b.faces;
+    const byLabel = String(a.label).localeCompare(String(b.label));
+    return byLabel || a.faces - b.faces;
   });
 
   return list;
@@ -11897,7 +11508,7 @@ async function postEnhanceDebugMessage(message, title, data) {
 }
 
 function buildEnhanceDebugSnapshot(message, buckets, typeResolutionLog) {
-  const messageRolls = Array.isArray(message?.rolls) ? message.rolls : [];
+  const messageRolls = getEnhanceRolls(message);
   return {
     messageId: message?.id ?? null,
     messageSpeaker: sanitizeDebugValue(message?.speaker ?? null, 2),
@@ -11909,25 +11520,12 @@ function buildEnhanceDebugSnapshot(message, buckets, typeResolutionLog) {
 }
 
 function summarizeRollForDebug(roll, rollIndex) {
-  const terms = Array.isArray(roll?.terms) ? roll.terms : [];
-  const diceTerms = terms
-    .map((term, termIndex) => {
-      const faces = Number(term?.faces);
-      if (!Number.isFinite(faces) || faces <= 0) return null;
-      const results = Array.isArray(term?.results)
-        ? term.results
-            .filter((result) => result?.active !== false && result?.discarded !== true)
-            .map((result) => Number(result?.result))
-            .filter((value) => Number.isFinite(value))
-        : [];
-      return {
-        termIndex,
-        faces,
-        results,
-        flavor: toTrimmedStringOrNull(term?.flavor ?? term?.options?.flavor),
-      };
-    })
-    .filter(Boolean);
+  const diceTerms = getEnhanceDiceTerms(roll).map((term, termIndex) => ({
+    termIndex,
+    die: getEnhanceDieLabel(term),
+    results: term.results.filter(isEnhanceableResult).map((result) => Number(result.result)),
+    flavor: toTrimmedStringOrNull(term?.flavor ?? term?.options?.flavor),
+  }));
 
   return {
     rollIndex,
@@ -11941,8 +11539,8 @@ function summarizeEnhanceBuckets(buckets) {
   if (!Array.isArray(buckets)) return [];
   return buckets.map((bucket) => ({
     key: bucket?.key ?? null,
-    damageType: bucket?.damageType ?? null,
-    faces: bucket?.faces ?? null,
+    label: bucket?.label ?? null,
+    die: bucket?.dieLabel ?? null,
     diceCount: Array.isArray(bucket?.dice) ? bucket.dice.length : 0,
     diceResults: Array.isArray(bucket?.dice) ? bucket.dice.map((die) => die?.value) : [],
   }));
@@ -12138,8 +11736,8 @@ function pushDamageTypeCandidate(candidates, source, value) {
   candidates.push({ source, value });
 }
 
-function buildEnhanceBucketKey(damageType, faces) {
-  return `${String(damageType ?? "damage")}::d${Number(faces)}`;
+function buildEnhanceBucketKey(label, dieLabel) {
+  return `${String(label ?? "Roll")}::${dieLabel}`;
 }
 
 function getSelectedEnhanceCountTotal(selectedCounts) {
@@ -12552,12 +12150,13 @@ function localizeDamageTypeEntry(entry, fallback) {
 function renderEnhanceDialogContent(buckets) {
   const rows = buckets
     .map((bucket, index) => {
-      const damageType = escapeHtml(String(bucket.damageType ?? "damage"));
+      const label = escapeHtml(String(bucket.label ?? "Roll"));
+      const dieLabel = escapeHtml(String(bucket.dieLabel ?? ""));
       const diceText = escapeHtml(bucket.dice.map((die) => die.value).join(", "));
       return `
         <tr>
-          <td>${damageType}</td>
-          <td>d${bucket.faces}</td>
+          <td>${label}</td>
+          <td>${dieLabel}</td>
           <td>${diceText}</td>
           <td>
             <div class="ns-enhance-stepper" data-enhance-bucket="${index}">
@@ -12597,11 +12196,11 @@ function renderEnhanceDialogContent(buckets) {
 
   return `
     <div class="ns-enhance-damage">
-      <p>Set how many of the lowest dice to reroll for each damage.</p>
+      <p>Set how many of the lowest dice to reroll.</p>
       <table style="width: 100%; border-collapse: collapse;">
         <thead>
           <tr>
-            <th style="text-align: left;">Damage Type</th>
+            <th style="text-align: left;">Roll</th>
             <th style="text-align: left;">Die</th>
             <th style="text-align: left;">Rolled Dice</th>
             <th style="text-align: left;">Reroll Count</th>
@@ -12671,10 +12270,10 @@ async function promptEnhanceRerollCountsFallback(buckets) {
   const counts = {};
 
   for (const bucket of buckets) {
-    const damageType = String(bucket.damageType ?? "damage");
+    const label = String(bucket.label ?? "Roll");
     const diceValues = bucket.dice.map((die) => die.value).join(", ");
     const response = window.prompt(
-      `Enhance Damage\n${damageType} d${bucket.faces}\nRolled: ${diceValues}\nHow many lowest dice to reroll? (0-${bucket.dice.length})`,
+      `Enhance Roll\n${label} ${bucket.dieLabel}\nRolled: ${diceValues}\nHow many lowest dice to reroll? (0-${bucket.dice.length})`,
       "0"
     );
     if (response == null) return null;
@@ -12693,7 +12292,7 @@ async function promptEnhanceRerollCounts(buckets) {
   if (dialogV2?.prompt) {
     try {
       const value = await dialogV2.prompt({
-        window: { title: "Enhance Damage" },
+        window: { title: "Enhance Roll" },
         content,
         modal: true,
         rejectClose: false,
@@ -12723,7 +12322,7 @@ async function promptEnhanceRerollCounts(buckets) {
       };
 
       const dialog = new Dialog({
-        title: "Enhance Damage",
+        title: "Enhance Roll",
         content,
         buttons: {
           apply: {
@@ -12753,149 +12352,219 @@ async function promptEnhanceRerollCounts(buckets) {
   return fallback;
 }
 
-function randomDieResult(faces) {
-  const sides = Math.max(1, Math.floor(toNumber(faces, 0)));
-  return Math.floor(Math.random() * sides) + 1;
+const ENHANCE_REAPPLIED_MODIFIERS = new Set([
+  "keep",
+  "drop",
+  "countSuccess",
+  "countFailures",
+  "countEven",
+  "countOdd",
+  "deductFailures",
+  "subtractFailures",
+  "minimum",
+  "maximum",
+  "call",
+]);
+
+// Modifiers whose outcome depends on the values rolled. Reroll and explode modifiers are not listed:
+// they add dice, so the dice they already added stay and a new value does not trigger them again.
+function getEnhanceModifierSteps(term) {
+  const known = term?.constructor?.MODIFIERS ?? {};
+  const commands = Object.keys(known)
+    .sort((a, b) => b.length - a.length)
+    .map(escapeRegex)
+    .join("|");
+  const pattern = commands ? new RegExp(`(${commands})[^A-z\\s()+\\-*/]*`, "gi") : null;
+  const steps = [];
+
+  for (const entry of Array.isArray(term?.modifiers) ? term.modifiers : []) {
+    const sequence = String(entry).toLowerCase();
+
+    // Checked first because a d20 can be restored as a plain Die, which would read "adv" and "dis" as
+    // its "d" (drop) modifier. dnd5e's own handler cannot be re-run: it discards its data after rolling.
+    if (/^(adv|dis)\d*$/.test(sequence)) {
+      steps.push({ restoresDropped: true, apply: () => reapplyEnhanceAdvantage(term, sequence) });
+      continue;
+    }
+    if (!pattern) continue;
+
+    for (const [modifier, command] of sequence.matchAll(pattern)) {
+      const handler = known[command];
+      const method = typeof handler === "string" ? handler : handler?.name;
+      const fn = typeof handler === "string" ? term[handler] : handler;
+      if (!ENHANCE_REAPPLIED_MODIFIERS.has(method) || typeof fn !== "function") continue;
+      steps.push({
+        restoresDropped: method === "keep" || method === "drop",
+        apply: () => fn.call(term, modifier),
+      });
+    }
+  }
+  return steps;
 }
 
-function recomputeRollData(rollData) {
-  if (!rollData || typeof rollData !== "object") return rollData;
-  try {
-    if (typeof Roll?.fromData === "function") {
-      const roll = Roll.fromData(rollData);
-      if (typeof roll?._evaluateTotal === "function") {
-        roll._total = roll._evaluateTotal();
-      } else if (Number.isFinite(Number(roll?.total))) {
-        roll._total = Number(roll.total);
+function reapplyEnhanceAdvantage(term, modifier) {
+  const [, mode, extra] = modifier.match(/^(adv|dis)(\d*)$/);
+  const setCount = parseInt(extra || "1", 10) + 1;
+  const eligible = term.results.filter((result) => !(result.rerolled && result.active === false));
+  const size = Math.max(1, Math.floor(eligible.length / setCount));
+
+  const sets = [];
+  for (let index = 0; index < setCount; index += 1) {
+    const results = eligible.slice(index * size, (index + 1) * size);
+    if (results.length) {
+      sets.push({ results, total: results.reduce((sum, result) => sum + result.result, 0) });
+    }
+  }
+
+  const target = Math[mode === "adv" ? "max" : "min"](...sets.map((set) => set.total));
+  const kept = sets.find((set) => set.total === target);
+  for (const set of sets) {
+    if (set === kept) continue;
+    for (const result of set.results) {
+      result.discarded = true;
+      result.active = false;
+    }
+  }
+}
+
+async function reapplyEnhanceModifiers(term) {
+  const steps = getEnhanceModifierSteps(term);
+
+  if (steps.length) {
+    const restoresDropped = steps.some((step) => step.restoresDropped);
+    for (const result of term.results) {
+      if (restoresDropped && result.discarded) {
+        result.active = true;
+        delete result.discarded;
       }
-      return typeof roll?.toJSON === "function" ? roll.toJSON() : rollData;
+      delete result.count;
+      delete result.success;
+      delete result.failure;
+      // On a die that still counts this came from min/max. A die replaced by a reroll modifier is inactive.
+      if (result.active !== false) delete result.rerolled;
     }
-  } catch (err) {
-    console.warn(`${MODULE_ID} | Unable to recompute enhanced roll total.`, err);
+    for (const step of steps) await step.apply();
   }
 
-  const fallbackTotal = computeSimpleRollTotal(rollData?.terms);
-  if (Number.isFinite(fallbackTotal)) {
-    rollData.total = fallbackTotal;
-    rollData._total = fallbackTotal;
-    rollData.result = String(fallbackTotal);
+  // Fate dice flag their success or failure when rolled rather than through a modifier.
+  if (term.constructor?.DENOMINATION === "f") {
+    for (const result of term.results) {
+      delete result.success;
+      delete result.failure;
+      if (result.result === 1) result.success = true;
+      if (result.result === -1) result.failure = true;
+    }
   }
-  return rollData;
 }
 
-function computeSimpleRollTotal(terms) {
-  if (!Array.isArray(terms) || !terms.length) return null;
+// Recalculates totals from the changed dice outward, through any pools, functions and parentheses.
+async function recomputeEnhancedRoll(roll, changedTerms) {
+  let changed = false;
 
-  let total = 0;
-  let hasValue = false;
-  let operator = "+";
-
-  for (const term of terms) {
-    const op = String(term?.operator ?? "");
-    if (["+", "-", "*", "/"].includes(op)) {
-      operator = op;
+  for (const term of roll.terms) {
+    if (changedTerms.has(term)) {
+      await reapplyEnhanceModifiers(term);
+      changed = true;
       continue;
     }
 
-    const value = getSimpleTermTotal(term);
-    if (!Number.isFinite(value)) continue;
-    hasValue = true;
+    if (term?.roll && (await recomputeEnhancedRoll(term.roll, changedTerms))) changed = true;
+    if (!Array.isArray(term?.rolls)) continue;
 
-    if (operator === "+") total += value;
-    else if (operator === "-") total -= value;
-    else if (operator === "*") total *= value;
-    else if (operator === "/") total = value === 0 ? total : total / value;
-    operator = "+";
+    let innerChanged = false;
+    for (const inner of term.rolls) {
+      if (await recomputeEnhancedRoll(inner, changedTerms)) innerChanged = true;
+    }
+    if (!innerChanged) continue;
+    changed = true;
+
+    if (Array.isArray(term.results)) {
+      term.rolls.forEach((inner, index) => {
+        if (term.results[index]) term.results[index].result = inner.total;
+      });
+      await reapplyEnhanceModifiers(term);
+    } else {
+      const fn = term.function ?? Math[term.fn];
+      if (typeof fn === "function") {
+        const args = term.rolls.map((inner) => inner.product ?? inner.total);
+        term.result = Number(await fn.apply(term, args));
+      }
+    }
   }
 
-  return hasValue ? total : null;
+  if (changed) roll._total = roll._evaluateTotal();
+  return changed;
 }
 
-function getSimpleTermTotal(term) {
-  if (!term || typeof term !== "object") return null;
-
-  const results = Array.isArray(term?.results) ? term.results : null;
-  if (results?.length) {
-    return results.reduce((sum, result) => {
-      if (result?.active === false || result?.discarded === true) return sum;
-      const value = Number(result?.result);
-      return Number.isFinite(value) ? sum + value : sum;
-    }, 0);
+function updateEnhanceInlineAnchor(anchor, roll) {
+  anchor.dataset.roll = escape(JSON.stringify(roll));
+  const label = anchor.lastChild;
+  if (label?.nodeType === 3) {
+    label.textContent = label.textContent.replace(/-?\d+(?:\.\d+)?\s*$/, String(roll.total));
   }
-
-  const number = Number(term?.number);
-  if (Number.isFinite(number)) return number;
-
-  const total = Number(term?.total);
-  if (Number.isFinite(total)) return total;
-
-  return null;
 }
 
-function applyEnhanceRerolls(source, message, buckets, selectedCounts) {
-  const sourceRolls = Array.isArray(source?.rolls) ? source.rolls : [];
+async function applyEnhanceRerolls(source, message, buckets, selectedCounts) {
   const messageRolls = Array.isArray(message?.rolls) ? message.rolls : [];
-  const maxIndex =
-    Math.max(sourceRolls.length, messageRolls.length, getMaxEnhanceRollIndex(buckets) + 1) || 0;
-  const rollFormats = [];
-  const rolls = [];
+  const inline = parseEnhanceInlineRolls(source?.content);
 
-  for (let i = 0; i < maxIndex; i += 1) {
-    const sourceEntry = sourceRolls[i];
-    rollFormats[i] = getRollEntryFormat(sourceEntry);
-
-    let rollData = getRollDataObject(sourceEntry);
-    if (!hasRollTerms(rollData)) {
-      rollData = getRollDataObject(messageRolls[i]);
-    }
-    if (hasRollTerms(rollData)) {
-      rolls[i] = rollData;
-      continue;
-    }
-
-    rolls[i] = null;
-  }
-
-  const changedRollIndices = new Set();
-  let changedDiceCount = 0;
-
+  const diceByRoll = new Map();
   for (const bucket of buckets) {
     const rawCount = selectedCounts?.[bucket.key] ?? 0;
     const count = Math.max(0, Math.min(bucket.dice.length, Math.floor(toNumber(rawCount, 0))));
-    if (count <= 0) continue;
-
     for (const die of bucket.dice.slice(0, count)) {
-      const result = rolls?.[die.rollIndex]?.terms?.[die.termIndex]?.results?.[die.resultIndex] ?? null;
-      if (!result) continue;
-      result.result = randomDieResult(die.faces);
-      changedRollIndices.add(die.rollIndex);
-      changedDiceCount += 1;
+      if (!diceByRoll.has(die.rollIndex)) diceByRoll.set(die.rollIndex, []);
+      diceByRoll.get(die.rollIndex).push(die);
     }
   }
 
-  for (const rollIndex of changedRollIndices) {
-    const rollData = rolls[rollIndex];
-    if (!rollData) continue;
-    rolls[rollIndex] = recomputeRollData(rollData);
+  const rerolled = new Map();
+  let inlineChanged = false;
+  let changedDiceCount = 0;
+
+  for (const [rollIndex, dice] of diceByRoll) {
+    const messageRoll = messageRolls[rollIndex];
+    const inlineEntry = inline.entries[rollIndex - messageRolls.length];
+    const roll = messageRoll
+      ? messageRoll.constructor.fromData(JSON.parse(JSON.stringify(messageRoll)))
+      : inlineEntry?.roll;
+    if (!roll) continue;
+
+    const diceTerms = getEnhanceDiceTerms(roll);
+    const changedTerms = new Set();
+    for (const die of dice) {
+      const term = diceTerms[die.termIndex];
+      const result = term?.results?.[die.resultIndex];
+      if (!result) continue;
+      // The term rolls its own face so coins, fate dice and custom dice stay in their real range.
+      result.result = term.randomFace();
+      changedTerms.add(term);
+      changedDiceCount += 1;
+    }
+    if (!changedTerms.size) continue;
+
+    await recomputeEnhancedRoll(roll, changedTerms);
+    if (messageRoll) {
+      rerolled.set(rollIndex, roll);
+    } else {
+      updateEnhanceInlineAnchor(inlineEntry.anchor, roll);
+      inlineChanged = true;
+    }
   }
 
-  source.rolls = rolls
-    .map((rollData, index) => {
-      if (rollData == null) return sourceRolls[index] ?? null;
-      return serializeRollDataEntry(rollData, rollFormats[index]);
-    })
-    .filter((entry) => entry != null);
+  source.rolls = messageRolls.map((roll, index) => JSON.stringify(rerolled.get(index) ?? roll));
+  if (inlineChanged) source.content = inline.container.innerHTML;
 
   return changedDiceCount;
 }
 
-async function repostDamageMessage(message, buckets = null, selectedCounts = null) {
+async function repostEnhancedMessage(message, buckets = null, selectedCounts = null) {
   try {
     const source = foundry?.utils?.deepClone?.(message.toObject()) ?? message.toObject();
     let changedDiceCount = 0;
     const requested = getSelectedEnhanceCountTotal(selectedCounts);
     if (Array.isArray(buckets) && selectedCounts) {
-      changedDiceCount = applyEnhanceRerolls(source, message, buckets, selectedCounts);
+      changedDiceCount = await applyEnhanceRerolls(source, message, buckets, selectedCounts);
       if (requested > 0 && changedDiceCount === 0) {
         ui?.notifications?.warn?.("Enhance: no dice could be rerolled from this message.");
         return {
@@ -12908,7 +12577,8 @@ async function repostDamageMessage(message, buckets = null, selectedCounts = nul
     }
     delete source._id;
     delete source._stats;
-    source.user = game?.user?.id ?? source.user;
+    // Non-GMs may only create messages as themselves, even when enhancing someone else's roll.
+    source.author = game?.user?.id ?? source.author;
     source.timestamp = Date.now();
     const created = await ChatMessage.create(source);
     return {
@@ -12918,111 +12588,14 @@ async function repostDamageMessage(message, buckets = null, selectedCounts = nul
       messageId: created?.id ?? null,
     };
   } catch (err) {
-    console.error(`${MODULE_ID} | Enhance damage failed.`, err);
-    ui?.notifications?.error?.("Enhance damage failed. Check console for details.");
+    console.error(`${MODULE_ID} | Enhance failed.`, err);
+    ui?.notifications?.error?.("Enhance failed. Check console for details.");
     return {
       success: false,
       reason: "exception",
       error: String(err?.message ?? err),
     };
   }
-}
-
-function getMaxEnhanceRollIndex(buckets) {
-  if (!Array.isArray(buckets) || !buckets.length) return -1;
-  let max = -1;
-  for (const bucket of buckets) {
-    for (const die of bucket?.dice ?? []) {
-      const idx = Number(die?.rollIndex);
-      if (Number.isFinite(idx) && idx > max) max = idx;
-    }
-  }
-  return max;
-}
-
-function hasRollTerms(rollData) {
-  return Array.isArray(rollData?.terms) && rollData.terms.length > 0;
-}
-
-function getRollEntryFormat(entry) {
-  if (typeof entry === "string") return "string";
-  if (entry && typeof entry === "object") return "object";
-  return "object";
-}
-
-function getRollDataObject(entry) {
-  if (!entry) return null;
-
-  if (typeof entry === "string") {
-    try {
-      const parsed = JSON.parse(entry);
-      return parsed && typeof parsed === "object" ? parsed : null;
-    } catch {
-      try {
-        if (typeof Roll?.fromJSON === "function") {
-          const roll = Roll.fromJSON(entry);
-          return getRollDataObject(roll);
-        }
-      } catch {
-        return null;
-      }
-      return null;
-    }
-  }
-
-  if (typeof entry === "object") {
-    const ctorName = String(entry?.constructor?.name ?? "");
-    if (/roll/i.test(ctorName)) {
-      if (typeof entry.toJSON === "function") {
-        const json = entry.toJSON();
-        const parsed = getRollDataObject(json);
-        if (parsed) return parsed;
-      }
-      if (typeof entry.toObject === "function") {
-        const obj = entry.toObject();
-        const parsed = getRollDataObject(obj);
-        if (parsed) return parsed;
-      }
-    }
-
-    if (Array.isArray(entry.terms)) {
-      try {
-        return foundry?.utils?.deepClone?.(entry) ?? JSON.parse(JSON.stringify(entry));
-      } catch {
-        return null;
-      }
-    }
-
-    if (typeof entry.toJSON === "function") {
-      const json = entry.toJSON();
-      return getRollDataObject(json);
-    }
-
-    if (typeof entry.toObject === "function") {
-      const obj = entry.toObject();
-      return getRollDataObject(obj);
-    }
-  }
-
-  return null;
-}
-
-function serializeRollDataEntry(rollData, format) {
-  if (format === "string") {
-    try {
-      if (typeof Roll?.fromData === "function") {
-        const roll = Roll.fromData(rollData);
-        const json = roll?.toJSON?.();
-        if (typeof json === "string") return json;
-        if (json && typeof json === "object") return JSON.stringify(json);
-      }
-    } catch {
-      // fall through to raw serialization
-    }
-    return JSON.stringify(rollData);
-  }
-
-  return rollData;
 }
 
 function isActorSheetApp(app) {

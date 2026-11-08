@@ -7,13 +7,14 @@
  *   Foundry effects are translated for the keys Netherscrolls owns (see ns-effects.js).
  * - Passive effects are exported to Netherscrolls. Active (temporary or activity-applied)
  *   effects stay Foundry-side: they count in totals but are never exported.
- * Actors without a native character are left entirely to D&D5e.
+ * Ordinary actors retain D&D5e preparation, with narrow adapters for NS physical
+ * attack bonuses, maximum HP and exhaustion definitions.
  */
 (() => {
   "use strict";
   const NS = globalThis.NetherscrollsEffects;
   const { MODULE, ABILITIES, SKILLS, TOOLS, clone, list, number, resolve } = NS;
-  const states = new WeakMap(), preparing = new WeakSet(), warnings = new Set();
+  const states = new WeakMap(), preparing = new WeakSet(), warnings = new Set(), exhaustionBases = new WeakMap();
   const FOREIGN_NOTE = "[Foundry]";
   const report = (actor, error) => {
     const message = `${actor?.name ?? "Netherscrolls"}: ${error?.message ?? error}`;
@@ -102,7 +103,7 @@
     const readNative = (effect, item) => {
       const flags = effect.flags?.netherscrolls;
       const native = flags?.nativeEffect ?? effect.flags?.[MODULE]?.nativeActiveBonus;
-      if (!native?.stat || effect.disabled || native.active === false || !NS.eligible(flags?.effectApplication, item)) return;
+      if (!native?.stat || isOff(effect) || native.active === false || !NS.eligible(flags?.effectApplication, item)) return;
       if (item && effect.flags?.[MODULE]?.proficiencyFeature &&
           /^(skills|savingThrows|tools)\.[A-Za-z0-9]+\.prof(?:\.totalOverride)?$/.test(native.stat)) {
         const character = nativeFlags(actor);
@@ -204,6 +205,7 @@
     for (const coin of ["pp", "gp", "sp", "cp"]) if (source.currency?.[coin] != null) native.currency[coin] = source.currency[coin];
     if (source.details?.xp?.value != null) native.xp = source.details.xp.value;
     if (source.attributes?.exhaustion != null) native.exhaustion = source.attributes.exhaustion;
+    if (exhaustionBases.has(actor)) native.exhaustion = Math.max(number(native.exhaustion), exhaustionBases.get(actor));
     native.advanced ??= {};
     if (source.attributes?.spellcasting) native.advanced.spellcastingAbility = source.attributes.spellcasting;
     for (let level = 1; level <= 9; level++) {
@@ -404,7 +406,11 @@
       system.bonuses ??= {};
       for (const [stat, keys, ability] of [["ToHitStr", ["mwak"], "str"], ["ToHitDext", ["rwak"], "dex"],
         ["ToHitMagic", ["msak", "rsak"], character.advanced?.spellcastingAbility || "int"]]) {
-        for (const key of keys) { system.bonuses[key] ??= {}; system.bonuses[key].attack = residualBonus(result, stat, val(result, `abilities.${ability}.mod`) + pb); }
+        for (const key of keys) {
+          const scoped = resolve(character, state.effects, { rollType: "attack", attackKind: key.startsWith("m") ? "melee" : "ranged" });
+          system.bonuses[key] ??= {};
+          system.bonuses[key].attack = residualBonus(scoped, stat, val(scoped, `abilities.${ability}.mod`) + pb);
+        }
       }
       system.bonuses.spell ??= {};
       system.bonuses.spell.dc = String(val(result, "SaveDC") - (8 + val(result, `abilities.${character.advanced?.spellcastingAbility || "int"}.mod`) + pb));
@@ -494,7 +500,12 @@
   }
   function modifyRoll(type, config, roll, options = {}) {
     const subject = config.subject, actor = subject?.actor ?? (subject?.documentName === "Actor" || subject?.system?.abilities ? subject : null);
-    if (!actor || !hasNative(actor)) return;
+    if (!actor) return;
+    if (!hasNative(actor)) {
+      try { if (type === "attack") modifyPortableAttack(actor, subject, config, roll); }
+      catch (error) { report(actor, error); }
+      return;
+    }
     // Skill and tool rolls also fire the ability-check hook; they are handled once, by their own hook.
     if (type === "abilityCheck" && (config.skill || config.tool)) return;
     try {
@@ -516,7 +527,10 @@
       const contextual = resolve(character, currentEffects, context);
       for (const error of contextual.errors) report(actor, error);
       const base = expression(state.result, target), desired = expression(contextual, target);
-      if (base === desired) return;
+      // Foundry selects actorBonus by melee/ranged; NS selects by attack ability.
+      // Even an unconditional effect must replace that contribution on every attack.
+      if (base === desired && type !== "attack") return;
+      if (type === "attack" && subject?.attack?.flat) return;
       roll.parts ??= [];
       roll.data ??= {};
       const bonusKey = type === "skill" ? `${config.skill}Bonus` : type === "tool" ? `${config.tool}Bonus` :
@@ -528,7 +542,7 @@
         const replaceParts = new Set([`@${bonusKey}`, "@mod", "@prof", `@${key}`]);
         roll.parts = roll.parts.filter(part => !replaceParts.has(part));
         let adjusted = desired;
-        if (type === "attack" && !state.effects.some(e => e.stat === `${target}.totalOverride` && NS.matchesFilters(e.filters, context))) {
+        if (type === "attack" && !currentEffects.some(e => e.stat === `${target}.totalOverride` && NS.matchesFilters(e.filters, context))) {
           const ability = target === "ToHitMagic" ? character.advanced?.spellcastingAbility || "int" : target === "ToHitDext" ? "dex" : "str";
           // Keep the weapon's own proficiency choice and alternate attack ability.
           const difference = number(roll.data.mod) + number(roll.data.prof) - val(state.result, `abilities.${ability}.mod`) - val(state.result, "proficiencyBonus");
@@ -549,6 +563,83 @@
     } catch (error) { report(actor, error); }
   }
   const dcBases = new WeakMap();
+  // Read an ordinary actor's already prepared values. Only our native definitions
+  // are evaluated here; Foundry has already applied its own effects.
+  function portableState(actor) {
+    const collected = collect(actor);
+    const character = sourceCharacter({ system: actor.system, items: actor.items,
+      _source: { system: actor.system }, flags: { [MODULE]: { nativeCharacter: {} } } }, collected);
+    for (const stat of ["ToHitStr", "ToHitDext", "ToHitMagic"]) character[stat] = { misc: 0, bonus: 0 };
+    character.hp = { current: actor.system.attributes?.hp?.value ?? 0,
+      max: actor.system.attributes?.hp?.max ?? 0, temp: actor.system.attributes?.hp?.temp ?? 0 };
+    character.exhaustion = actor.system.attributes?.exhaustion ?? 0;
+    return { character, effects: collected.effects.filter(e => !e._nsForeign) };
+  }
+  function modifyPortableAttack(actor, subject, config, roll) {
+    if (subject?.attack?.flat) return;
+    const target = rollTarget(config, "attack", actor, subject);
+    if (!["ToHitStr", "ToHitDext"].includes(target)) return;
+    const state = portableState(actor), context = contextFor(subject, "attack", config, roll);
+    const effects = state.effects.filter(e => NS.canonicalTarget(e.stat).replace(/\.(misc|bonus)$/, "") === target);
+    if (!effects.some(e => NS.matchesFilters(e.filters, context))) return;
+    const result = resolve(state.character, effects, context);
+    for (const error of result.errors) report(actor, error);
+    const ability = target === "ToHitDext" ? "dex" : "str";
+    const override = effects.some(e => e.stat === `${target}.totalOverride` && NS.matchesFilters(e.filters, context));
+    roll.parts ??= []; roll.data ??= {};
+    roll.parts = roll.parts.filter(p => p !== "@nsPhysicalBonus");
+    if (override) {
+      roll.parts = roll.parts.filter(p => !["@mod", "@prof", "@actorBonus"].includes(p));
+      roll.data.nsPhysicalBonus = expression(result, target);
+    } else roll.data.nsPhysicalBonus = residualBonus(result, target,
+      val(result, `abilities.${ability}.mod`) + val(result, "proficiencyBonus"));
+    roll.parts.push("@nsPhysicalBonus");
+  }
+
+  function applyPreparedExhaustion(actor) {
+    exhaustionBases.set(actor, number(actor.system.attributes.exhaustion));
+    const state = hasNative(actor) ? collectState(actor) : portableState(actor);
+    const effects = state.effects.filter(e => NS.canonicalTarget(e.stat) === "exhaustion");
+    if (!effects.length) return;
+    const character = clone(state.character);
+    // A real system condition remains the base; do not persist a generated condition
+    // or edit the source, so disabling/removing the modifier reverses it naturally.
+    character.exhaustion = Math.max(number(character.exhaustion), number(actor.system.attributes.exhaustion));
+    const result = resolve(character, effects);
+    for (const error of result.errors) report(actor, error);
+    actor.system.attributes.exhaustion = Math.max(0, Math.trunc(val(result, "exhaustion")));
+  }
+  function applyPreparedHP(actor) {
+    if (hasNative(actor)) return; // Native actor preparation owns its complete HP total.
+    const state = portableState(actor);
+    const effects = state.effects.filter(e => NS.canonicalTarget(e.stat) === "hp.max");
+    if (!effects.length) return;
+    const result = resolve(state.character, effects);
+    for (const error of result.errors) report(actor, error);
+    const hp = actor.system.attributes.hp;
+    hp.max = Math.max(0, Math.floor(val(result, "hp.max")));
+    hp.effectiveMax = Math.max(0, hp.max + number(hp.tempmax));
+    hp.value = Math.min(number(actor._source?.system?.attributes?.hp?.value ?? hp.value), hp.effectiveMax);
+    hp.damage = hp.effectiveMax - hp.value;
+    hp.pct = Math.max(0, Math.min(100, hp.effectiveMax ? hp.value / hp.effectiveMax * 100 : 0));
+  }
+  function installAttributeAdapters() {
+    const fields = globalThis.dnd5e?.dataModels?.actor?.AttributesFields;
+    if (!fields) return;
+    for (const [method, apply] of [["prepareExhaustionLevel", applyPreparedExhaustion], ["prepareHitPoints", applyPreparedHP]]) {
+      const original = fields[method];
+      if (typeof original !== "function" || original._nsEffects) continue;
+      const wrapped = function (...args) {
+        const result = original.apply(this, args);
+        if (this.parent?.system) {
+          try { apply(this.parent); } catch (error) { report(this.parent, error); }
+        }
+        return result;
+      };
+      wrapped._nsEffects = true;
+      fields[method] = wrapped;
+    }
+  }
   function prepareDC(actor, activity) {
     if (!activity?.save?.dc || !hasNative(actor)) return;
     const state = states.get(actor);
@@ -605,10 +696,29 @@
   }
 
   function install() {
+    installAttributeAdapters();
     const ActorClass = globalThis.CONFIG?.Actor?.documentClass ?? globalThis.Actor;
     if (!ActorClass?.prototype?.prepareData || ActorClass.prototype.prepareData._nsEffects) return;
+    // Old imported definitions may still contain the former HP/exhaustion/range
+    // changes. Filter them on a transient document, without rewriting saved effects.
+    const applicable = ActorClass.prototype.allApplicableEffects;
+    if (typeof applicable === "function" && !applicable._nsEffects) {
+      const filtered = function* (...args) {
+        for (const effect of applicable.apply(this, args)) {
+          const native = effect.flags?.netherscrolls?.nativeEffect ?? effect.flags?.[MODULE]?.nativeActiveBonus;
+          if (effect.flags?.[MODULE]?.nsRuntimeEffect && /^(?:hp\.max|exhaustion|ToHitStr|ToHitDext)(?:\.|$)/.test(native?.stat ?? "") &&
+              changesOf(effect).length && typeof effect.clone === "function") {
+            const update = { changes: [] };
+            if (Array.isArray(effect.system?.changes)) update.system = { changes: [] };
+            yield effect.clone(update, { keepId: true, parent: effect.parent });
+          } else yield effect;
+        }
+      };
+      filtered._nsEffects = true;
+      ActorClass.prototype.allApplicableEffects = filtered;
+    }
     const original = ActorClass.prototype.prepareData;
-    const wrapped = function (...args) { states.delete(this); const result = original.apply(this, args); prepare(this); return result; };
+    const wrapped = function (...args) { states.delete(this); exhaustionBases.delete(this); const result = original.apply(this, args); prepare(this); return result; };
     wrapped._nsEffects = true;
     ActorClass.prototype.prepareData = wrapped;
     for (const type of ["skill", "tool", "savingThrow", "abilityCheck", "attack", "damage"]) {
@@ -758,7 +868,8 @@
     }
   }
   function refreshActors() {
-    for (const actor of worldActors()) if (hasNative(actor)) {
+    for (const actor of worldActors()) if (hasNative(actor) ||
+      [...list(actor.effects), ...list(actor.items).flatMap(item => list(item.effects))].some(e => e.flags?.[MODULE]?.nsRuntimeEffect)) {
       // reset rebuilds the data model before preparation. Preparing it twice
       // redefines D&D5e's non-configurable senses getters (e.g. darkvision).
       try { actor.reset(); if (actor.sheet?.rendered) actor.sheet.render(false); } catch (error) { report(actor, error); }
@@ -817,7 +928,9 @@
     const rows = [];
     for (const entry of state.collected.foreign) {
       if (entry._nsKind !== "passive") continue;
-      const applied = state.result.applied?.[entry._nsKey];
+      const context = Object.fromEntries(Object.entries(entry.filters ?? {}).map(([key, values]) => [NS.FILTERS[key], values[0]]));
+      const evaluated = Object.keys(context).length ? resolve(state.character, state.effects, context) : state.result;
+      const applied = evaluated.applied?.[entry._nsKey];
       if (!applied) continue;
       const override = entry.stat.endsWith(".totalOverride");
       let stat = entry.stat, bonus;
@@ -825,7 +938,7 @@
         // Netherscrolls has no upgrade/downgrade/multiply: export the value they produce.
         if (!applied.changed) continue;
         stat = `${NS.canonicalTarget(entry.stat)}.totalOverride`;
-        bonus = String(state.result.values[applied.target]);
+        bonus = String(evaluated.values[applied.target]);
       } else if (NS.hasFeatureReference(entry.bonus)) {
         if (NS.parseFormula(entry.bonus).dice) continue;
         bonus = override ? String(applied.value) : signed(applied.value);
@@ -834,6 +947,7 @@
         bonus = override ? text : /^[+-]?\d+(?:\.\d+)?$/.test(text) ? signed(Number(text)) : text;
       }
       rows.push({ active: true, stat, bonus, source: entry.source,
+        ...(entry.filters ? { filters: clone(entry.filters) } : {}),
         note: `${FOREIGN_NOTE} ${entry._nsItemName ? `Item: ${entry._nsItemName}` : "Actor effect"}` });
     }
     return rows;
@@ -881,7 +995,7 @@
   }
   NS.foundry = { prepare, sourceCharacter, collect, collectState, contextFor, modifyRoll, prepareDC, install, rollNative, inspect, states,
     adjustPool, endEffect, expireEvent, expireTurns, hasNative, exportState, exportEffects, isForeignMirror, rollHitDie,
-    onPreCreateActiveEffect, levelsOf, ownerScope };
+    onPreCreateActiveEffect, levelsOf, ownerScope, installAttributeAdapters };
   if (globalThis.Hooks) {
     Hooks.once("setup", install);
     Hooks.on("getHeaderControlsActorSheetV2", (app, controls) => {

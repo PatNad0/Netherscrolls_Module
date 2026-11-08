@@ -455,10 +455,10 @@
       "system.attributes.ac.bonus": [{ stat: "armorClass.bonus" }],
       "system.attributes.init.bonus": [{ stat: "initiative.bonus" }],
       "system.attributes.prof": [{ stat: "proficiencyBonus" }],
-      "system.bonuses.mwak.attack": [{ stat: "ToHitStr.bonus" }],
-      "system.bonuses.rwak.attack": [{ stat: "ToHitDext.bonus" }],
-      "system.bonuses.msak.attack": [{ stat: "ToHitMagic.bonus", group: "spellAttack" }],
-      "system.bonuses.rsak.attack": [{ stat: "ToHitMagic.bonus", group: "spellAttack" }],
+      "system.bonuses.mwak.attack": ["ToHitStr", "ToHitDext"].map(stat => ({ stat: `${stat}.bonus`, filters: { attackKinds: ["melee"] } })),
+      "system.bonuses.rwak.attack": ["ToHitStr", "ToHitDext"].map(stat => ({ stat: `${stat}.bonus`, filters: { attackKinds: ["ranged"] } })),
+      "system.bonuses.msak.attack": [{ stat: "ToHitMagic.bonus", filters: { attackKinds: ["melee"] } }],
+      "system.bonuses.rsak.attack": [{ stat: "ToHitMagic.bonus", filters: { attackKinds: ["ranged"] } }],
       "system.bonuses.spell.dc": [{ stat: "SaveDC.bonus" }],
       "system.attributes.hp.bonuses.overall": [{ stat: "hp.max" }],
       "system.attributes.hp.bonuses.level": [{ stat: "hp.max", perLevel: true }],
@@ -483,6 +483,7 @@
       const override = mode === "override" || (target.absolute && mode !== "add");
       const entry = { stat: override ? `${target.stat}.totalOverride` : target.stat,
         bonus: target.perLevel ? `(${formula}) * level.total` : formula };
+      if (target.filters) entry.filters = clone(target.filters);
       if (ORDERED_MODES.has(mode) && !override) entry.mode = mode;
       if (target.group) entry._nsGroup = target.group;
       return entry;
@@ -504,7 +505,12 @@
   // (an NPC target of an activity, an actor without a Netherscrolls character). On
   // Netherscrolls actors the runtime recalculates these fields, so they never count twice.
   function toFoundryChanges(entry, scope = {}) {
-    if (!entry?.stat || hasFilters(entry)) return [];
+    if (!entry?.stat) return [];
+    const scopedSpellAttack = /^ToHitMagic(?:\.(misc|bonus))?$/.test(entry.stat) &&
+      Object.keys(entry.filters ?? {}).every(key => key === "attackKinds") &&
+      Array.isArray(entry.filters?.attackKinds) && entry.filters.attackKinds.length > 0 &&
+      entry.filters.attackKinds.every(kind => ["melee", "ranged"].includes(kind));
+    if (hasFilters(entry) && !scopedSpellAttack) return [];
     let parsed;
     try { parsed = parseFormula(entry.bonus); } catch { return []; }
     if (parsed.dice && !diceAllowed(entry.stat)) return [];
@@ -541,11 +547,14 @@
     }
     if (/^initiative(?:\.(misc|bonus))?$/.test(stat)) return override ? [] : [add("system.attributes.init.bonus")];
     if ((match = /^proficiencyBonus(?:\.(misc|bonus))?$/.exec(stat))) return override && match[1] ? [] : [(override ? set : add)("system.attributes.prof")];
-    const attacks = { ToHitStr: ["mwak"], ToHitDext: ["rwak"], ToHitMagic: ["msak", "rsak"] };
+    // Physical attack bonuses are ability-based, not melee/ranged. Apply at roll time.
+    const attacks = { ToHitStr: [], ToHitDext: [], ToHitMagic: scopedSpellAttack
+      ? [...new Set(entry.filters.attackKinds)].map(kind => kind === "melee" ? "msak" : "rsak") : ["msak", "rsak"] };
     if ((match = /^(ToHitStr|ToHitDext|ToHitMagic)(?:\.(misc|bonus))?$/.exec(stat))) return override ? [] : attacks[match[1]].map(kind => add(`system.bonuses.${kind}.attack`));
     if (/^SaveDC(?:\.(misc|bonus))?$/.test(stat)) return override ? [] : [add("system.bonuses.spell.dc")];
-    if (stat === "hp.max") return [override ? set("system.attributes.hp.max") : add("system.attributes.hp.bonuses.overall")];
-    if (stat === "exhaustion") return [(override ? set : add)("system.attributes.exhaustion")];
+    // These require system preparation adapters: HP differs by actor/calculation mode,
+    // and D&D5e rebuilds exhaustion from its condition before preparing consequences.
+    if (stat === "hp.max" || stat === "exhaustion") return [];
     return [];
   }
 
@@ -581,7 +590,10 @@
     data.flags[MODULE] = { ...data.flags[MODULE], nsRuntimeEffect: true, effectKey: `ns-effect:${identity}`,
       sourceStat: entry.stat, nativeActiveBonus: clone(entry), portableActiveEffect: actor };
     const escape = value => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-    const unmapped = !data.changes.length && !hasFilters(entry) ? "<p><em>Calculated by Netherscrolls on Netherscrolls characters only.</em></p>" : "";
+    const portableRuntime = /^(?:hp\.max|exhaustion|ToHitStr|ToHitDext)(?:\.|$)/.test(entry.stat);
+    const unmapped = !data.changes.length && !hasFilters(entry) ? (portableRuntime
+      ? "<p><em>Applied by the Netherscrolls module during actor preparation or attack rolls, including NPC targets.</em></p>"
+      : "<p><em>Calculated by Netherscrolls on Netherscrolls characters only.</em></p>") : "";
     const conditional = hasFilters(entry) ? "<p><em>Conditional: applied by Netherscrolls at roll time.</em></p>" : "";
     data.description = `<p>${escape(entry.stat)}: ${escape(entry.bonus)}</p>${entry.note ? `<p>${escape(entry.note)}</p>` : ""}${conditional}${unmapped}`;
     return data;

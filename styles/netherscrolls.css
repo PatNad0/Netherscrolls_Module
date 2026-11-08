@@ -510,28 +510,10 @@
   padding: 0.8rem 1rem 1rem;
 }
 
-.netherscrolls-sidebar-panel__actions,
-.netherscrolls-sidebar-panel__feature {
+.netherscrolls-sidebar-panel__actions {
   display: grid;
   width: 100%;
   gap: 0.55rem;
-}
-
-.netherscrolls-sidebar-panel__actions {
-  margin-bottom: 0.85rem;
-}
-
-.netherscrolls-sidebar-panel__feature {
-  padding-top: 0.75rem;
-  border-top: 1px solid rgba(255, 255, 255, 0.18);
-}
-
-.netherscrolls-sidebar-panel__feature h3 {
-  margin: 0;
-  padding-bottom: 0.1rem;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.18);
-  font-size: 1rem;
-  text-transform: uppercase;
 }
 
 .netherscrolls-sidebar-panel button {
@@ -541,18 +523,6 @@
   gap: 0.45rem;
   width: 100%;
   min-height: 2.45rem;
-}
-
-.netherscrolls-sidebar-panel .hint {
-  width: auto;
-  margin: 0;
-  text-align: left;
-}
-
-.netherscrolls-sidebar-panel__disabled {
-  margin-top: 0.85rem !important;
-  padding-top: 0.75rem;
-  border-top: 1px solid rgba(255, 255, 255, 0.18);
 }
 
 @media (max-width: 600px) {
