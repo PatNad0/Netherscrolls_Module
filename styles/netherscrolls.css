@@ -536,3 +536,15 @@
     white-space: normal;
   }
 }
+
+/* Netherscrolls compendium titles: cream text on a dark brown plate, readable over any part
+   of the sepia banner art. Marked in markNetherscrollsPackTitles. */
+.netherscrolls-pack .netherscrolls-pack-title {
+  color: #f5e9d0 !important;
+  text-shadow: none !important;
+  background: rgba(58, 34, 16, 0.82);
+  border: 1px solid rgba(201, 164, 106, 0.55);
+  border-radius: 6px;
+  padding: 0.1em 0.5em;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+}

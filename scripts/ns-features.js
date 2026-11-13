@@ -52,7 +52,10 @@
     return { spent, max, ...(result ? { value: Math.max(0, max-spent) } : {}), recovery: period ? [{ period,
       type: usage.rechargeAll ? "recoverAll" : "formula", formula: usage.rechargeAll ? "" : formula(usage.rechargeAmount ?? 1, scope, result) }] : [] };
   }
-  const part = (value, type, scope, result) => ({ number: null, denomination: null, bonus: "", types: [String(type).toLowerCase()],
+  // Netherscrolls names a magic weapon's physical damage "Magical Piercing". D&D5e has no such
+  // type: it uses the base type, and the item's magical property bypasses resistance.
+  const damageType = type => String(type ?? "").trim().toLowerCase().replace(/^magic(?:al)?\s+/, "");
+  const part = (value, type, scope, result) => ({ number: null, denomination: null, bonus: "", types: [damageType(type)].filter(Boolean),
     custom: { enabled: true, formula: formula(value, scope, result) }, scaling: { mode: "", number: 1, formula: "" } });
   function build(feature, original = {}, scope = {}, result) {
     const name = feature.name ?? feature.title ?? original.name ?? "Feature";

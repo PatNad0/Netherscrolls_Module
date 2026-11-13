@@ -119,6 +119,21 @@ const NETHERSCROLLS_WORLD_IMPORT_PACKS = {
     system: "dnd5e",
   },
 };
+// Sidebar banner for each Netherscrolls compendium, shipped in assets/banners/.
+// Applied at runtime (never saved in the world), so a missing file shows no banner
+// and replacing a file needs no migration.
+const NETHERSCROLLS_IMPORT_PACK_BANNER_DIR = `modules/${MODULE_ID}/assets/banners`;
+const NETHERSCROLLS_IMPORT_PACK_BANNERS = {
+  classes: "classes.webp",
+  subclasses: "classes.webp",
+  classFeatures: "druid_progression.webp",
+  items: "weapons.webp",
+  feats: "feats_text.webp",
+  spells: "magic_schools.webp",
+  races: "races.webp",
+  monster: "dragon_battle.webp",
+  backgrounds: "backgrounds.jpg",
+};
 const NETHERSCROLLS_IMPORT_PACK_OWNERSHIP = {
   PLAYER: "OBSERVER",
   TRUSTED: "OBSERVER",
@@ -4899,7 +4914,11 @@ async function reconcileNetherscrollsCharacterItemsSafely(actor, rows, character
         const effects = data.effects;
         const reconcileEffects = !haveSameNetherscrollsEmbeddedEffects(previous, data) && typeof previous.createEmbeddedDocuments === "function";
         if (reconcileEffects || haveSameNetherscrollsEmbeddedEffects(previous, data)) delete data.effects;
-        [saved] = await actor.updateEmbeddedDocuments("Item", [data], { render: false, netherscrollsTransfer: true });
+        [saved] = await actor.updateEmbeddedDocuments(
+          "Item",
+          [replaceNetherscrollsOwnedItemActivities(data, previous)],
+          { render: false, netherscrollsTransfer: true }
+        );
         result.updated++;
         if (reconcileEffects) await reconcileNetherscrollsItemEffectsSafely(previous, effects ?? []);
       } else {
@@ -5055,7 +5074,7 @@ async function reconcileNetherscrollsCharacterActorItems(
         // unchanged effect array out of the Item update prevents it from
         // appending another copy on each character import.
         delete update.effects;
-        updates.push(update);
+        updates.push(replaceNetherscrollsOwnedItemActivities(update, existing));
       }
     } else {
       creates.push(data);
@@ -5328,6 +5347,7 @@ Hooks.once("ready", async () => {
   initEnhanceDialogInputHandlers();
   initChatNumberActionHandlers();
   placeExistingNetherscrollsImportPacksInSidebarFolder();
+  applyNetherscrollsImportPackBanners();
   // Check the world's guild once, quietly: warn if access was removed, and pick the
   // only guild automatically. Several guilds wait for the import / export window.
   if (game.user?.isGM && isPrimaryNetherscrollsQueuePoller() && getNetherscrollsApiKey()) {
@@ -5350,6 +5370,10 @@ Hooks.on("renderApplicationV2", (app, element) => {
 
 Hooks.on("renderActorSheet", (app, html) => {
   injectFoundryExportButtonV1(app, html);
+});
+
+Hooks.on("renderCompendiumDirectory", (app, html) => {
+  markNetherscrollsPackTitles(html);
 });
 
 Hooks.on("renderActorSheetV2", (app, html) => {
@@ -6209,6 +6233,21 @@ async function importNetherscrollsSpells(spells) {
   };
 }
 
+// An ItemGrant step that grants nothing only shows as an empty step during level-up (Variant
+// Aasimar's "Celestial Legacy (Spells)" arrives without its spells).
+function removeNetherscrollsEmptyItemGrants(system) {
+  const advancement = system?.advancement;
+  if (!advancement || typeof advancement !== "object") return;
+  const isEmpty = (entry) => entry?.type === "ItemGrant" && !(entry.configuration?.items ?? []).length;
+  if (Array.isArray(advancement)) {
+    system.advancement = advancement.filter((entry) => !isEmpty(entry));
+    return;
+  }
+  for (const [id, entry] of Object.entries(advancement)) {
+    if (isEmpty(entry)) delete advancement[id];
+  }
+}
+
 async function importNetherscrollsGenericFoundryItems(rows, typeKey) {
   const pack = await getNetherscrollsImportPack(typeKey);
   if (!pack) throw new Error(`Netherscrolls ${getNetherscrollsImportTypeLabel(typeKey)} compendium pack was not found.`);
@@ -6242,6 +6281,7 @@ async function importNetherscrollsGenericFoundryItems(rows, typeKey) {
     source.img = normalizeNetherscrollsImportImagePath(row?.img, row?.image, source.img);
     source.system ??= {};
     source.effects ??= [];
+    removeNetherscrollsEmptyItemGrants(source.system);
     // Races arrive without a Foundry payload (and a payload can omit its text):
     // fall back to the row's top-level HTML whenever the document has none.
     if (!toTrimmedStringOrNull(source.system.description?.value)) {
@@ -6600,6 +6640,7 @@ async function getNetherscrollsImportPack(typeKey) {
   if (existing) return ensureNetherscrollsImportPackSidebarFolder(existing);
 
   const created = await createNetherscrollsWorldImportPack(definition);
+  if (created) applyNetherscrollsImportPackBanners();
   return ensureNetherscrollsImportPackSidebarFolder(created);
 }
 
@@ -6661,6 +6702,84 @@ async function ensureNetherscrollsImportPackSidebarFolder(pack) {
   }
 
   return pack;
+}
+
+const netherscrollsPackBannerChecks = new Map();
+
+function isNetherscrollsPackBannerAvailable(path) {
+  let check = netherscrollsPackBannerChecks.get(path);
+  if (check) return check;
+  check = new Promise((resolve) => {
+    const ImageClass = globalThis.Image;
+    if (typeof ImageClass !== "function") return resolve(false);
+    const image = new ImageClass();
+    const finish = (available) => {
+      clearTimeout(timeout);
+      image.onload = null;
+      image.onerror = null;
+      resolve(available);
+    };
+    const timeout = setTimeout(() => finish(false), NETHERSCROLLS_IMAGE_VALIDATION_TIMEOUT_MS);
+    image.onload = () => finish(true);
+    image.onerror = () => finish(false);
+    image.src = path;
+  });
+  netherscrollsPackBannerChecks.set(path, check);
+  return check;
+}
+
+async function applyNetherscrollsImportPackBanner(typeKey, pack) {
+  const file = NETHERSCROLLS_IMPORT_PACK_BANNERS[typeKey];
+  if (!file || !pack?.metadata) return false;
+  const path = `${NETHERSCROLLS_IMPORT_PACK_BANNER_DIR}/${file}`;
+  if (pack.metadata.banner === path) return false;
+  if (!(await isNetherscrollsPackBannerAvailable(path))) return false;
+  try {
+    pack.metadata.banner = path;
+    return pack.metadata.banner === path;
+  } catch (err) {
+    console.warn(`${MODULE_ID} | Unable to set the ${pack.title ?? pack.collection} banner.`, err);
+    return false;
+  }
+}
+
+// Our banners are light sepia art, where the sidebar's white pack titles are hard to read.
+// Mark each Netherscrolls pack's title so the stylesheet can colour it brown. Core and the
+// system name the title element differently across versions, so find it by its text.
+function markNetherscrollsPackTitles(html) {
+  const root = html instanceof HTMLElement ? html : html?.[0];
+  if (!root?.querySelector) return;
+  for (const typeKey of Object.keys(NETHERSCROLLS_WORLD_IMPORT_PACKS)) {
+    const collection = getNetherscrollsImportPackCollection(typeKey);
+    const pack = game?.packs?.get?.(collection);
+    const title = toTrimmedStringOrNull(pack?.title ?? pack?.metadata?.label);
+    if (!title) continue;
+    const quoted = CSS.escape(collection);
+    const entry = root.querySelector(`[data-pack="${quoted}"], [data-entry-id="${quoted}"]`);
+    if (!entry) continue;
+    entry.classList.add("netherscrolls-pack");
+    const label = Array.from(entry.querySelectorAll("*")).find((node) =>
+      Array.from(node.childNodes).some(
+        (child) => child.nodeType === Node.TEXT_NODE && child.textContent.trim() === title
+      )
+    );
+    if (!label) continue;
+    label.classList.add("netherscrolls-pack-title");
+    const icon = label.previousElementSibling;
+    if (icon?.tagName === "I") icon.classList.add("netherscrolls-pack-title");
+  }
+}
+
+async function applyNetherscrollsImportPackBanners() {
+  try {
+    const results = await Promise.all(Object.keys(NETHERSCROLLS_WORLD_IMPORT_PACKS).map((typeKey) => {
+      const pack = game?.packs?.get?.(getNetherscrollsImportPackCollection(typeKey));
+      return pack ? applyNetherscrollsImportPackBanner(typeKey, pack) : false;
+    }));
+    if (results.some(Boolean)) ui.compendium?.render?.();
+  } catch (err) {
+    console.warn(`${MODULE_ID} | Unable to apply Netherscrolls compendium banners.`, err);
+  }
 }
 
 async function findOrCreateNetherscrollsCompendiumFolder() {
@@ -7162,7 +7281,9 @@ function buildNetherscrollsFeatureChoiceItem(parentDescriptor, choice, index, ne
     title,
     name: title,
     level: Math.max(parentDescriptor.level, toNumber(source.level, 1)),
-    descriptionHtml: buildNetherscrollsFeatureChoiceDescription(choice),
+    descriptionHtml:
+      buildNetherscrollsFeatureChoiceDescription(choice) ||
+      buildNetherscrollsFeatureChoiceFallbackDescription(choice, parentFeature),
     choices: [],
     selectable: 0,
     choiceType: "",
@@ -7170,6 +7291,40 @@ function buildNetherscrollsFeatureChoiceItem(parentDescriptor, choice, index, ne
     rules: source.rules ?? parentFeature?.rules,
     img: source.img ?? source.image ?? parentFeature?.img ?? parentFeature?.image,
   };
+}
+
+// Netherscrolls leaves some options without text: creature forms and companions (their
+// statistics are in `creature`) and Favored Enemy / Terrain picks, where the name is the option.
+function buildNetherscrollsFeatureChoiceFallbackDescription(choice, parentFeature) {
+  const sections = [];
+  const creature = choice?.creature;
+  if (creature && typeof creature === "object") {
+    const challenge = Number(creature.challengeRating);
+    const fractions = { 0.125: "1/8", 0.25: "1/4", 0.5: "1/2" };
+    const header = [
+      toTrimmedStringOrNull(creature.size),
+      Number.isFinite(challenge) ? `CR ${fractions[challenge] ?? challenge}` : null,
+    ].filter(Boolean).join(", ");
+    if (header) sections.push(`<p><strong>${escapeHtml(header)}</strong></p>`);
+
+    const movement = Object.entries(creature.movement ?? {})
+      .map(([mode, distance]) => [mode, toTrimmedStringOrNull(distance)])
+      .filter(([, distance]) => distance)
+      .sort(([a], [b]) => (a === "walk" ? -1 : b === "walk" ? 1 : 0))
+      .map(([mode, distance]) => (mode === "walk" ? distance : `${mode} ${distance}`));
+    if (movement.length) sections.push(`<p><strong>Speed</strong> ${escapeHtml(movement.join(", "))}</p>`);
+
+    const senses = Object.entries(creature.senses ?? {})
+      .map(([sense, value]) => [sense, toTrimmedStringOrNull(value)])
+      .filter(([, value]) => value)
+      .map(([sense, value]) => (sense === "passive_perception"
+        ? `passive Perception ${value}`
+        : `${sense.replace(/_/g, " ")} ${value}`));
+    if (senses.length) sections.push(`<p><strong>Senses</strong> ${escapeHtml(senses.join(", "))}</p>`);
+  }
+  const parentTitle = getNetherscrollsFeatureTitle(parentFeature);
+  if (parentTitle) sections.push(`<p>An option of <em>${escapeHtml(parentTitle)}</em>.</p>`);
+  return sections.join("");
 }
 
 function getNetherscrollsFeatureChoiceKey(parentDescriptor, choice, index) {
@@ -8626,6 +8781,7 @@ function normalizeNetherscrollsItemData(item) {
 
   applyNetherscrollsItemAttackModifiers(itemData, source);
   applyNetherscrollsImportFlags(itemData, source, netherscrollsId);
+  resolveNetherscrollsActivityAbilityModifiers(itemData);
   return itemData;
 }
 
@@ -8676,7 +8832,31 @@ function normalizeNetherscrollsFoundryItemData(item) {
 
   applyNetherscrollsItemAttackModifiers(source, { ...item, system: getNetherscrollsFoundryItemPayload(item)?.system });
   applyNetherscrollsImportFlags(source, item, netherscrollsId);
+  resolveNetherscrollsActivityAbilityModifiers(source);
   return source;
+}
+
+// "@mod" is the attack's ability modifier. Name the ability wherever the activity or the weapon
+// fixes it, so the formula resolves the same for any actor and in compendium previews. Spellcasting
+// and finesse attacks choose their ability at roll time and keep "@mod".
+function resolveNetherscrollsActivityAbilityModifiers(item) {
+  const abilities = Object.keys(NETHERSCROLLS_ABILITY_LABELS);
+  const properties = Array.from(item?.system?.properties ?? []);
+  const weaponDefault = item?.type !== "weapon" || properties.includes("fin")
+    ? null
+    : /R$/.test(String(item.system?.type?.value ?? "")) ? "dex" : "str";
+  for (const activity of Object.values(item?.system?.activities ?? {})) {
+    if (activity?.type !== "attack") continue;
+    const explicit = toTrimmedStringOrNull(activity.attack?.ability);
+    const ability = explicit ? (abilities.includes(explicit) ? explicit : null) : weaponDefault;
+    if (!ability) continue;
+    const resolve = (value) => (typeof value === "string" ? value.replace(/@mod\b/g, `@abilities.${ability}.mod`) : value);
+    for (const part of [...(activity.damage?.parts ?? []), ...(activity.healing ? [activity.healing] : [])]) {
+      if (!part || typeof part !== "object") continue;
+      part.bonus = resolve(part.bonus);
+      if (part.custom) part.custom.formula = resolve(part.custom.formula);
+    }
+  }
 }
 
 function buildNetherscrollsItemSystem(source, { itemType, descriptionHtml, netherscrollsId, sourceName }) {
@@ -9468,7 +9648,7 @@ function normalizeNetherscrollsSpellData(spell) {
     system: {
       activities: hasNetherscrollsObjectEntries(activities)
         ? sanitizeNetherscrollsActivityTargets(activities)
-        : inferred.activity ? sanitizeNetherscrollsActivityTargets({ [inferred.activity._id]: inferred.activity }) : {},
+        : getNetherscrollsInferredSpellActivities(inferred),
       activation: inferred.activation,
       ability: normalizeNetherscrollsSaveAbility(source?.system?.ability ?? source?.ability) ?? "",
       description: {
@@ -9536,7 +9716,7 @@ function normalizeNetherscrollsFoundrySpellData(spell) {
     const activities = normalizeNetherscrollsActivities(spell);
     source.system.activities = hasNetherscrollsObjectEntries(activities)
       ? sanitizeNetherscrollsActivityTargets(activities)
-      : inferred.activity ? sanitizeNetherscrollsActivityTargets({ [inferred.activity._id]: inferred.activity }) : {};
+      : getNetherscrollsInferredSpellActivities(inferred);
   } else {
     source.system.activities = sanitizeNetherscrollsActivityTargets(source.system.activities);
   }
@@ -9583,6 +9763,13 @@ function buildNetherscrollsSpellSource(sourceName, source = {}) {
   };
 }
 
+function getNetherscrollsInferredSpellActivities(inferred) {
+  const activities = inferred?.activities ?? (inferred?.activity ? [inferred.activity] : []);
+  return sanitizeNetherscrollsActivityTargets(
+    Object.fromEntries(activities.map((activity) => [activity._id, activity]))
+  );
+}
+
 function inferNetherscrollsSpellFields(source, descriptionHtml) {
   const text = normalizeNetherscrollsSpellText(descriptionHtml);
   const primaryText = getNetherscrollsPrimarySpellText(text);
@@ -9596,7 +9783,7 @@ function inferNetherscrollsSpellFields(source, descriptionHtml) {
   const healing = inferNetherscrollsSpellHealing(source, primaryText);
   const damage = inferNetherscrollsSpellDamage(source, primaryText, text);
   const attack = inferNetherscrollsSpellAttack(source, primaryText);
-  const activity = buildNetherscrollsSpellActivity(source, {
+  const inferred = {
     activation,
     damage,
     duration,
@@ -9607,11 +9794,16 @@ function inferNetherscrollsSpellFields(source, descriptionHtml) {
     target,
     text: primaryText,
     attack,
-  });
+  };
+  const activity = buildNetherscrollsSpellActivity(source, inferred);
+  const activities = activity
+    ? [activity, ...buildNetherscrollsSecondarySpellActivities(source, inferred, activity)]
+    : [];
 
   return {
     activation,
     activity,
+    activities,
     duration,
     materials,
     properties,
@@ -9637,7 +9829,10 @@ function normalizeNetherscrollsSpellText(value) {
 }
 
 function getNetherscrollsPrimarySpellText(text) {
-  return String(text ?? "").split(/\bat higher levels?\b/i)[0].trim();
+  const primary = String(text ?? "").split(/\bat higher levels?\b/i)[0];
+  // A summoned creature's stat block describes the creature's actions, not the spell's.
+  const statBlock = /\bArmor Class\s+\d+[\s\S]{0,200}?\bHit Points\s+\d+/i.exec(primary);
+  return (statBlock ? primary.slice(0, statBlock.index) : primary).trim();
 }
 
 function inferNetherscrollsSpellActivation(source, text) {
@@ -9953,8 +10148,13 @@ function normalizeNetherscrollsSaveAbility(value) {
 function inferNetherscrollsSpellAttack(source, text) {
   const explicit = toTrimmedStringOrNull(source?.actionType ?? source?.attackType);
   const content = `${explicit ?? ""} ${text ?? ""}`;
-  if (/\bmelee spell attack\b|\bmsak\b/i.test(content)) return "melee";
-  if (/\branged spell attack\b|\brsak\b/i.test(content)) return "ranged";
+  // "make up to two melee spell attacks"; a bare plural ("advantage on melee spell attacks") is not one.
+  const several = (kind) => new RegExp(
+    `\\bmakes?\\s+(?:up to\\s+)?(?:one|two|three|four|\\d+)\\s+${kind} spell attacks\\b`,
+    "i"
+  );
+  if (/\bmelee spell attack\b|\bmsak\b/i.test(content) || several("melee").test(content)) return "melee";
+  if (/\branged spell attack\b|\brsak\b/i.test(content) || several("ranged").test(content)) return "ranged";
   return null;
 }
 
@@ -9974,7 +10174,10 @@ function inferNetherscrollsSpellHealing(source, text) {
 
 function inferNetherscrollsSpellDamage(source, text, scalingText = text) {
   const explicit = source?.damage;
-  const explicitFormula = parseNetherscrollsFormulaFromUnknown(explicit);
+  const explicitFormula = addNetherscrollsSpellcastingModifierFromText(
+    parseNetherscrollsFormulaFromUnknown(explicit),
+    text
+  );
   const explicitType = normalizeNetherscrollsDamageType(
     Array.isArray(source?.damageTypes) ? source.damageTypes[0] : source?.damageType
   );
@@ -9988,8 +10191,22 @@ function inferNetherscrollsSpellDamage(source, text, scalingText = text) {
   if (!parsed?.formula || !parsed?.type) return null;
   return {
     ...parseNetherscrollsDicePart(parsed.formula, parsed.type),
+    // "5d10 radiant or necrotic damage": D&D5e lets the caster pick from the listed types.
+    ...(parsed.types?.length > 1 ? { types: parsed.types } : {}),
     scaling: inferNetherscrollsScaling(scalingText, "damage", getNetherscrollsSpellLevel(source)),
   };
+}
+
+// The API lists a spell's dice without the modifier ("3d8"). Add it when the text says
+// "3d8 plus your spellcasting ability modifier".
+function addNetherscrollsSpellcastingModifierFromText(formula, text) {
+  const first = toTrimmedStringOrNull(formula)?.split(",")[0].trim();
+  if (!first || !/^\d+d\d+$/i.test(first)) return formula;
+  const withModifier = new RegExp(
+    `\\b${first}\\s*(?:\\+|plus)\\s*your spellcasting ability modifier\\b`,
+    "i"
+  );
+  return withModifier.test(String(text ?? "")) ? `${first} + @mod` : formula;
 }
 
 function parseNetherscrollsFormulaFromUnknown(value) {
@@ -10003,25 +10220,46 @@ function parseNetherscrollsFormulaFromUnknown(value) {
   return toTrimmedStringOrNull(value.formula ?? value.value ?? value.damage ?? value.healing);
 }
 
+// An amount in spell text: "2d8", "2d8 + 3", "2d8 plus your spellcasting ability modifier", "10".
+const NETHERSCROLLS_TEXT_AMOUNT =
+  "\\d+d\\d+(?:\\s*(?:\\+|plus)\\s*(?:your spellcasting ability modifier|your \\w+ modifier|@mod|\\d+))?|\\d+";
+// Rejects a multiplier: "16 × the number of spell slots" is not 16.
+const NETHERSCROLLS_NOT_MULTIPLIED = "\\b(?!\\s*(?:×|\\*|times\\b|x\\b))";
+
 function parseNetherscrollsHealingFormula(text) {
   const source = String(text ?? "");
+  const amount = `(${NETHERSCROLLS_TEXT_AMOUNT})${NETHERSCROLLS_NOT_MULTIPLIED}`;
   const match =
-    /\bregains?\s+(?:hit points )?(?:equal to\s+)?(\d+d\d+(?:\s*\+\s*(?:your spellcasting ability modifier|your \w+ modifier|@mod|\d+))?|\d+)\s+hit points\b/i.exec(source) ??
-    /\brestore[sd]?\s+(\d+d\d+(?:\s*\+\s*(?:your spellcasting ability modifier|your \w+ modifier|@mod|\d+))?|\d+)\s+hit points\b/i.exec(source);
+    // "regains 2d4 hit points", "regains up to 10 hit points"
+    new RegExp(`\\bregains?\\s+(?:up to\\s+)?(?:hit points\\s+)?(?:equal to\\s+)?${amount}\\s+hit points\\b`, "i").exec(source) ??
+    // "regains (a number of) hit points equal to 1d8 plus your spellcasting ability modifier"
+    new RegExp(`\\bregains?\\s+(?:a number of\\s+)?hit points\\s+equal to\\s+${amount}`, "i").exec(source) ??
+    new RegExp(`\\brestore[sd]?\\s+${amount}\\s+hit points\\b`, "i").exec(source);
   return normalizeNetherscrollsFormula(match?.[1]);
 }
 
 function parseNetherscrollsDamageFormula(text) {
   const typePattern = NETHERSCROLLS_DAMAGE_TYPES.join("|");
-  const regex = new RegExp(
-    `\\b(\\d+d\\d+(?:\\s*\\+\\s*(?:your spellcasting ability modifier|your \\w+ modifier|@mod|\\d+))?|\\d+)\\s+(${typePattern})\\s+damage\\b`,
+  const source = String(text ?? "");
+  // "2d6 fire damage", "5d10 radiant or necrotic damage"
+  const amountFirst = new RegExp(
+    `\\b(${NETHERSCROLLS_TEXT_AMOUNT})\\s+(${typePattern})(?:\\s+or\\s+(${typePattern}))?\\s+damage\\b`,
     "i"
-  );
-  const match = regex.exec(String(text ?? ""));
+  ).exec(source);
+  // "takes fire damage equal to 2d8 + your spellcasting ability modifier"
+  const typeFirst = new RegExp(
+    `\\b(${typePattern})\\s+damage\\s+equal to\\s+(${NETHERSCROLLS_TEXT_AMOUNT})${NETHERSCROLLS_NOT_MULTIPLIED}`,
+    "i"
+  ).exec(source);
+  const match = amountFirst && (!typeFirst || amountFirst.index <= typeFirst.index)
+    ? { formula: amountFirst[1], types: [amountFirst[2], amountFirst[3]] }
+    : typeFirst ? { formula: typeFirst[2], types: [typeFirst[1]] } : null;
   if (!match) return null;
+  const types = match.types.map(normalizeNetherscrollsDamageType).filter(Boolean);
   return {
-    formula: normalizeNetherscrollsFormula(match[1]),
-    type: normalizeNetherscrollsDamageType(match[2]),
+    formula: normalizeNetherscrollsFormula(match.formula),
+    type: types[0] ?? null,
+    types,
   };
 }
 
@@ -10043,6 +10281,7 @@ function normalizeNetherscrollsFormula(value) {
   return raw
     .replace(/your spellcasting ability modifier/gi, "@mod")
     .replace(/your \w+ modifier/gi, "@mod")
+    .replace(/\s+plus\s+/gi, " + ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -10130,8 +10369,9 @@ function inferNetherscrollsScaling(text, kind, spellLevel = null) {
 }
 
 function buildNetherscrollsSpellActivity(source, inferred) {
-  const type = getNetherscrollsActivityType(source, inferred);
-  if (!type) return null;
+  // A spell with no roll still needs an activity: casting it spends the slot and starts
+  // concentration, which D&D5e only does through an activity.
+  const type = getNetherscrollsActivityType(source, inferred) ?? "utility";
 
   const activity = buildNetherscrollsBaseActivity(source, type, inferred);
   if (type === "attack") {
@@ -10164,12 +10404,122 @@ function buildNetherscrollsSpellActivity(source, inferred) {
   return activity;
 }
 
+// Many spells do more than one thing: a spell attack with a saving throw rider, two lights to
+// choose from, damage that also heals the caster. The main activity takes the effect the text
+// describes first. Each other explicit effect gets its own activity, which spends no spell slot
+// and starts no concentration, because it is part of the same casting.
+function buildNetherscrollsSecondarySpellActivities(source, inferred, primary) {
+  const text = String(inferred.text ?? "");
+  const abilities = Object.values(NETHERSCROLLS_ABILITY_LABELS).flat().join("|");
+  const save = new RegExp(
+    `\\b(?:make|makes|succeed on|succeeds on|attempt|attempts)\\s+(?:(?:a|an)\\s+)?(${abilities})\\s+saving throw\\b`,
+    "i"
+  ).exec(text);
+  const attack =
+    /\b(?:make|makes)\s+(?:a|an|one|two|three|four|\d+|up to (?:one|two|three|four|\d+))\s+(melee|ranged)\s+spell attacks?\b/i.exec(text);
+  const wantsSave = Boolean(save && primary.type !== "save");
+  const wantsAttack = Boolean(attack && primary.type !== "attack");
+  const wantsHeal = Boolean(inferred.healing && primary.type !== "heal");
+  if (!wantsSave && !wantsAttack && !wantsHeal) return [];
+
+  // Each effect's damage is stated after the phrase that introduces it: up to the next effect,
+  // within three sentences ("Make a ranged spell attack. ... On a hit, it takes 4d6 lightning damage.").
+  const starts = [save?.index, attack?.index].filter((index) => Number.isInteger(index));
+  const segment = (index, sentences = 3) => {
+    let end = index;
+    for (let sentence = 0; sentence < sentences && end >= 0; sentence += 1) end = text.indexOf(". ", end + 1);
+    const next = Math.min(...starts.filter((start) => start > index));
+    const stop = Math.min(end < 0 ? text.length : end + 1, next);
+    return text.slice(index, stop);
+  };
+  const explicitDamage = Boolean(parseNetherscrollsFormulaFromUnknown(source?.damage));
+  const damageIn = (part) => {
+    const parsed = parseNetherscrollsDamageFormula(part);
+    if (!parsed?.formula || !parsed?.type) return null;
+    const result = parseNetherscrollsDicePart(parsed.formula, parsed.type);
+    if (parsed.types?.length > 1) result.types = parsed.types;
+    return result;
+  };
+
+  // A text-inferred main save or attack keeps only the damage stated in its own part of the text,
+  // not a later effect's damage. Damage listed by the API is left as it is.
+  const primaryStart = primary.type === "save" ? save?.index : primary.type === "attack" ? attack?.index : null;
+  if (!explicitDamage && Number.isInteger(primaryStart) && primary.damage) {
+    const own = damageIn(segment(primaryStart, Infinity));
+    const parts = own ? [{ ...own, scaling: inferred.damage?.scaling ?? own.scaling }] : [];
+    primary.damage.parts = parts.map(buildNetherscrollsActivityPart);
+  }
+  const primaryParts = [...(primary.damage?.parts ?? [])];
+  const secondaryDamage = (index) => {
+    const part = damageIn(segment(index));
+    if (!part) return null;
+    // With API-listed damage the main activity may already roll this phrase.
+    const repeated = explicitDamage && primaryParts.some((existing) => existing.number === part.number &&
+      existing.denomination === part.denomination && existing.types?.[0] === part.types[0]);
+    return repeated ? null : part;
+  };
+  const secondary = (type) => {
+    const activity = buildNetherscrollsBaseActivity(source, type, inferred);
+    activity.consumption.spellSlot = false;
+    activity.duration = { value: "", units: "inst", concentration: false, override: true };
+    return activity;
+  };
+
+  const activities = [];
+  if (wantsSave) {
+    const activity = secondary("save");
+    activity.save = {
+      ability: [normalizeNetherscrollsSaveAbility(save[1])],
+      dc: { formula: "", calculation: "spellcasting" },
+    };
+    activity.damage = buildNetherscrollsSaveActivityDamage(secondaryDamage(save.index), segment(save.index));
+    activities.push(activity);
+  }
+  if (wantsAttack) {
+    const activity = secondary("attack");
+    activity.attack = {
+      ability: "spellcasting",
+      bonus: "",
+      critical: {},
+      flat: false,
+      type: { value: attack[1].toLowerCase(), classification: "spell" },
+    };
+    activity.damage = buildNetherscrollsActivityDamage(secondaryDamage(attack.index));
+    activities.push(activity);
+  }
+  if (wantsHeal) {
+    const activity = secondary("heal");
+    activity.healing = buildNetherscrollsActivityPart(inferred.healing);
+    activities.push(activity);
+  }
+  for (const [index, activity] of activities.entries()) activity.sort = (index + 1) * 100000;
+  return activities;
+}
+
 function getNetherscrollsActivityType(source, inferred) {
   const explicit = toTrimmedStringOrNull(source?.actionType ?? source?.activityType)?.toLowerCase();
   if (explicit === "save" || explicit === "attack" || explicit === "heal" || explicit === "damage") {
     return explicit;
   }
-  if (inferred.healing) return "heal";
+  // Follow the order the text describes: healing after damage, an attack or a save is a rider
+  // ("...2d6 necrotic damage, and you regain 1d6 hit points"), and a save described before a
+  // spell attack is the main effect. Values with no matching phrase keep the fixed order.
+  const text = String(inferred.text ?? "");
+  const at = (pattern) => {
+    const index = text.search(pattern);
+    return index < 0 ? Infinity : index;
+  };
+  const healAt = at(/\b(?:regains?|restore[sd]?)\s+(?:up to\s+)?(?:a number of\s+)?(?:hit points\s+)?(?:equal to\s+)?\d/i);
+  const attackAt = inferred.attack ? at(/\b(?:melee|ranged) spell attacks?\b|\b[mr]sak\b/i) : Infinity;
+  const saveAt = inferred.saveAbility
+    ? at(new RegExp(`\\b(?:${Object.values(NETHERSCROLLS_ABILITY_LABELS).flat().join("|")})\\s+saving throw\\b`, "i"))
+    : Infinity;
+  const damageAt = inferred.damage
+    ? at(new RegExp(`\\b(?:${NETHERSCROLLS_DAMAGE_TYPES.join("|")})\\s+damage\\b`, "i"))
+    : Infinity;
+  const healIsRider = healAt !== Infinity && Math.min(attackAt, saveAt, damageAt) < healAt;
+  if (inferred.healing && !healIsRider) return "heal";
+  if (inferred.attack && inferred.saveAbility && saveAt < attackAt) return "save";
   if (inferred.attack) return "attack";
   if (inferred.saveAbility) return "save";
   if (inferred.damage) return "damage";
@@ -10333,6 +10683,50 @@ async function yieldNetherscrollsMainThreadIfNeeded(budget) {
   budget.startedAt = Date.now();
 }
 
+// Library rows carry their complete activity and advancement sets, keyed by ID. A plain update
+// merges those objects, so an entry removed or re-keyed in Netherscrolls (a spell whose inferred
+// attack became a save) would stay next to its replacement. Replace them instead.
+function replaceNetherscrollsKeyedSystemFields(update, keys = ["activities", "advancement"]) {
+  const system = update?.system;
+  const ForcedReplacement = globalThis.foundry?.data?.operators?.ForcedReplacement;
+  if (!system || typeof system !== "object" || Array.isArray(system)) return update;
+  // The whole system is already being replaced (Item type change).
+  if (ForcedReplacement && system instanceof ForcedReplacement) return update;
+  const isKeyed = (value) => Boolean(value && typeof value === "object" && !Array.isArray(value));
+  if (!keys.some((key) => isKeyed(system[key]))) return update;
+  const replaced = { ...system };
+  for (const key of keys) {
+    const value = system[key];
+    if (!isKeyed(value)) continue;
+    if (ForcedReplacement) {
+      replaced[key] = new ForcedReplacement(value);
+    } else {
+      // Foundry 13: an "==" key replaces the object rather than merging it.
+      delete replaced[key];
+      replaced[`==${key}`] = value;
+    }
+  }
+  return { ...update, system: replaced };
+}
+
+// An owned copy is updated the same way, except that it keeps activities a player added in
+// Foundry. Activities an earlier import wrote ("ns…" IDs, or flagged as Netherscrolls features)
+// are replaced. Advancement keeps its merge: on an Actor it records what was granted.
+function replaceNetherscrollsOwnedItemActivities(update, existing) {
+  const activities = update?.system?.activities;
+  if (!activities || typeof activities !== "object" || Array.isArray(activities)) return update;
+  const current = existing?._source?.system?.activities ?? {};
+  const imported = (id, activity) =>
+    /^ns[a-z]/.test(id) || Boolean(activity?.flags?.netherscrolls || activity?.flags?.[MODULE_ID]);
+  const kept = Object.fromEntries(
+    Object.entries(current).filter(([id, activity]) => !(id in activities) && !imported(id, activity))
+  );
+  return replaceNetherscrollsKeyedSystemFields(
+    { ...update, system: { ...update.system, activities: { ...kept, ...activities } } },
+    ["activities"]
+  );
+}
+
 async function runNetherscrollsCompendiumDocumentBatches(
   DocumentClass,
   method,
@@ -10389,7 +10783,7 @@ async function runNetherscrollsCompendiumDocumentBatches(
       if (matching.length) {
         for (const entry of matching) {
           const localId = entry.id ?? entry._id;
-          const update = { ...row, _id: localId, img: image };
+          const update = replaceNetherscrollsKeyedSystemFields({ ...row, _id: localId, img: image });
           const ForcedReplacement = globalThis.foundry?.data?.operators?.ForcedReplacement;
           if (entry.type && row.type && entry.type !== row.type && ForcedReplacement) {
             // Foundry v14 requires a new system model when the Item type changes.
@@ -10399,7 +10793,7 @@ async function runNetherscrollsCompendiumDocumentBatches(
           updates.set(localId, update);
         }
       } else if (method === "updateDocuments") {
-        updates.set(row._id, { ...row, img: image });
+        updates.set(row._id, replaceNetherscrollsKeyedSystemFields({ ...row, img: image }));
       } else {
         const key = id ? `${row.type}:${id}` : `row:${creates.size}`;
         const previous = creates.get(key);

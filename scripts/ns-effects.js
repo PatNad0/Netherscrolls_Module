@@ -623,15 +623,21 @@
         ? ABILITIES.map(a => ({ stat: `savingThrows.${a}` })) : foundryTargets(change.key);
       return targets?.length && targets.every(t => ownedTargets.has(ownershipTarget(t.stat)));
     };
-    const retained = original.filter(e => !isNative(e)).map(e => {
+    const retained = original.filter(e => !isNative(e)).flatMap(e => {
       const result = clone(e);
       result.transfer = e.transfer === false || linked.has(e._id) ? false : e.transfer ?? true;
-      if (hasNativeDefinitions && result.transfer) {
-        for (const container of [result, result.system].filter(Boolean)) {
-          if (Array.isArray(container.changes)) container.changes = container.changes.filter(change => !mirrored(change));
-        }
+      if (!result.transfer) return [result];
+      let kept = 0;
+      for (const container of [result, result.system].filter(Boolean)) {
+        if (!Array.isArray(container.changes)) continue;
+        if (hasNativeDefinitions) container.changes = container.changes.filter(change => !mirrored(change));
+        kept += container.changes.length;
       }
-      return result;
+      // A passive effect with no changes and no status does nothing. It is either an imported
+      // marker or one whose every change is now calculated natively, and would only show as an
+      // empty duplicate on the sheet.
+      if (!kept && !list(result.statuses).length) return [];
+      return [result];
     });
     const translated = new Map();
     for (const owner of owners) {

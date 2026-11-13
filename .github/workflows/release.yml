@@ -37,7 +37,7 @@ jobs:
         run: |
           zip -r Netherscrolls_Module.zip \
             module.json index.js Elturian_grey.webp \
-            lang styles templates \
+            assets lang styles templates \
             scripts/ns-effects.js \
             scripts/ns-effects-foundry.js \
             scripts/ns-features.js
