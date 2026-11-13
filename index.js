@@ -6242,6 +6242,15 @@ async function importNetherscrollsGenericFoundryItems(rows, typeKey) {
     source.img = normalizeNetherscrollsImportImagePath(row?.img, row?.image, source.img);
     source.system ??= {};
     source.effects ??= [];
+    // Races arrive without a Foundry payload (and a payload can omit its text):
+    // fall back to the row's top-level HTML whenever the document has none.
+    if (!toTrimmedStringOrNull(source.system.description?.value)) {
+      const description =
+        toTrimmedStringOrNull(row?.descriptionHtml) ?? toTrimmedStringOrNull(row?.description);
+      if (description) {
+        source.system.description = { ...(source.system.description ?? {}), value: description };
+      }
+    }
     applyNetherscrollsImportFlags(source, row, netherscrollsId);
     if (source.type === "subclass") {
       const classId = getNetherscrollsSubclassClassId(row, foundryItem);
