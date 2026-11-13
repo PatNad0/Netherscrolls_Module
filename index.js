@@ -6749,6 +6749,16 @@ async function applyNetherscrollsImportPackBanner(typeKey, pack) {
 function markNetherscrollsPackTitles(html) {
   const root = html instanceof HTMLElement ? html : html?.[0];
   if (!root?.querySelector) return;
+  // The top-level "Netherscrolls" compendium folder gets the parchment header.
+  const folder = getWorldFolders().find((entry) =>
+    entry?.name === NETHERSCROLLS_IMPORT_SIDEBAR_FOLDER.name &&
+    entry?.type === NETHERSCROLLS_IMPORT_SIDEBAR_FOLDER.type &&
+    !getDocumentId(entry?.folder)
+  );
+  const folderId = getDocumentId(folder);
+  if (folderId) {
+    root.querySelector(`[data-folder-id="${CSS.escape(folderId)}"]`)?.classList.add("netherscrolls-folder");
+  }
   for (const typeKey of Object.keys(NETHERSCROLLS_WORLD_IMPORT_PACKS)) {
     const collection = getNetherscrollsImportPackCollection(typeKey);
     const pack = game?.packs?.get?.(collection);
@@ -10281,6 +10291,8 @@ function normalizeNetherscrollsFormula(value) {
   return raw
     .replace(/your spellcasting ability modifier/gi, "@mod")
     .replace(/your \w+ modifier/gi, "@mod")
+    // The API writes "2d8 + spellcasting modifier" in `damage`.
+    .replace(/\bspellcasting (?:ability )?modifier\b/gi, "@mod")
     .replace(/\s+plus\s+/gi, " + ")
     .replace(/\s+/g, " ")
     .trim();
