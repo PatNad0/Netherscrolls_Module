@@ -36,11 +36,10 @@ jobs:
         shell: bash
         run: |
           zip -r Netherscrolls_Module.zip \
-            module.json index.js Elturian_grey.webp \
-            assets lang styles templates \
-            scripts/ns-effects.js \
-            scripts/ns-effects-foundry.js \
-            scripts/ns-features.js
+            module.json index.js \
+            assets lang styles templates
+          # Include every runtime module while leaving local verification tools out.
+          find scripts -type f -name '*.js' -print0 | xargs -0 zip Netherscrolls_Module.zip
 
       - name: Publish release
         if: env.SKIP_RELEASE != 'true'
