@@ -4,7 +4,7 @@
  */
 import { getActorNetherscrollsGuildId, normalizeNetherscrollsGuildId } from "../api/client.js";
 import { MODULE_ID } from "../core/constants.js";
-import { duplicateNetherscrollsData } from "../core/utils.js";
+import { duplicateNetherscrollsData, replaceNetherscrollsDeletionKeys } from "../core/utils.js";
 import { normalizeNetherscrollsReferenceValue } from "../data/references.js";
 
 /** Update item nether id. */
@@ -61,7 +61,10 @@ async function setNetherscrollsItemIdentifiers(
       flags.netherscrolls["-=itemId"] = null;
       flags.netherscrolls["-=id"] = null;
     }
-    await item.update({ flags }, { render: false, netherscrollsTransfer: true });
+    await item.update(replaceNetherscrollsDeletionKeys({ flags }, { update: true }), {
+      render: false,
+      netherscrollsTransfer: true,
+    });
   } catch (err) {
     console.warn(`${MODULE_ID} | Unable to write canonical Netherscrolls Item flags.`, err);
     throw err;

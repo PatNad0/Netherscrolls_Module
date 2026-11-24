@@ -38,6 +38,7 @@ import {
   refreshNetherscrollsCharacterImportAvailability,
   setNetherscrollsCharacterImportMessage,
 } from "./characters.js";
+import { openNetherscrollsLibraryImportProgress } from "./import-progress.js";
 
 const NetherscrollsImportSettings = createNetherscrollsImportSettingsClass();
 
@@ -635,8 +636,12 @@ async function submitNetherscrollsImportSettings(formData) {
     ui?.notifications?.warn?.(`Foundry Import endpoint not configured for: ${labels}.`);
   }
 
+  const progress = requests.length ? openNetherscrollsLibraryImportProgress(requests) : null;
   try {
-    const imports = await replaceNetherscrollsLibrary(requests);
+    const imports = await replaceNetherscrollsLibrary(requests, {
+      onProgress: progress?.onProgress,
+    });
+    progress?.finish();
     for (const { request, result } of imports) {
       ui?.notifications?.info?.(
         request.sourceFiltered
@@ -655,6 +660,7 @@ async function submitNetherscrollsImportSettings(formData) {
     return { importedAny: imports.length > 0 };
   } catch (err) {
     console.error(`${MODULE_ID} | Netherscrolls library replacement failed.`, err);
+    progress?.fail(err);
     throw err;
   }
 }

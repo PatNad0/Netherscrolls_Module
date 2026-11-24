@@ -24,6 +24,26 @@ function createFoundryEffectPreparation({
   states,
   val,
 }) {
+  /**
+   * Whether D&D5e replaced `key` with a read-only shim. D&D5e 6 moved roll bonuses and prepared
+   * ability values under `roll`, `rolls`, `save` and `check`, and writing an old path throws there.
+   */
+  function moved(container, key) {
+    const descriptor =
+      container && typeof container === "object" && Object.getOwnPropertyDescriptor(container, key);
+    return Boolean(descriptor?.get && !descriptor.set);
+  }
+
+  /**
+   * Write a roll bonus where this D&D5e reads it: `bonuses.<key>` before D&D5e 6, then
+   * `<owner>.roll.bonus` (an ability's `save`/`check`, or the skill or tool itself).
+   */
+  function setRollBonus(data, legacyKey, owner, value) {
+    if (moved(data.bonuses, legacyKey) && owner && typeof owner === "object")
+      (owner.roll ??= {}).bonus = value;
+    else (data.bonuses ??= {})[legacyKey] = value;
+  }
+
   /** Handle proficiency. */
   function proficiency(current, value, multiplier, roundDown = true) {
     if (current?.clone) return current.clone({ proficiency: value, multiplier, roundDown });
@@ -45,14 +65,12 @@ function createFoundryEffectPreparation({
         system = actor.system;
       // Bonuses Netherscrolls does not model stay D&D5e's: they are still added to rolls
       // by D&D5e, so they are added to displayed totals here too.
-      const global = system.bonuses?.abilities ?? {};
-      // Effect changes to the global save bonus are translated into savingThrows.all and are
-      // already in each save total. Only the manual sheet value stays D&D5e's (it adds it to
-      // save rolls), so the prepared field is reset to it or the bonus would count twice.
-      if (system.bonuses?.abilities)
-        global.save = actor._source?.system?.bonuses?.abilities?.save ?? "";
-      const checkBonus = /** Check bonus. */ (ability) =>
-        numeric(system.abilities?.[ability]?.bonuses?.check) + numeric(global.check);
+      const global = globalAbilityBonuses(actor, system);
+      const checkBonus = /** Check bonus. */ (ability) => {
+        const data = system.abilities?.[ability];
+        const own = moved(data?.bonuses, "check") ? data.check?.roll?.bonus : data?.bonuses?.check;
+        return numeric(own) + numeric(global.check);
+      };
       const pb = val(result, "proficiencyBonus", number(system.attributes?.prof));
       const jackOfAllTrades = list(actor.items).some(
         /** Check whether any entry matches while prepare. */
@@ -94,6 +112,30 @@ function createFoundryEffectPreparation({
     }
   }
 
+  /**
+   * The actor-wide check/save/skill/tool bonuses: `bonuses.abilities` before D&D5e 6,
+   * `rolls.ability.<kind>.bonus` since. Effect changes to the global save bonus are translated
+   * into savingThrows.all and are already in each save total. Only the manual sheet value stays
+   * D&D5e's (it adds it to save rolls), so the prepared field is reset to it or the bonus would
+   * count twice.
+   */
+  function globalAbilityBonuses(actor, system) {
+    const legacy = system.bonuses?.abilities;
+    const modern = system.rolls?.ability;
+    if (legacy || !modern) {
+      if (legacy) legacy.save = actor._source?.system?.bonuses?.abilities?.save ?? "";
+      return legacy ?? {};
+    }
+    const manualSave = actor._source?.system?.rolls?.ability?.save?.bonus ?? "";
+    if (modern.save && typeof modern.save === "object") modern.save.bonus = manualSave;
+    return {
+      check: modern.check?.bonus,
+      save: manualSave,
+      skill: modern.skill?.bonus,
+      tool: modern.tool?.bonus,
+    };
+  }
+
   /** Preserve Foundry save/check models while projecting native ability totals, cover, and proficiency. */
   function projectAbilitiesAndSaves({
     actor,
@@ -113,11 +155,13 @@ function createFoundryEffectPreparation({
       const path = `savingThrows.${ability}`,
         multiplier = val(result, `${path}.prof`);
       data.proficient = multiplier;
-      const oldProf = data.saveProf ?? data.save?.prof ?? data.prof;
+      // D&D5e 6 keeps proficiency and bonus inside `save`/`check`; `saveProf` and the like are
+      // read-only shims there.
+      const nested = moved(data, "saveProf");
+      const oldProf = nested ? data.save?.prof : (data.saveProf ?? data.save?.prof ?? data.prof);
       const prof = proficiency(oldProf, pb, multiplier);
       const total = val(result, path, data.mod + prof.flat);
-      data.bonuses ??= {};
-      data.bonuses.save = residualBonus(result, path, data.mod + prof.flat);
+      setRollBonus(data, "save", data.save, residualBonus(result, path, data.mod + prof.flat));
       const cover =
         ability === "dex"
           ? Math.max(number(system.attributes.ac?.cover), number(actor.coverBonus))
@@ -126,16 +170,24 @@ function createFoundryEffectPreparation({
       if (data.save && typeof data.save === "object")
         Object.assign(data.save, { value: shown, prof, bonus: shown - data.mod - prof.flat });
       else data.save = shown;
-      data.saveProf = prof;
-      data.saveBonus = shown - data.mod - prof.flat;
-      data.checkProf = proficiency(
-        data.checkProf,
+      if (!nested) {
+        data.saveProf = prof;
+        data.saveBonus = shown - data.mod - prof.flat;
+      }
+      const currentCheckProf = nested ? data.check?.prof : data.checkProf;
+      const checkProf = proficiency(
+        currentCheckProf,
         pb,
-        Math.max(data.checkProf?.multiplier ?? 0, jackOfAllTrades ? 0.5 : 0)
+        Math.max(currentCheckProf?.multiplier ?? 0, jackOfAllTrades ? 0.5 : 0)
       );
+      if (nested) (data.check ??= {}).prof = checkProf;
+      else data.checkProf = checkProf;
       if (data.check && typeof data.check === "object")
-        data.check.value = data.mod + checkBonus(ability) + data.checkProf.flat;
-      data.attack = data.mod + pb;
+        data.check.value = data.mod + checkBonus(ability) + checkProf.flat;
+      // D&D5e 6 prepares `attack` as { value, bonus }; it was a plain number before.
+      if (data.attack && typeof data.attack === "object")
+        data.attack.value = data.mod + pb + numeric(data.attack.bonus);
+      else data.attack = data.mod + pb;
       data.dc =
         8 +
         data.mod +
@@ -184,13 +236,12 @@ function createFoundryEffectPreparation({
         data.value = multiplier;
         data.mod = mod;
         data.prof = proficiency(data.prof, pb, multiplier, entry.proficiencyRounding !== "up");
-        data.bonuses ??= {};
-        data.bonuses.check = residualBonus(result, path, mod + data.prof.flat);
+        setRollBonus(data, "check", data, residualBonus(result, path, mod + data.prof.flat));
         const extra =
           checkBonus(ability) + numeric(family === "skills" ? global.skill : global.tool);
         data.total = val(result, path) + extra;
         data.bonus = data.total - mod - data.prof.flat;
-        if (family === "skills") data.passive = 10 + data.total + numeric(data.bonuses.passive);
+        if (family === "skills") data.passive = 10 + data.total + numeric(data.bonuses?.passive);
       }
     }
   }
@@ -207,13 +258,17 @@ function createFoundryEffectPreparation({
       pb,
       number(character.initiative?.prof)
     );
-    system.attributes.init.total = val(result, "initiative") + checkBonus(initAbility);
-    system.attributes.init.mod = initMod;
-    system.attributes.init.bonus = residualBonus(
-      result,
-      "initiative",
-      initMod + system.attributes.init.prof.flat
-    );
+    const init = system.attributes.init;
+    const previousTotal = init.total;
+    init.total = val(result, "initiative") + checkBonus(initAbility);
+    init.mod = initMod;
+    const initBonus = residualBonus(result, "initiative", initMod + init.prof.flat);
+    // D&D5e 6 reads the initiative bonus from `init.roll.bonus`; `init.bonus` is a read-only shim.
+    if (moved(init, "bonus")) (init.roll ??= {}).bonus = initBonus;
+    else init.bonus = initBonus;
+    // D&D5e 6 also derives a passive initiative score from the total.
+    if (Number.isFinite(init.score) && Number.isFinite(previousTotal))
+      init.score += init.total - previousTotal;
     system.attributes.spelldc = val(result, "SaveDC");
     system.bonuses ??= {};
     for (const [stat, keys, ability] of [
@@ -226,12 +281,18 @@ function createFoundryEffectPreparation({
           rollType: "attack",
           attackKind: key.startsWith("m") ? "melee" : "ranged",
         });
-        system.bonuses[key] ??= {};
-        system.bonuses[key].attack = residualBonus(
+        const attackBonus = residualBonus(
           scoped,
           stat,
           val(scoped, `abilities.${ability}.mod`) + pb
         );
+        // D&D5e 6 reads attack bonuses from `rolls.attack.<kind>.bonus`; `bonuses.<kind>` is
+        // gone (or a read-only shim) there.
+        const legacy = system.bonuses[key];
+        const modern = system.rolls?.attack?.[key];
+        if (modern && typeof modern === "object" && (!legacy || moved(legacy, "attack")))
+          modern.bonus = attackBonus;
+        else (system.bonuses[key] ??= {}).attack = attackBonus;
       }
     }
     system.bonuses.spell ??= {};

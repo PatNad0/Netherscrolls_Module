@@ -17,6 +17,7 @@ import {
   NETHERSCROLLS_WORLD_IMPORT_PACKS,
   getNetherscrollsImportPackCollection,
 } from "../core/constants.js";
+import { listenToNetherscrollsProgress } from "../core/progress.js";
 import { getDocumentId } from "../core/utils.js";
 import {
   NETHERSCROLLS_FEAT_FOLDERS,
@@ -50,9 +51,22 @@ import {
   netherscrollsQueuePollState,
 } from "./transfer-state.js";
 
-/** Fetch and validate the full selection before any managed library document is deleted. */
-async function replaceNetherscrollsLibrary(requests) {
+/**
+ * Fetch and validate the full selection before any managed library document is deleted.
+ * `onProgress` receives, in order: `fetch` (per page), `fetched`, `clear`, then per request
+ * `import`, `write` (`planned` / `written` document counts) and `imported`.
+ */
+async function replaceNetherscrollsLibrary(requests, { onProgress = null } = {}) {
   if (!requests.length) return [];
+  const notify = /** Forward a progress event; a failing display never stops the import. */ (
+    event
+  ) => {
+    try {
+      onProgress?.(event);
+    } catch (err) {
+      console.warn(`${MODULE_ID} | The library import progress display failed.`, err);
+    }
+  };
   if (!game?.user?.isGM) throw new Error("Only a GM can replace the Netherscrolls library.");
   if (netherscrollsLibraryReplacementState.active)
     throw new Error("A Netherscrolls library import is already running.");
@@ -65,33 +79,56 @@ async function replaceNetherscrollsLibrary(requests) {
   try {
     const staged = [];
     // No destructive work until every requested endpoint returned a valid dataset.
-    for (const request of requests) {
-      const response = await sendNetherscrollsImportRequest(request);
+    for (const [index, request] of requests.entries()) {
+      notify({ stage: "fetch", index, request, page: 0, pages: 0 });
+      const response = await sendNetherscrollsImportRequest(
+        request,
+        /** Report each downloaded page. */ (page, pages) =>
+          notify({ stage: "fetch", index, request, page, pages })
+      );
+      let rows = 0;
       for (const typeKey of request.typeKeys ?? [request.typeKey]) {
-        if (!Array.isArray(getNetherscrollsResponseDataset(response, typeKey, request.typeKey))) {
+        const dataset = getNetherscrollsResponseDataset(response, typeKey, request.typeKey);
+        if (!Array.isArray(dataset)) {
           throw new Error(
             `The ${typeKey} library response is incomplete; the existing library was not cleared.`
           );
         }
+        rows += dataset.length;
       }
       await prepareNetherscrollsImportSourceNames(response);
       await sanitizeNetherscrollsImportResponseImages(response);
       staged.push({ request, response });
+      notify({ stage: "fetched", index, request, rows });
     }
+    notify({ stage: "clear", done: 0, total: 0 });
     await clearNetherscrollsLibrary(
       requests.flatMap(
         /** Collect every requested dataset key. */ (request) =>
           request.typeKeys ?? [request.typeKey]
-      )
+      ),
+      /** Report cleared documents and folders. */ (done, total) =>
+        notify({ stage: "clear", done, total })
     );
     const imported = [];
-    for (const { request, response } of staged) {
-      const result = await applyNetherscrollsImportResponse(
-        response,
-        request.typeKey,
-        request.typeKeys
+    for (const [index, { request, response }] of staged.entries()) {
+      notify({ stage: "import", index, request });
+      const release = listenToNetherscrollsProgress(
+        /** Relay batch writes of this dataset. */ (event) =>
+          notify({ stage: "write", index, request, ...event })
       );
+      let result;
+      try {
+        result = await applyNetherscrollsImportResponse(
+          response,
+          request.typeKey,
+          request.typeKeys
+        );
+      } finally {
+        release();
+      }
       imported.push({ request, result });
+      notify({ stage: "imported", index, request, result });
     }
     return imported;
   } finally {
@@ -100,7 +137,7 @@ async function replaceNetherscrollsLibrary(requests) {
 }
 
 /** Preflight every managed destination before deleting documents, then remove nested folders deepest first. */
-async function clearNetherscrollsLibrary(requestedTypeKeys = []) {
+async function clearNetherscrollsLibrary(requestedTypeKeys = [], onProgress = null) {
   const requested = new Set(requestedTypeKeys);
   const plans = [];
   // Exact managed world pack IDs, never world actors/items or arbitrary
@@ -157,19 +194,32 @@ async function clearNetherscrollsLibrary(requestedTypeKeys = []) {
       .sort(/** Order the entries while clear library. */ (a, b) => b.depth - a.depth);
     plans.push({ typeKey, pack, DocumentClass, ids, orderedFolders });
   }
+  const total = plans.reduce(
+    /** Count every document and folder to remove. */ (sum, plan) =>
+      sum + plan.ids.length + plan.orderedFolders.length,
+    0
+  );
+  let done = 0;
+  onProgress?.(done, total);
   for (const { typeKey, pack, DocumentClass, ids, orderedFolders } of plans) {
     // Invalidate even when a partial deletion fails.
     invalidateNetherscrollsCompendiumDocumentIdCache(typeKey);
     for (let offset = 0; offset < ids.length; offset += NETHERSCROLLS_COMPENDIUM_WRITE_BATCH_SIZE) {
-      await DocumentClass.deleteDocuments(
-        ids.slice(offset, offset + NETHERSCROLLS_COMPENDIUM_WRITE_BATCH_SIZE),
-        { pack: pack.collection, render: false, netherscrollsTransfer: true }
-      );
+      const chunk = ids.slice(offset, offset + NETHERSCROLLS_COMPENDIUM_WRITE_BATCH_SIZE);
+      await DocumentClass.deleteDocuments(chunk, {
+        pack: pack.collection,
+        render: false,
+        netherscrollsTransfer: true,
+      });
+      done += chunk.length;
+      onProgress?.(done, total);
     }
     if (getPackIndexEntries(await pack.getIndex()).length)
       throw new Error(`The ${pack.collection} library could not be fully cleared.`);
     for (const { folder } of orderedFolders) {
       await folder.delete({ pack: pack.collection, render: false, netherscrollsTransfer: true });
+      done += 1;
+      onProgress?.(done, total);
     }
   }
 }
@@ -409,17 +459,77 @@ function formatNetherscrollsSourceImportResult(result, typeKeys = []) {
     : "Netherscrolls source import complete. No selected dataset returned importable data.";
 }
 
-/** Send import request. */
-async function sendNetherscrollsImportRequest(importRequest) {
-  const response = await fetch(importRequest.url, importRequest.options);
+/**
+ * Send an import request and return every page merged into one response. Direct and source
+ * imports answer one page at a time (`meta.pagination.pages`, docs/api/10-foundry.md#paging);
+ * reading only the first page would silently import a partial library.
+ */
+async function sendNetherscrollsImportRequest(importRequest, onPage = null) {
+  const merged = await fetchNetherscrollsImportPage(importRequest, 1);
+  const pages = Number(merged?.meta?.pagination?.pages) || 1;
+  onPage?.(1, pages);
+  for (let page = 2; page <= pages; page += 1) {
+    appendNetherscrollsImportPage(merged, await fetchNetherscrollsImportPage(importRequest, page));
+    onPage?.(page, pages);
+  }
+  if (pages > 1) dedupeNetherscrollsImportPages(merged);
+  return merged;
+}
+
+/** Fetch one page of an import request. */
+async function fetchNetherscrollsImportPage(importRequest, page) {
+  const url = new URL(importRequest.url);
+  url.searchParams.set("page", String(page));
+  const response = await fetch(url.toString(), importRequest.options);
   const data = await response
     .json()
-    .catch(/** Handle the operation failure while send import request. */ () => null);
+    .catch(/** Handle the operation failure while fetch import page. */ () => null);
   if (!response.ok) {
     throw await buildNetherscrollsApiError(response, data, "Import", importRequest.guildId ?? "");
   }
-
   return data;
+}
+
+/** Append a later page's rows: `data[]` for a dataset route, `data[dataset][]` for a source route. */
+function appendNetherscrollsImportPage(merged, page) {
+  if (Array.isArray(merged?.data)) {
+    if (!Array.isArray(page?.data)) throw new Error("An import page has an unexpected shape.");
+    merged.data.push(...page.data);
+    return;
+  }
+  for (const [key, rows] of Object.entries(merged?.data ?? {})) {
+    if (!Array.isArray(rows)) continue;
+    const next = page?.data?.[key];
+    if (!Array.isArray(next)) throw new Error(`An import page is missing its ${key} rows.`);
+    rows.push(...next);
+  }
+}
+
+/** A row renamed or added mid-walk can appear on two pages; keep its first copy and recount. */
+function dedupeNetherscrollsImportPages(merged) {
+  const dedupe = /** Keep the first row per id. */ (rows) => {
+    const seen = new Set();
+    return rows.filter(
+      /** Keep rows whose id was not seen yet. */ (row) => {
+        const id = row?._id ?? row?.id ?? row?.netherscrollsId;
+        if (id === undefined || id === null) return true;
+        if (seen.has(String(id))) return false;
+        seen.add(String(id));
+        return true;
+      }
+    );
+  };
+  if (Array.isArray(merged.data)) {
+    merged.data = dedupe(merged.data);
+    if (merged.meta) merged.meta.count = merged.data.length;
+    return;
+  }
+  for (const [key, rows] of Object.entries(merged.data ?? {})) {
+    if (!Array.isArray(rows)) continue;
+    merged.data[key] = dedupe(rows);
+    if (merged.meta?.counts && key in merged.meta.counts)
+      merged.meta.counts[key] = merged.data[key].length;
+  }
 }
 
 /** Dispatch only datasets allowed by this request so a response cannot import unselected library types. */

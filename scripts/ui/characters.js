@@ -24,6 +24,7 @@ import {
 } from "../import/character.js";
 import { formatNetherscrollsCompanionImportResult } from "../import/companions.js";
 import { getNetherscrollsCompendiumReadiness } from "../import/library.js";
+import { openNetherscrollsCharacterImportProgress } from "./import-progress.js";
 
 const netherscrollsCharacterImportState = new WeakMap();
 
@@ -92,10 +93,12 @@ function activateNetherscrollsCharacterImportListeners(root) {
       const originalHtml = button.innerHTML;
       button.disabled = true;
       button.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Importing…';
+      const progress = openNetherscrollsCharacterImportProgress(selected);
       try {
-        await importNetherscrollsSelectedCampaignCharacters(root, selected);
+        await importNetherscrollsSelectedCampaignCharacters(root, selected, { progress });
       } catch (err) {
         console.error(`${MODULE_ID} | Character import failed.`, err);
+        progress.fail(err);
         ui?.notifications?.error?.(`Foundry Import failed: ${err?.message ?? err}`);
         setNetherscrollsCharacterImportMessage(root, `Import failed: ${err?.message ?? err}`, {
           error: true,
@@ -423,7 +426,11 @@ function setNetherscrollsCharacterImportMessage(root, message, { error = false }
 }
 
 /** Keep character progress and recoverable failures visible while processing the selected rows. */
-async function importNetherscrollsSelectedCampaignCharacters(root, selected) {
+async function importNetherscrollsSelectedCampaignCharacters(
+  root,
+  selected,
+  { progress = null } = {}
+) {
   setNetherscrollsCharacterImportMessage(root, "Preparing character import...");
   debugNetherscrollsCharacterImport("Starting selected-character import.", {
     selectedCount: selected.length,
@@ -445,6 +452,7 @@ async function importNetherscrollsSelectedCampaignCharacters(root, selected) {
   const results = [];
   for (const [index, selectedCharacter] of selected.entries()) {
     const progressLabel = `Character ${index + 1} of ${selected.length}: ${selectedCharacter?.name ?? "Unnamed Character"}`;
+    progress?.start(index);
     try {
       setNetherscrollsCharacterImportMessage(
         root,
@@ -468,6 +476,7 @@ async function importNetherscrollsSelectedCampaignCharacters(root, selected) {
       const result = await importNetherscrollsCampaignCharacter(importedCharacter, folder, {
         onProgress: /** Handle progress. */ (stage) => {
           setNetherscrollsCharacterImportMessage(root, `${progressLabel} — ${stage}`);
+          progress?.stage(index, stage);
           console.info(`${MODULE_ID} | Foundry Import | ${progressLabel} — ${stage}`);
         },
       });
@@ -486,6 +495,7 @@ async function importNetherscrollsSelectedCampaignCharacters(root, selected) {
         name: importedCharacter.name,
         ok: true,
       });
+      progress?.done(index, result);
     } catch (err) {
       setNetherscrollsCharacterImportMessage(
         root,
@@ -509,6 +519,7 @@ async function importNetherscrollsSelectedCampaignCharacters(root, selected) {
         ok: false,
         error: err?.message ?? String(err),
       });
+      progress?.failed(index, err);
     }
   }
 
@@ -556,6 +567,7 @@ async function importNetherscrollsSelectedCampaignCharacters(root, selected) {
     .filter(Boolean)
     .join("; ");
   setNetherscrollsCharacterImportMessage(root, message, { error: Boolean(failed.length) });
+  progress?.finish({ failed: failed.length });
   if (failed.length) {
     ui?.notifications?.warn?.(`${message}. See the console for individual failures.`);
   } else {

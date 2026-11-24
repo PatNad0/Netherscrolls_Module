@@ -131,6 +131,51 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
+/**
+ * Foundry 14 replaced `{ "-=key": null }` with the ForcedDeletion operator and warns on the old
+ * form. Library rows from the API still carry it (e.g. `flags.dnd5e["-=riders"]`), so it is
+ * converted before a write: dropped from new documents (there is nothing to delete), an
+ * operator in updates. Foundry 13 has no operator and keeps the `-=` form. Untouched branches
+ * are returned as they are; changed ones are copied.
+ */
+function replaceNetherscrollsDeletionKeys(value, { update = false } = {}) {
+  const ForcedDeletion = globalThis.foundry?.data?.operators?.ForcedDeletion;
+  if (typeof ForcedDeletion !== "function") return value;
+  const visit = /** Replace deletion keys below one node. */ (node) => {
+    if (Array.isArray(node)) {
+      let changed = false;
+      const entries = node.map(
+        /** Visit an element. */ (entry) => {
+          const next = visit(entry);
+          if (next !== entry) changed = true;
+          return next;
+        }
+      );
+      return changed ? entries : node;
+    }
+    // Only plain data: class instances (operators, documents) are passed through.
+    if (!node || typeof node !== "object") return node;
+    const prototype = Object.getPrototypeOf(node);
+    if (prototype !== null && Object.getPrototypeOf(prototype) !== null) return node;
+    let copy = null;
+    for (const [key, entry] of Object.entries(node)) {
+      if (key.startsWith("-=")) {
+        copy ??= { ...node };
+        delete copy[key];
+        const field = key.slice(2);
+        if (update && !(field in node)) copy[field] = new ForcedDeletion();
+        continue;
+      }
+      const next = visit(entry);
+      if (next === entry) continue;
+      copy ??= { ...node };
+      copy[key] = next;
+    }
+    return copy ?? node;
+  };
+  return visit(value);
+}
+
 /** Convert to number. */
 function toNumber(value, fallback = 0) {
   const num = Number(value);
@@ -154,6 +199,7 @@ export {
   hashNetherscrollsString,
   normalizeNetherscrollsName,
   renderFoundryTransferPayload,
+  replaceNetherscrollsDeletionKeys,
   reportNetherscrollsTransferItemError,
   toNetherscrollsNumber,
   toNumber,

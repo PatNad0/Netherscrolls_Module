@@ -11,6 +11,29 @@ import {
 import { getNetherscrollsNativeEffectKey } from "../data/item-fields.js";
 import { getNetherscrollsActorEffects } from "./collections.js";
 
+// Foundry 14 names change modes by string `type`; older data still carries the numeric `mode`.
+const NETHERSCROLLS_CHANGE_MODE_TYPES = [
+  "custom",
+  "multiply",
+  "add",
+  "downgrade",
+  "upgrade",
+  "override",
+];
+
+/**
+ * A change's mode as Foundry 14's string type. Reading `mode` on a Foundry 14 change logs a
+ * deprecation, so `type` is read first; a numeric mode maps to the same string.
+ */
+function getNetherscrollsChangeType(change) {
+  if (typeof change?.type === "string" && change.type) return change.type;
+  const mode = change?.mode;
+  if (mode === undefined || mode === null || mode === "") return null;
+  const number = Number(mode);
+  if (!Number.isInteger(number)) return String(mode);
+  return NETHERSCROLLS_CHANGE_MODE_TYPES[number] ?? `custom.${number}`;
+}
+
 /** Retrieve embedded effect sources. */
 function getNetherscrollsEmbeddedEffectSources(value) {
   const effects = value?.effects;
@@ -52,7 +75,7 @@ function getNetherscrollsEmbeddedEffectSignatures(value) {
           ).map(
             /** Transform each entry while retrieve embedded effect signatures. */ (change) => ({
               key: toTrimmedStringOrNull(change?.key) ?? "",
-              mode: change?.mode ?? change?.type ?? null,
+              type: getNetherscrollsChangeType(change),
               value: String(change?.value ?? ""),
             })
           ),

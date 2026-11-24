@@ -29,6 +29,20 @@ function createFoundryEffectSource({
     if (edited !== misc + bonus) block.bonus = edited - misc;
   }
 
+  // D&D5e 6 stores manual roll bonuses under `roll.bonus` (abilities: `save.roll.bonus`, global:
+  // `rolls.attack.<kind>.bonus`); before, under `bonuses.*`, which D&D5e 6 no longer persists.
+  // On prepared data (ordinary actors) the old path is a deprecation shim: it is not read.
+  const manualBonus = /** The stored manual bonus, wherever this D&D5e keeps it. */ (
+    container,
+    key,
+    modern
+  ) => {
+    if (!container || typeof container !== "object") return modern;
+    const descriptor = Object.getOwnPropertyDescriptor(container, key);
+    if (!descriptor || descriptor.get) return modern;
+    return descriptor.value !== undefined ? descriptor.value : modern;
+  };
+
   /** Read base values from persisted source and adopt only explicit manual edits from the sheet. */
   function sourceCharacter(actor, collected = { levels: levelsOf(actor), acFromFoundry: false }) {
     const native = clone(nativeFlags(actor));
@@ -62,7 +76,11 @@ function createFoundryEffectSource({
       const proficient = pick(`abilities.${ability}.proficient`);
       native.savingThrows[ability] ??= {};
       if (proficient != null) native.savingThrows[ability].prof = proficient;
-      adoptManual(native.savingThrows[ability], source.abilities?.[ability]?.bonuses?.save);
+      const sourceAbility = source.abilities?.[ability];
+      adoptManual(
+        native.savingThrows[ability],
+        manualBonus(sourceAbility?.bonuses, "save", sourceAbility?.save?.roll?.bonus)
+      );
     }
     for (const [family, mapping] of [
       ["skills", SKILLS],
@@ -74,11 +92,13 @@ function createFoundryEffectSource({
         native[family][key] ??= { ability: defaultAbility, prof: 0, misc: 0, bonus: 0 };
         if (current.value != null) native[family][key].prof = current.value;
         if (current.ability) native[family][key].ability = current.ability;
-        adoptManual(native[family][key], source[family]?.[foundryKey]?.bonuses?.check);
+        const stored = source[family]?.[foundryKey];
+        adoptManual(native[family][key], manualBonus(stored?.bonuses, "check", stored?.roll?.bonus));
       }
     }
     native.initiative ??= {};
-    adoptManual(native.initiative, source.attributes?.init?.bonus);
+    const init = source.attributes?.init;
+    adoptManual(native.initiative, manualBonus(init, "bonus", init?.roll?.bonus));
     for (const [stat, kind, field] of [
       ["ToHitStr", "mwak", "attack"],
       ["ToHitDext", "rwak", "attack"],
@@ -87,7 +107,10 @@ function createFoundryEffectSource({
     ]) {
       if (native[stat] == null || typeof native[stat] !== "object")
         native[stat] = { misc: 0, bonus: native[stat] ?? 0 };
-      adoptManual(native[stat], source.bonuses?.[kind]?.[field]);
+      adoptManual(
+        native[stat],
+        manualBonus(source.bonuses?.[kind], field, source.rolls?.attack?.[kind]?.bonus)
+      );
     }
     native.hp ??= {};
     native.currency ??= {};

@@ -3,8 +3,10 @@
  * Foundry version-specific replacement operators prevent obsolete keyed fields from surviving merges.
  */
 import { MODULE_ID, NETHERSCROLLS_COMPENDIUM_WRITE_BATCH_SIZE } from "../core/constants.js";
+import { reportNetherscrollsProgress } from "../core/progress.js";
 import {
   normalizeNetherscrollsName,
+  replaceNetherscrollsDeletionKeys,
   reportNetherscrollsTransferItemError,
   yieldNetherscrollsMainThread,
 } from "../core/utils.js";
@@ -91,7 +93,14 @@ async function runNetherscrollsCompendiumDocumentBatches(
   };
   const write = /** Write. */ async (writeMethod, chunk) => {
     try {
-      const saved = (await DocumentClass[writeMethod](chunk, writeOptions)) ?? [];
+      const data =
+        writeMethod === "deleteDocuments"
+          ? chunk
+          : chunk.map(
+              /** Convert legacy `-=` deletion keys. */ (row) =>
+                replaceNetherscrollsDeletionKeys(row, { update: writeMethod === "updateDocuments" })
+            );
+      const saved = (await DocumentClass[writeMethod](data, writeOptions)) ?? [];
       results.push(...saved);
       if (writeMethod === "updateDocuments") {
         for (const row of chunk) {
@@ -196,16 +205,22 @@ async function runNetherscrollsCompendiumDocumentBatches(
       }
     }
     const updateRows = [...updates.values()];
+    reportNetherscrollsProgress({ planned: updateRows.length + creates.size });
     for (let offset = 0; offset < updateRows.length; offset += batchSize) {
-      await write("updateDocuments", updateRows.slice(offset, offset + batchSize));
+      const chunk = updateRows.slice(offset, offset + batchSize);
+      await write("updateDocuments", chunk);
+      reportNetherscrollsProgress({ written: chunk.length });
       await yieldNetherscrollsMainThread();
     }
     rows = [...creates.values()];
     method = "createDocuments";
+  } else {
+    reportNetherscrollsProgress({ planned: rows.length });
   }
   for (let offset = 0; offset < rows.length; offset += batchSize) {
     const chunk = rows.slice(offset, offset + batchSize);
     await write(method, chunk);
+    reportNetherscrollsProgress({ written: chunk.length });
     if (offset + batchSize < rows.length) await yieldNetherscrollsMainThread();
   }
   netherscrollsCompendiumDocumentIdCache.delete(pack.collection);
@@ -221,7 +236,11 @@ async function runNetherscrollsEmbeddedDocumentBatches(
   options = {},
   batchSize = 25
 ) {
-  const rows = Array.from(entries ?? []);
+  const update = method === "updateEmbeddedDocuments";
+  const rows = Array.from(entries ?? []).map(
+    /** Convert legacy `-=` deletion keys. */ (row) =>
+      method === "deleteEmbeddedDocuments" ? row : replaceNetherscrollsDeletionKeys(row, { update })
+  );
   const results = [];
   if (!rows.length || typeof actor?.[method] !== "function") return results;
   if (options.netherscrollsTransfer) {

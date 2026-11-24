@@ -1,0 +1,45 @@
+<section class="ns-progress" data-ns-progress data-state="{{state}}">
+  <header class="ns-progress-hero">
+    <div class="ns-progress-sigil" aria-hidden="true">
+      <span class="ns-progress-ring is-outer"></span>
+      <span class="ns-progress-ring is-inner"></span>
+      <span class="ns-progress-core"><i class="{{icon}}" data-ns-progress-icon></i></span>
+    </div>
+    <div class="ns-progress-heading">
+      <h2 data-ns-progress-title>{{title}}</h2>
+      <p data-ns-progress-detail aria-live="polite">{{detail}}</p>
+    </div>
+  </header>
+
+  <div class="ns-progress-meter" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" data-ns-progress-meter>
+    <div class="ns-progress-bar">
+      <div class="ns-progress-track">
+        <div class="ns-progress-fill" data-ns-progress-fill></div>
+      </div>
+      <div class="ns-progress-quill" data-ns-progress-quill aria-hidden="true">
+        <i class="fa-solid fa-feather-pointed"></i>
+      </div>
+    </div>
+    <span class="ns-progress-percent" data-ns-progress-percent>0%</span>
+  </div>
+
+  <ol class="ns-progress-steps">
+    {{#each steps}}
+      <li class="ns-progress-step" data-ns-step="{{id}}" data-status="{{status}}">
+        <span class="ns-progress-step-status"><i class="{{statusIcon}}" data-ns-step-icon aria-hidden="true"></i></span>
+        <span class="ns-progress-step-label"><i class="{{icon}}" aria-hidden="true"></i> {{label}}</span>
+        <span class="ns-progress-step-count" data-ns-step-count>{{count}}</span>
+        <span class="ns-progress-step-detail" data-ns-step-detail>{{detail}}</span>
+        <span class="ns-progress-step-bar" aria-hidden="true"><span data-ns-step-fill></span></span>
+      </li>
+    {{/each}}
+  </ol>
+
+  <footer class="ns-progress-footer">
+    <span data-ns-progress-stats></span>
+    <button type="button" data-ns-progress-close hidden>
+      <i class="fa-solid fa-check" data-ns-progress-close-icon aria-hidden="true"></i>
+      <span data-ns-progress-close-label>Done</span>
+    </button>
+  </footer>
+</section>

@@ -30,7 +30,8 @@ function createEffectTranslation({
 }) {
   // ---------------------------------------------------------------- Foundry <-> NS translation
   function foundryMode(change) {
-    const raw = change?.mode ?? change?.type;
+    // Foundry 14 names modes by string `type`; reading its numeric `mode` logs a deprecation.
+    const raw = change?.type ?? change?.mode;
     if (typeof raw === "number") return FOUNDRY_MODES[raw] ?? "custom";
     const name = String(raw ?? "add").toLowerCase();
     return FOUNDRY_MODES.includes(name) ? name : "custom";

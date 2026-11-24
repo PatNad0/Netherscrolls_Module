@@ -7,9 +7,11 @@ import {
   MODULE_ID,
   NETHERSCROLLS_MONSTER_FALLBACK_IMAGE,
 } from "../core/constants.js";
+import { reportNetherscrollsProgress } from "../core/progress.js";
 import {
   createNetherscrollsMainThreadBudget,
   duplicateNetherscrollsData,
+  replaceNetherscrollsDeletionKeys,
   toTrimmedStringOrNull,
   yieldNetherscrollsMainThread,
   yieldNetherscrollsMainThreadIfNeeded,
@@ -84,6 +86,13 @@ function prepareNetherscrollsMonsterActorData(record) {
     );
   }
 
+  // The API can list an embedded effect twice: as its object and again as a bare ID string.
+  // Foundry rejects the string, which fails the whole monster; the object holds everything.
+  dropNetherscrollsEffectReferences(data);
+  for (const item of Array.isArray(data.items) ? data.items : []) {
+    dropNetherscrollsEffectReferences(item);
+  }
+
   data.flags ??= {};
   data.flags.netherscrolls = {
     ...(data.flags.netherscrolls ?? {}),
@@ -98,6 +107,14 @@ function prepareNetherscrollsMonsterActorData(record) {
     featureIds: Array.isArray(record.features) ? record.features.map(String) : [],
   };
   return data;
+}
+
+/** Keep only effect objects in a document's `effects`. */
+function dropNetherscrollsEffectReferences(document) {
+  if (!Array.isArray(document?.effects)) return;
+  document.effects = document.effects.filter(
+    /** Effect data, not an ID. */ (effect) => effect && typeof effect === "object"
+  );
 }
 
 /** Map monster ID to the compendium document IDs currently holding it. */
@@ -125,8 +142,11 @@ async function createNetherscrollsMonsterActors(ActorClass, rows, pack) {
   };
   const saved = [];
   const failed = [];
+  reportNetherscrollsProgress({ planned: rows.length });
   for (let offset = 0; offset < rows.length; offset += NETHERSCROLLS_MONSTER_WRITE_BATCH_SIZE) {
-    const chunk = rows.slice(offset, offset + NETHERSCROLLS_MONSTER_WRITE_BATCH_SIZE);
+    const chunk = rows
+      .slice(offset, offset + NETHERSCROLLS_MONSTER_WRITE_BATCH_SIZE)
+      .map(/** Drop legacy `-=` deletion keys. */ (row) => replaceNetherscrollsDeletionKeys(row));
     try {
       await ActorClass.createDocuments(chunk, options);
       saved.push(...chunk);
@@ -142,6 +162,7 @@ async function createNetherscrollsMonsterActors(ActorClass, rows, pack) {
         }
       }
     }
+    reportNetherscrollsProgress({ written: chunk.length });
     await yieldNetherscrollsMainThread();
   }
   return { saved, failed };

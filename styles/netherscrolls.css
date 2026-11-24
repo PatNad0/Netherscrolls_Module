@@ -584,3 +584,227 @@
   color: #3b2410 !important;
   font-weight: 600;
 }
+
+/* Import progress window: the same look as the import / export window. */
+.netherscrolls-progress-window .window-content {
+  padding: 0;
+}
+
+/* The window stays open while its import runs. */
+.netherscrolls-progress-window.is-running .window-header [data-action="close"] {
+  display: none;
+}
+
+.ns-progress {
+  --ns-progress-accent: #42655d;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.9rem 1rem 0.8rem;
+}
+
+.ns-progress[data-state="done"] {
+  --ns-progress-accent: #487a5a;
+}
+
+.ns-progress[data-state="warning"] {
+  --ns-progress-accent: #806c35;
+}
+
+.ns-progress[data-state="error"] {
+  --ns-progress-accent: #8e5454;
+}
+
+.ns-progress-hero {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.ns-progress-sigil {
+  flex: 0 0 auto;
+  color: var(--ns-progress-accent);
+  font-size: 1.4rem;
+}
+
+.ns-progress-ring {
+  display: none;
+}
+
+.ns-progress-heading {
+  min-width: 0;
+}
+
+.ns-progress-heading h2 {
+  margin: 0;
+  border: 0;
+  font-size: 1.15rem;
+}
+
+.ns-progress-heading p {
+  overflow: hidden;
+  min-height: 1.3em;
+  margin: 0.1rem 0 0;
+  font-size: 0.88rem;
+  opacity: 0.85;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ns-progress[data-state="error"] .ns-progress-heading p {
+  white-space: normal;
+}
+
+.ns-progress-meter {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.ns-progress-bar {
+  flex: 1 1 auto;
+}
+
+.ns-progress-track {
+  position: relative;
+  overflow: hidden;
+  height: 0.55rem;
+  border: 1px solid rgba(82, 93, 86, 0.35);
+  border-radius: 999px;
+  background: rgba(20, 27, 27, 0.08);
+}
+
+.ns-progress-fill {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--ns-progress-accent);
+  transform: translateX(-100%);
+  transition: transform 0.6s ease-out;
+}
+
+.ns-progress-quill {
+  display: none;
+}
+
+.ns-progress-percent {
+  flex: 0 0 2.6rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  text-align: right;
+}
+
+.ns-progress-steps {
+  display: grid;
+  overflow-y: auto;
+  max-height: 16rem;
+  margin: 0;
+  padding: 0.25rem 0;
+  border: 1px solid rgba(82, 93, 86, 0.3);
+  border-radius: 6px;
+  list-style: none;
+}
+
+.ns-progress-step {
+  display: grid;
+  grid-template-columns: 1.2rem minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 0.5rem;
+  margin: 0;
+  padding: 0.2rem 0.55rem;
+  opacity: 0.6;
+}
+
+.ns-progress-step[data-status="active"] {
+  background: rgba(20, 27, 27, 0.05);
+  opacity: 1;
+}
+
+.ns-progress-step[data-status="done"],
+.ns-progress-step[data-status="error"] {
+  opacity: 1;
+}
+
+.ns-progress-step-status {
+  text-align: center;
+}
+
+.ns-progress-step[data-status="active"] .ns-progress-step-status {
+  color: #42655d;
+}
+
+.ns-progress-step[data-status="done"] .ns-progress-step-status {
+  color: #487a5a;
+}
+
+.ns-progress-step[data-status="error"] .ns-progress-step-status,
+.ns-progress-step[data-status="error"] .ns-progress-step-detail {
+  color: #8e5454;
+}
+
+.ns-progress-step-label {
+  overflow: hidden;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ns-progress-step-label i {
+  width: 1.1em;
+  margin-right: 0.15rem;
+  opacity: 0.7;
+  text-align: center;
+}
+
+.ns-progress-step-count {
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+}
+
+.ns-progress-step-detail {
+  overflow: hidden;
+  grid-column: 2 / -1;
+  font-size: 0.8rem;
+  opacity: 0.8;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The running step's progress is already in the header and the bar. */
+.ns-progress-step-detail:empty,
+.ns-progress-step[data-status="active"] .ns-progress-step-detail,
+.ns-progress-step-bar {
+  display: none;
+}
+
+.ns-progress-step[data-status="error"] .ns-progress-step-detail {
+  white-space: normal;
+}
+
+.ns-progress-footer {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 1.9rem;
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.9;
+}
+
+.ns-progress-footer button {
+  flex: 0 0 auto;
+  width: auto;
+  margin-left: auto;
+  padding: 0 1rem;
+}
+
+.ns-progress-footer button[hidden] {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ns-progress-fill {
+    transition: none;
+  }
+}
