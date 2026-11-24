@@ -452,8 +452,43 @@ function getNetherscrollsSpellLevelFolder(level) {
   );
 }
 
+// D&D5e creature types, in folder order. Anything else lands in "Other".
+const NETHERSCROLLS_MONSTER_TYPE_FOLDERS = [
+  "aberration",
+  "beast",
+  "celestial",
+  "construct",
+  "dragon",
+  "elemental",
+  "fey",
+  "fiend",
+  "giant",
+  "humanoid",
+  "monstrosity",
+  "ooze",
+  "plant",
+  "undead",
+];
+
+/** Place a monster Actor in its creature-type folder. */
+async function ensureNetherscrollsMonsterFolder(pack, actorData, folderCache) {
+  const type = String(actorData?.system?.details?.type?.value ?? "")
+    .trim()
+    .toLowerCase();
+  const index = NETHERSCROLLS_MONSTER_TYPE_FOLDERS.indexOf(type);
+  const name = index >= 0 ? type.charAt(0).toUpperCase() + type.slice(1) : "Other";
+  return findOrCreatePackFolder(pack, {
+    cache: folderCache,
+    name,
+    type: "Actor",
+    parent: null,
+    sort: (index >= 0 ? index : NETHERSCROLLS_MONSTER_TYPE_FOLDERS.length) * 100,
+  });
+}
+
 export {
   cleanupNetherscrollsLegacyClassFeatureFolders,
+  ensureNetherscrollsMonsterFolder,
   ensureNetherscrollsClassFeatureFolder,
   ensureNetherscrollsClassFeatureFolderTree,
   ensureNetherscrollsClassFolder,

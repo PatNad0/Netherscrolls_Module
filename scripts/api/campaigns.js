@@ -188,6 +188,10 @@ function normalizeNetherscrollsImportedCharacter(entry, { guildId = undefined } 
     character,
     foundryActor,
     spellcasting: entry?.spellcasting,
+    // The character's companions, each with its converted NPC Actor (docs/api/10-foundry.md).
+    // Absent from older API responses: then companions are left untouched.
+    companions: Array.isArray(entry?.companions) ? entry.companions : undefined,
+    companionFailures: Array.isArray(entry?.companionFailures) ? entry.companionFailures : [],
     raw: entry,
     guildId: getNetherscrollsRequestGuildId(guildId),
   };

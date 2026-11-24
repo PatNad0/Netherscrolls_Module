@@ -121,8 +121,20 @@ function getItemNetherId(item) {
   );
 }
 
-/** Retrieve actor character id. */
+/** Retrieve actor character id. A companion Actor names its owner there, so it has none. */
 function getActorCharacterId(actor) {
+  if (getActorCompanionId(actor)) return null;
+  return normalizeNetherscrollsReferenceValue(actor?.flags?.netherscrolls?.characterId);
+}
+
+/** The Netherscrolls companion an Actor was imported from (docs/api/38-companions.md). */
+function getActorCompanionId(actor) {
+  return normalizeNetherscrollsReferenceValue(actor?.flags?.netherscrolls?.companionId);
+}
+
+/** The character that owns a companion Actor. */
+function getActorCompanionOwnerId(actor) {
+  if (!getActorCompanionId(actor)) return null;
   return normalizeNetherscrollsReferenceValue(actor?.flags?.netherscrolls?.characterId);
 }
 
@@ -131,6 +143,8 @@ export {
   buildNetherscrollsSyntheticSourceId,
   duplicateNetherscrollsDocumentData,
   getActorCharacterId,
+  getActorCompanionId,
+  getActorCompanionOwnerId,
   getItemNetherId,
   getNetherscrollsDocumentFlag,
   getNetherscrollsFoundryItemPayload,

@@ -29,6 +29,10 @@ import {
 } from "../core/utils.js";
 import { getActorCharacterId, normalizeNetherscrollsReferenceValue } from "../data/references.js";
 import {
+  applyNetherscrollsCompanionExportVersions,
+  attachNetherscrollsCompanionExports,
+} from "./companions.js";
+import {
   buildNetherscrollsImageReadyFoundryExportPayload,
   collectNetherscrollsFoundryExportImageJobs,
   prepareNetherscrollsFoundryExportImages,
@@ -232,6 +236,18 @@ function reportNetherscrollsExportWarnings(actor, response) {
   return true;
 }
 
+/** Record the companions' new versions; a failure here must not undo a saved export. */
+async function applyNetherscrollsCompanionVersionsSafely(actor, response, guildId) {
+  try {
+    await applyNetherscrollsCompanionExportVersions(response, { guildId });
+  } catch (err) {
+    console.warn(
+      `${MODULE_ID} | ${actor?.name ?? "Character"}: companion versions could not be stored. Import the character before its next export.`,
+      err
+    );
+  }
+}
+
 /** Submit the prepared payload and apply canonical identities only after the service accepts the export. */
 async function sendFoundryActorExport(actor, payload = null, { guildId = undefined } = {}) {
   const apiKey = getNetherscrollsApiKey();
@@ -244,6 +260,7 @@ async function sendFoundryActorExport(actor, payload = null, { guildId = undefin
     if (guildId === undefined) guildId = await resolveNetherscrollsActorGuildId(actor);
     if (!payload)
       payload = await buildNetherscrollsImageReadyFoundryExportPayload(actor, { guildId });
+    attachNetherscrollsCompanionExports(payload, actor, { guildId });
     await yieldNetherscrollsMainThread();
     const data = await requestNetherscrollsJson(NETHERSCROLLS_EXPORT_ENDPOINT, {
       method: "POST",
@@ -268,6 +285,7 @@ async function sendFoundryActorExport(actor, payload = null, { guildId = undefin
       );
     }
     await applyFoundryExportCanonicalIds(actor, data, { guildId });
+    await applyNetherscrollsCompanionVersionsSafely(actor, data, guildId);
     scheduleNetherscrollsActorSheetRender(actor);
     const name = data?.data?.name ?? actor?.name ?? "actor";
     if (!reportNetherscrollsExportWarnings(actor, data)) {
@@ -355,6 +373,7 @@ async function exportNetherscrollsCampaignActors(
       // Target the selected campaign character without persisting a local
       // link until the API has confirmed a successful export.
       if (entry.characterId) entry.payload.characterId = entry.characterId;
+      attachNetherscrollsCompanionExports(entry.payload, entry.actor, { guildId: requestGuildId });
       characters.push(entry.payload);
       await yieldNetherscrollsMainThread();
     }
@@ -407,6 +426,7 @@ async function exportNetherscrollsCampaignActors(
       }
       reportNetherscrollsExportWarnings(pendingEntry.actor, result);
       await applyFoundryExportCanonicalIds(pendingEntry.actor, result, { guildId: requestGuildId });
+      await applyNetherscrollsCompanionVersionsSafely(pendingEntry.actor, result, requestGuildId);
       scheduleNetherscrollsActorSheetRender(pendingEntry.actor);
       succeeded.push({
         actor: pendingEntry.actor,

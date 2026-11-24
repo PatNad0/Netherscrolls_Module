@@ -13,7 +13,12 @@ import {
   setNetherscrollsSelectedGuild,
 } from "../api/client.js";
 import { getNetherscrollsImportSourceContext } from "../api/sources.js";
-import { IMPORT_TYPES, MODULE_ID, NETHERSCROLLS_IMPORT_ENDPOINTS } from "../core/constants.js";
+import {
+  IMPORT_TYPES,
+  MODULE_ID,
+  NETHERSCROLLS_IMPORT_ENDPOINTS,
+  NETHERSCROLLS_OPTIONAL_IMPORT_TYPES,
+} from "../core/constants.js";
 import { getNetherscrollsApiKey, isDebugEnabled } from "../core/settings.js";
 import { toTrimmedStringOrNull } from "../core/utils.js";
 import {
@@ -640,7 +645,11 @@ async function submitNetherscrollsImportSettings(formData) {
       );
     }
     // Remember a complete, unfiltered import as the next "only what changed since" date.
-    if (imports.length && !selectedSources.length && selectedTypes.length === IMPORT_TYPES.length) {
+    const coreTypesSelected = IMPORT_TYPES.every(
+      /** Check that every non-optional type was imported. */ (type) =>
+        NETHERSCROLLS_OPTIONAL_IMPORT_TYPES.has(type.key) || selectedTypes.includes(type)
+    );
+    if (imports.length && !selectedSources.length && coreTypesSelected) {
       await rememberNetherscrollsLibraryImportDate(guildId, startedAt);
     }
     return { importedAny: imports.length > 0 };

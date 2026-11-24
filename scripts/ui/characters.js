@@ -22,6 +22,7 @@ import {
   hydrateNetherscrollsImportedCharacter,
   importNetherscrollsCampaignCharacter,
 } from "../import/character.js";
+import { formatNetherscrollsCompanionImportResult } from "../import/companions.js";
 import { getNetherscrollsCompendiumReadiness } from "../import/library.js";
 
 const netherscrollsCharacterImportState = new WeakMap();
@@ -533,8 +534,22 @@ async function importNetherscrollsSelectedCampaignCharacters(root, selected) {
     ) => total + (result.fetched ?? 0),
     0
   );
+  const companions = formatNetherscrollsCompanionImportResult(
+    results.reduce(
+      /** Add up the companions of every imported character. */ (total, result) => {
+        if (!result.companions) return total;
+        const sum = total ?? { created: 0, updated: 0, failed: [], missing: [], review: [] };
+        sum.created += result.companions.created;
+        sum.updated += result.companions.updated;
+        for (const key of ["failed", "missing", "review"]) sum[key].push(...result.companions[key]);
+        return sum;
+      },
+      null
+    )
+  );
   const message = [
     `Netherscrolls characters: ${created} created, ${updated} updated`,
+    companions,
     fetched ? `${fetched} linked content record${fetched === 1 ? "" : "s"} refreshed` : null,
     failed.length ? `${failed.length} failed` : null,
   ]

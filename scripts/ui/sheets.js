@@ -5,7 +5,11 @@
 import { MODULE_ID } from "../core/constants.js";
 import { isFoundryExportButtonEnabled } from "../core/settings.js";
 import { toNumber } from "../core/utils.js";
+import { getActorNetherscrollsGuildId } from "../api/client.js";
+import { getActorCompanionOwnerId } from "../data/references.js";
+import { exportNetherscrollsCompanionActor } from "../export/companions.js";
 import { exportActorToNetherscrolls, importActorFromNetherscrolls } from "../export/transfer.js";
+import { findNetherscrollsActorByCharacterId } from "../foundry/actors.js";
 
 const netherscrollsSpellbookPatchedClasses = new WeakSet();
 
@@ -96,6 +100,42 @@ function getActorFromApp(app) {
   return null;
 }
 
+/** Character sheets and Netherscrolls companion sheets get the transfer buttons. */
+function hasNetherscrollsTransferButtons(actor) {
+  return actor?.type === "character" || Boolean(getActorCompanionOwnerId(actor));
+}
+
+/** Export from a sheet: a companion sends only its own runtime values. */
+function exportNetherscrollsSheetActor(actor) {
+  return getActorCompanionOwnerId(actor)
+    ? exportNetherscrollsCompanionActor(actor)
+    : exportActorToNetherscrolls(actor);
+}
+
+/**
+ * The Actor an import button refreshes. A companion is calculated from its character, so it
+ * is refreshed with the character (null, with a warning, when that is not in this world).
+ */
+function getNetherscrollsTransferActor(actor) {
+  const ownerId = getActorCompanionOwnerId(actor);
+  if (!ownerId) return actor;
+  const owner = findNetherscrollsActorByCharacterId(ownerId, null, {
+    guildId: getActorNetherscrollsGuildId(actor) || undefined,
+  });
+  if (!owner)
+    ui?.notifications?.warn?.(
+      `${actor.name} is refreshed with its character. Import that character first.`
+    );
+  return owner;
+}
+
+/** Run a transfer on the Actor a sheet button stands for. */
+function runNetherscrollsSheetTransfer(actor, transfer) {
+  const target = getNetherscrollsTransferActor(actor);
+  if (!target) return Promise.resolve(null);
+  return transfer(target);
+}
+
 /** Handle inject foundry export button v1. */
 function injectFoundryExportButtonV1(app, html) {
   if (!isFoundryExportButtonEnabled()) return;
@@ -106,7 +146,7 @@ function injectFoundryExportButtonV1(app, html) {
   if (!appElement?.find) return;
 
   const actor = getActorFromApp(app);
-  if (!actor || actor.type !== "character") return;
+  if (!hasNetherscrollsTransferButtons(actor)) return;
 
   const header = appElement.find(".window-header");
   if (!header.length) return;
@@ -126,7 +166,7 @@ function injectFoundryExportButtonV1(app, html) {
   exportButton.on(
     "click",
     /** Handle the registered event while handle inject foundry export button v1. */ () => {
-      exportActorToNetherscrolls(actor).catch(
+      exportNetherscrollsSheetActor(actor).catch(
         /** Handle the operation failure while handle inject foundry export button v1. */ (err) => {
           console.error(`${MODULE_ID} | Foundry Export could not be completed.`, err);
         }
@@ -136,7 +176,7 @@ function injectFoundryExportButtonV1(app, html) {
   importButton.on(
     "click",
     /** Handle the registered event while handle inject foundry export button v1. */ () => {
-      importActorFromNetherscrolls(actor).catch(
+      runNetherscrollsSheetTransfer(actor, importActorFromNetherscrolls).catch(
         /** Handle the operation failure while handle inject foundry export button v1. */ () => {}
       );
     }
@@ -161,7 +201,7 @@ function injectFoundryExportButtonV2(app, element) {
   if (!element?.querySelector) return;
 
   const actor = getActorFromApp(app);
-  if (!actor || actor.type !== "character") return;
+  if (!hasNetherscrollsTransferButtons(actor)) return;
 
   const header =
     element.querySelector("header.window-header") || element.querySelector(".window-header");
@@ -176,7 +216,7 @@ function injectFoundryExportButtonV2(app, element) {
   exportButton.addEventListener(
     "click",
     /** Handle the user event while handle inject foundry export button v2. */ () => {
-      exportActorToNetherscrolls(actor).catch(
+      exportNetherscrollsSheetActor(actor).catch(
         /** Handle the operation failure while handle inject foundry export button v2. */ (err) => {
           console.error(`${MODULE_ID} | Foundry Export could not be completed.`, err);
         }
@@ -191,7 +231,7 @@ function injectFoundryExportButtonV2(app, element) {
   importButton.addEventListener(
     "click",
     /** Handle the user event while handle inject foundry export button v2. */ () => {
-      importActorFromNetherscrolls(actor).catch(
+      runNetherscrollsSheetTransfer(actor, importActorFromNetherscrolls).catch(
         /** Handle the operation failure while handle inject foundry export button v2. */ () => {}
       );
     }

@@ -46,14 +46,17 @@ const IMPORT_TYPES = [
     icon: "fa-solid fa-person",
     checked: true,
   },
-  // Monster import is not available yet. Keep this definition ready for the endpoint.
-  // {
-  //   key: "monster",
-  //   label: "Monster",
-  //   icon: "fa-solid fa-dragon",
-  //   checked: false,
-  // },
+  // Off by default: the full monster dataset is large (complete NPC Actors).
+  {
+    key: "monsters",
+    label: "Monsters",
+    icon: "fa-solid fa-dragon",
+    checked: false,
+  },
 ];
+
+// Types left out of a default library import (and of its "last import" date).
+const NETHERSCROLLS_OPTIONAL_IMPORT_TYPES = new Set(["monsters"]);
 
 const IMPORT_PACKS = {
   classes: "classes",
@@ -64,7 +67,7 @@ const IMPORT_PACKS = {
   spells: "spells",
   backgrounds: "backgrounds",
   races: "races",
-  monster: "monster",
+  monsters: "monsters",
 };
 
 const NETHERSCROLLS_WORLD_IMPORT_PACKS = {
@@ -116,9 +119,10 @@ const NETHERSCROLLS_WORLD_IMPORT_PACKS = {
     type: "Item",
     system: "dnd5e",
   },
-  monster: {
+  // Pack name kept from the original definition so an existing world pack is reused.
+  monsters: {
     name: "netherscrolls-monster",
-    label: "Netherscrolls Monster",
+    label: "Netherscrolls Monsters",
     type: "Actor",
     system: "dnd5e",
   },
@@ -137,7 +141,7 @@ const NETHERSCROLLS_IMPORT_PACK_BANNERS = {
   feats: "feats_text.webp",
   spells: "magic_schools.webp",
   races: "races.webp",
-  monster: "dragon_battle.webp",
+  monsters: "dragon_battle.webp",
   backgrounds: "backgrounds.jpg",
 };
 
@@ -202,13 +206,24 @@ const NETHERSCROLLS_IMPORT_ENDPOINTS = {
   spells: `${NETHERSCROLLS_API_BASE}/import/spells`,
   backgrounds: `${NETHERSCROLLS_API_BASE}/import/backgrounds`,
   races: `${NETHERSCROLLS_API_BASE}/import/races`,
+  monsters: `${NETHERSCROLLS_API_BASE}/import/monsters`,
 };
+
+// Portrait the API uses for a monster without one (docs/api/29-foundry-monsters.md).
+const NETHERSCROLLS_MONSTER_FALLBACK_IMAGE = "icons/svg/mystery-man.svg";
 
 const NETHERSCROLLS_CHARACTER_FOLDER = {
   name: "NS-Character",
   type: "Actor",
   sorting: "m",
   sort: 0,
+};
+
+// Companion Actors are created in this folder, inside the character folder.
+const NETHERSCROLLS_COMPANION_FOLDER = {
+  name: "Companions",
+  type: "Actor",
+  sorting: "a",
 };
 
 const NETHERSCROLLS_DEFAULT_IMAGE = "https://i.postimg.cc/wBj0LZyj/image.png";
@@ -265,6 +280,7 @@ export {
   NETHERSCROLLS_CAMPAIGNS_ENDPOINT,
   NETHERSCROLLS_CAMPAIGN_CACHE_TTL_MS,
   NETHERSCROLLS_CHARACTER_FOLDER,
+  NETHERSCROLLS_COMPANION_FOLDER,
   NETHERSCROLLS_CHARACTER_SELECTION_CACHE_TTL_MS,
   NETHERSCROLLS_COMPENDIUM_WRITE_BATCH_SIZE,
   NETHERSCROLLS_DEFAULT_IMAGE,
@@ -286,6 +302,8 @@ export {
   NETHERSCROLLS_IMPORT_SELECTION_ENDPOINT,
   NETHERSCROLLS_IMPORT_SIDEBAR_FOLDER,
   NETHERSCROLLS_MEDIA_IMAGE_ENDPOINT,
+  NETHERSCROLLS_MONSTER_FALLBACK_IMAGE,
+  NETHERSCROLLS_OPTIONAL_IMPORT_TYPES,
   NETHERSCROLLS_PACK_FOLDER_INDEX_READY,
   NETHERSCROLLS_SOURCES_ENDPOINT,
   NETHERSCROLLS_SOURCE_IMPORT_ENDPOINT,

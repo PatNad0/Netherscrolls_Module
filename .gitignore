@@ -13,3 +13,9 @@ tests/
 tmp/
 scripts/verify-ns-fetch.ps1
 scripts/verify-ns-translation.cjs
+
+# Dev-only tooling (not loaded by Foundry)
+scripts/**/*.cjs
+.prettierrc.json
+.vscode/
+node_modules/

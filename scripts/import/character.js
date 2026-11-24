@@ -45,6 +45,7 @@ import {
   repairNetherscrollsCharacterActorDocumentLinks,
 } from "../foundry/reconciliation.js";
 import { resolveNetherscrollsCharacterItemSources } from "./character-library.js";
+import { importNetherscrollsCharacterCompanions } from "./companions.js";
 import {
   netherscrollsCharacterImportLocks,
   netherscrollsLibraryReplacementState,
@@ -379,6 +380,26 @@ async function applyNetherscrollsCampaignCharacter(
     actor,
     importedCharacter.character
   );
+
+  // Companions are calculated from the character, so they follow its complete import.
+  let companions = null;
+  try {
+    companions = await importNetherscrollsCharacterCompanions(importedCharacter, actor, {
+      characterFolder: folder,
+      guildId,
+      onProgress,
+    });
+  } catch (err) {
+    console.error(`${MODULE_ID} | ${actorPayload.name}: companions could not be imported.`, err);
+    companions = {
+      created: 0,
+      updated: 0,
+      failed: [{ name: "Companions", error: err?.message ?? String(err) }],
+      missing: [],
+      review: [],
+    };
+  }
+  reportNetherscrollsCompanionImport(actorPayload.name, companions);
   onProgress?.("complete.");
 
   return {
@@ -389,7 +410,26 @@ async function applyNetherscrollsCampaignCharacter(
     effects: effectResult,
     documentLinks,
     repairedFeatures,
+    companions,
   };
+}
+
+/** Tell the GM about companions that failed, need a review, or are no longer linked. */
+function reportNetherscrollsCompanionImport(characterName, result) {
+  if (!result) return;
+  const name = characterName ?? "Character";
+  for (const failure of result.failed)
+    ui?.notifications?.warn?.(
+      `${name}: companion ${failure.name} was not imported (${failure.error}).`
+    );
+  if (result.review.length)
+    ui?.notifications?.warn?.(
+      `${name}: ${result.review.length} companion${result.review.length === 1 ? " has" : "s have"} values to review. See the browser console.`
+    );
+  if (result.missing.length)
+    ui?.notifications?.info?.(
+      `${name}: ${result.missing.join(", ")} ${result.missing.length === 1 ? "is" : "are"} no longer ${name}'s companion in Netherscrolls. The Actor was kept and will not be exported.`
+    );
 }
 
 export {

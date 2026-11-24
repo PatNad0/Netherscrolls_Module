@@ -43,6 +43,7 @@ import {
   importNetherscrollsItems,
   importNetherscrollsSpells,
 } from "./datasets.js";
+import { importNetherscrollsMonsters } from "./monsters.js";
 import {
   netherscrollsCharacterImportLocks,
   netherscrollsLibraryReplacementState,
@@ -77,7 +78,12 @@ async function replaceNetherscrollsLibrary(requests) {
       await sanitizeNetherscrollsImportResponseImages(response);
       staged.push({ request, response });
     }
-    await clearNetherscrollsLibrary();
+    await clearNetherscrollsLibrary(
+      requests.flatMap(
+        /** Collect every requested dataset key. */ (request) =>
+          request.typeKeys ?? [request.typeKey]
+      )
+    );
     const imported = [];
     for (const { request, response } of staged) {
       const result = await applyNetherscrollsImportResponse(
@@ -94,18 +100,20 @@ async function replaceNetherscrollsLibrary(requests) {
 }
 
 /** Preflight every managed destination before deleting documents, then remove nested folders deepest first. */
-async function clearNetherscrollsLibrary() {
+async function clearNetherscrollsLibrary(requestedTypeKeys = []) {
+  const requested = new Set(requestedTypeKeys);
   const plans = [];
-  // Exact managed world Item-pack IDs, never world actors/items or arbitrary
-  // compendiums that happen to be placed in the same sidebar folder.
+  // Exact managed world pack IDs, never world actors/items or arbitrary
+  // compendiums that happen to be placed in the same sidebar folder. Item packs
+  // are always rebuilt; the monster Actor pack only when monsters are imported.
   for (const [typeKey, definition] of Object.entries(NETHERSCROLLS_WORLD_IMPORT_PACKS)) {
-    if (definition.type !== "Item") continue;
+    if (definition.type !== "Item" && !requested.has(typeKey)) continue;
     const collection = getNetherscrollsImportPackCollection(typeKey);
     const pack = game?.packs?.get?.(collection);
     if (!pack) continue;
     if (
       pack.collection !== collection ||
-      (pack.documentName ?? pack.metadata?.type ?? "Item") !== "Item"
+      (pack.documentName ?? pack.metadata?.type ?? "Item") !== definition.type
     ) {
       throw new Error(`Unexpected library destination: ${collection}`);
     }
@@ -170,7 +178,7 @@ async function clearNetherscrollsLibrary() {
 async function getNetherscrollsCompendiumReadiness() {
   let documentCount = 0;
   for (const typeKey of Object.keys(NETHERSCROLLS_WORLD_IMPORT_PACKS)) {
-    if (typeKey === "monster") continue;
+    if (typeKey === "monsters") continue;
     const pack = game?.packs?.get?.(getNetherscrollsImportPackCollection(typeKey));
     if (!pack) continue;
 
@@ -371,7 +379,15 @@ function formatNetherscrollsImportResult(typeKey, result) {
     const subclasses = result.classes.subclasses ?? {};
     return `Netherscrolls ${label} imported: ${imported} created, ${updated} updated, ${removed} removed. Subclasses: ${subclasses.created ?? 0} created, ${subclasses.updated ?? 0} updated, ${subclasses.deleted ?? 0} removed. Class features: ${features.created ?? 0} created, ${features.updated ?? 0} updated, ${features.deleted ?? 0} removed.`;
   }
-  return `Netherscrolls ${label} imported: ${imported} created, ${updated} updated, ${removed} removed.`;
+  return `Netherscrolls ${label} imported: ${imported} created, ${updated} updated, ${removed} removed.${formatNetherscrollsMonsterImportNotes(result?.[typeKey])}`;
+}
+
+/** Mention monsters that failed or need a review (details are in the console). */
+function formatNetherscrollsMonsterImportNotes(counts) {
+  const notes = [];
+  if (counts?.failed) notes.push(`${counts.failed} could not be imported`);
+  if (counts?.review) notes.push(`${counts.review} have conversion warnings to review`);
+  return notes.length ? ` ${notes.join("; ")} (see the browser console).` : "";
 }
 
 /** Format source import result. */
@@ -384,7 +400,7 @@ function formatNetherscrollsSourceImportResult(result, typeKeys = []) {
     .map(
       /** Transform each entry while format source import result. */ (typeKey) => {
         const counts = result[typeKey] ?? {};
-        return `${getNetherscrollsImportTypeLabel(typeKey)}: ${counts.created ?? 0} created, ${counts.updated ?? 0} updated, ${counts.deleted ?? 0} removed`;
+        return `${getNetherscrollsImportTypeLabel(typeKey)}: ${counts.created ?? 0} created, ${counts.updated ?? 0} updated, ${counts.deleted ?? 0} removed${formatNetherscrollsMonsterImportNotes(counts).replace(/\.$/, "")}`;
       }
     );
 
@@ -475,6 +491,15 @@ async function applyNetherscrollsImportResponse(
   if (Array.isArray(races)) {
     result.races = await importNetherscrollsGenericFoundryItems(races, "races");
     invalidateNetherscrollsCompendiumDocumentIdCache("races");
+  }
+
+  // Only when asked for: monsters never arrive as a side effect of another dataset.
+  const monsters =
+    allowedTypes?.has("monsters") || requestTypeKey === "monsters"
+      ? getNetherscrollsResponseDataset(data, "monsters", requestTypeKey)
+      : null;
+  if (Array.isArray(monsters)) {
+    result.monsters = await importNetherscrollsMonsters(monsters);
   }
 
   return result;
