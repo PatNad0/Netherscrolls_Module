@@ -18,6 +18,7 @@ import {
   getNetherscrollsClassFeatures,
   getNetherscrollsFeatureChoices,
   getNetherscrollsFeatureTitle,
+  getNetherscrollsInlineFeatureChoices,
   getNetherscrollsItemChoiceSubtype,
   getNetherscrollsItemChoiceType,
   getNetherscrollsSubclasses,
@@ -353,7 +354,10 @@ function shouldGrantNetherscrollsFeature(feature) {
 
 /** Determine whether build item choice advancement. */
 function shouldBuildNetherscrollsItemChoiceAdvancement(feature) {
-  return shouldCreateNetherscrollsFeatureChoiceItems(feature);
+  return (
+    shouldCreateNetherscrollsFeatureChoiceItems(feature) &&
+    !getNetherscrollsInlineFeatureChoices(feature).length
+  );
 }
 
 /** Retrieve feature choice count. */

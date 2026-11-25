@@ -10,6 +10,7 @@ import {
   toNumber,
   toTrimmedStringOrNull,
 } from "../core/utils.js";
+import { NETHERSCROLLS_SKILL_LABELS, SKILL_KEY_TO_NAME } from "./catalogs.js";
 import {
   extractNetherscrollsFirstHtmlHeadingTitle,
   getNetherscrollsBlocksText,
@@ -47,6 +48,10 @@ function normalizeNetherscrollsClassFeatureData(descriptor) {
   const feature = descriptor.feature;
   const netherscrollsId = descriptor.netherscrollsId;
   const featureName = getNetherscrollsFeatureTitle(feature);
+  const inlineChoices = getNetherscrollsInlineFeatureChoices(feature);
+  const groupedChoices = inlineChoices.length
+    ? buildNetherscrollsFeatureChoiceTree(feature, descriptor.key, inlineChoices)
+    : null;
   const sourceName = toTrimmedStringOrNull(feature?.source ?? descriptor.classSource?.source);
   const itemData = {
     name: featureName,
@@ -60,7 +65,7 @@ function normalizeNetherscrollsClassFeatureData(descriptor) {
       activities: normalizeNetherscrollsActivities(feature),
       advancement: normalizeNetherscrollsClassFeatureAdvancement(feature),
       description: {
-        value: buildNetherscrollsFeatureDescription(feature),
+        value: buildNetherscrollsFeatureDescription(feature, { includeChoices: !groupedChoices }),
         chat: "",
       },
       identifier: normalizeNetherscrollsClassFeatureIdentifier(descriptor),
@@ -106,10 +111,14 @@ function normalizeNetherscrollsClassFeatureData(descriptor) {
     optional: Boolean(feature?.optional),
     selectable: Math.max(0, Math.trunc(toNumber(feature?.selectable, 0))),
     choiceType: toTrimmedStringOrNull(descriptor.choiceType ?? feature?.choiceType) ?? "",
-    choices: normalizeNetherscrollsFeatureChoices(feature),
+    choices: groupedChoices ? [] : normalizeNetherscrollsFeatureChoices(feature),
+    groupedChoices,
     autoGrantChoices:
       feature.selectable === 0
-        ? getNetherscrollsFeatureChoices(feature).map(getNetherscrollsSourceId).filter(Boolean)
+        ? getNetherscrollsFeatureChoices(feature)
+            .filter((choice) => !inlineChoices.includes(choice))
+            .map(getNetherscrollsSourceId)
+            .filter(Boolean)
         : [],
     ...(feature.mechanics
       ? { nativeMechanics: duplicateNetherscrollsData(feature.mechanics) }
@@ -296,10 +305,12 @@ function buildNetherscrollsFeatureDescriptor(classSource, subclassSource, featur
 function buildNetherscrollsFeatureChoiceDescriptors(parentDescriptor) {
   if (!shouldCreateNetherscrollsFeatureChoiceItems(parentDescriptor.feature)) return [];
 
+  const inlineChoices = new Set(getNetherscrollsInlineFeatureChoices(parentDescriptor.feature));
   const descriptors = [];
   for (const [index, choice] of getNetherscrollsFeatureChoices(
     parentDescriptor.feature
   ).entries()) {
+    if (inlineChoices.has(choice)) continue;
     const title = getNetherscrollsFeatureChoiceTitle(choice, index);
     if (!title) continue;
 
@@ -460,8 +471,145 @@ function shouldCreateNetherscrollsFeatureChoiceItems(feature) {
   const choiceType = toTrimmedStringOrNull(feature?.choiceType)
     ?.toLowerCase()
     .replace(/[^a-z0-9]/g, "");
-  if (choiceType === "subclass") return false;
-  return true;
+  return choiceType !== "subclass";
+}
+
+// Fold passive rules and proficiency picks already applied to the native character.
+const groupedFeatureChoiceFields = new Set([
+  "_id",
+  "id",
+  "title",
+  "name",
+  "label",
+  "description",
+  "descriptionHtml",
+  "contentHtml",
+  "blocks",
+  "choices",
+  "selectable",
+  "choiceType",
+  "subtype",
+  "img",
+  "image",
+  "source",
+  "rules",
+  "uniqueKey",
+  "replaces",
+  "profChoices",
+  "profFeatureConversion",
+]);
+
+function getNetherscrollsInlineFeatureChoices(feature) {
+  if (
+    feature?.choiceType !== "feature" ||
+    feature.selectable == null ||
+    getNetherscrollsItemChoiceType(feature) === "feat"
+  ) {
+    return [];
+  }
+  return getNetherscrollsFeatureChoices(feature).filter(isNetherscrollsPassiveFeatureChoice);
+}
+
+function isNetherscrollsPassiveFeatureChoice(choice) {
+  if (typeof choice === "string") return true;
+  if (!choice || typeof choice !== "object") return false;
+  if (choice.subtype && choice.subtype !== "profFeature") return false;
+  if (choice.choiceType && !["feature", "language"].includes(choice.choiceType)) return false;
+  return (
+    Object.entries(choice).every(
+      ([key, value]) =>
+        groupedFeatureChoiceFields.has(key) ||
+        value == null ||
+        (Array.isArray(value) && !value.length) ||
+        (key === "grants" &&
+          Array.isArray(value) &&
+          value.every((grant) => grant?.type === "language" && grant.name))
+    ) &&
+    getNetherscrollsFeatureChoices(choice).every(isNetherscrollsPassiveFeatureChoice)
+  );
+}
+
+function buildNetherscrollsFeatureChoiceTree(
+  feature,
+  key,
+  inlineChoices = getNetherscrollsFeatureChoices(feature),
+  index = 0
+) {
+  return {
+    id:
+      getNetherscrollsSourceId(feature) ?? buildNetherscrollsSyntheticSourceId("feature-choice", key),
+    key,
+    title: getNetherscrollsFeatureChoiceTitle(feature, index),
+    description: buildNetherscrollsFeatureChoiceDescription(feature),
+    selectable: Math.max(0, Math.trunc(toNumber(feature?.selectable, 0))),
+    choices: getNetherscrollsFeatureChoices(feature).flatMap((choice, choiceIndex) => {
+      if (!inlineChoices.includes(choice)) return [];
+      const choiceKey = getNetherscrollsFeatureChoiceKey({ key }, choice, choiceIndex);
+      return [buildNetherscrollsFeatureChoiceTree(choice, choiceKey, undefined, choiceIndex)];
+    }),
+  };
+}
+
+function renderNetherscrollsGroupedFeatureDescription(
+  description,
+  tree,
+  { className, level, selectedIds, selections }
+) {
+  const picked = new Set(selectedIds);
+  const targetsByFeatureId = new Map();
+  for (const selection of selections) {
+    const targets = targetsByFeatureId.get(selection.featureId) ?? [];
+    targets.push(...(selection.targets ?? []));
+    targetsByFeatureId.set(selection.featureId, targets);
+  }
+
+  function renderChoices(node, depth) {
+    const labels = (targetsByFeatureId.get(node.id) ?? [])
+      .map(getNetherscrollsFeatureTargetLabel)
+      .filter(Boolean);
+    const sections = [];
+    for (const choice of node.choices) {
+      if (node.selectable && !picked.has(choice.id)) continue;
+      if (
+        node.selectable &&
+        !choice.description &&
+        !choice.choices.length &&
+        !targetsByFeatureId.has(choice.id)
+      ) {
+        labels.push(choice.title);
+        continue;
+      }
+      const heading = `h${Math.min(3 + depth, 6)}`;
+      const sectionClass = depth === 0 ? "ns-feature-choice-branch" : "ns-feature-choice-card";
+      sections.push(
+        `<div class="${sectionClass}"><${heading}>${escapeHtml(choice.title)}</${heading}>` +
+        `${choice.description}${renderChoices(choice, depth + 1)}</div>`
+      );
+    }
+    const selected = labels.length
+      ? `<p class="ns-feature-choice-selected">Selected <strong>${escapeHtml([...new Set(labels)].join(", "))}</strong></p>`
+      : "";
+    const children = sections.length
+      ? `<div class="ns-feature-choice-children">${sections.join("")}</div>`
+      : "";
+    return selected + children;
+  }
+
+  return (
+    `<div class="ns-grouped-feature"><p class="ns-feature-choice-source">${escapeHtml(className)} · Level ${level}</p>` +
+    `${description}${renderChoices(tree, 0)}</div>`
+  );
+}
+
+function getNetherscrollsFeatureTargetLabel(target) {
+  const key = toTrimmedStringOrNull(target?.key);
+  if (!key) return "";
+  const skill =
+    target.type === "skill"
+      ? SKILL_KEY_TO_NAME[NETHERSCROLLS_SKILL_LABELS[key.toLowerCase()] ?? key]
+      : null;
+  const label = skill ? skill.replace(/([a-z])([A-Z])/g, "$1 $2").replace(" Of ", " of ") : key;
+  return label.charAt(0).toUpperCase() + label.slice(1);
 }
 
 /** Retrieve item choice type. */
@@ -1030,14 +1178,13 @@ function getNetherscrollsClassFeaturePrerequisiteItems(descriptor) {
 }
 
 /** Build feature description. */
-function buildNetherscrollsFeatureDescription(feature) {
-  const choiceHtml = renderNetherscrollsFeatureChoices(feature);
+function buildNetherscrollsFeatureDescription(feature, { includeChoices = true } = {}) {
   return joinNetherscrollsHtmlSections([
     getNetherscrollsHtmlValue(feature?.descriptionHtml),
     getNetherscrollsHtmlValue(feature?.contentHtml),
     getNetherscrollsHtmlValue(feature?.description),
     renderNetherscrollsBlocks(feature?.blocks),
-    choiceHtml,
+    includeChoices ? renderNetherscrollsFeatureChoices(feature) : "",
   ]);
 }
 
@@ -1067,6 +1214,7 @@ export {
   getNetherscrollsClassFeatures,
   getNetherscrollsFeatureChoices,
   getNetherscrollsFeatureTitle,
+  getNetherscrollsInlineFeatureChoices,
   getNetherscrollsItemChoiceSubtype,
   getNetherscrollsItemChoiceType,
   getNetherscrollsSubclasses,
@@ -1074,5 +1222,6 @@ export {
   isNetherscrollsImportedClassFeatureDocument,
   isSameNetherscrollsSubclass,
   normalizeNetherscrollsClassFeatureData,
+  renderNetherscrollsGroupedFeatureDescription,
   shouldCreateNetherscrollsFeatureChoiceItems,
 };

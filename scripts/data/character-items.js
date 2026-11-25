@@ -390,6 +390,13 @@ function applyNetherscrollsSpellContextClasses(items) {
       (candidate) => candidate.type === "class" && getItemNetherId(candidate) === context.classId
     );
     item.system.sourceItem = owner?.system?.identifier ? `class:${owner.system.identifier}` : "";
+    if (
+      item.system.level > 0 &&
+      item.system.method === "spell" &&
+      owner?.system?.spellcasting?.progression === "pact"
+    ) {
+      item.system.method = "pact";
+    }
   }
 }
 

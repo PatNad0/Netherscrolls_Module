@@ -4,7 +4,13 @@
  */
 import { MODULE_ID } from "../core/constants.js";
 import { isDebugEnabled } from "../core/settings.js";
-import { normalizeNetherscrollsName, toNumber, toTrimmedStringOrNull } from "../core/utils.js";
+import {
+  normalizeNetherscrollsName,
+  replaceNetherscrollsDeletionKeys,
+  toNumber,
+  toTrimmedStringOrNull,
+} from "../core/utils.js";
+import { renderNetherscrollsGroupedFeatureDescription } from "../data/class-features.js";
 import { normalizeNetherscrollsFeatType } from "../data/feats.js";
 import { normalizeNetherscrollsImagePath } from "../data/images.js";
 import {
@@ -123,6 +129,8 @@ async function repairNetherscrollsActorClassFeatures(actor, { notify = false } =
 
   const createData = [];
   const considered = new Set();
+  const foldedChoices = new Set();
+  const nativeCharacter = getNetherscrollsDocumentFlag(actor, "nativeCharacter");
   let choiceDocuments;
   for (const ref of refs) {
     const uuid = toTrimmedStringOrNull(ref.uuid);
@@ -134,6 +142,7 @@ async function repairNetherscrollsActorClassFeatures(actor, { notify = false } =
       result.missingSources += 1;
       continue;
     }
+    if (isNetherscrollsGroupedFeatureItem(feature, foldedChoices)) continue;
 
     const featureLevel = getNetherscrollsClassFeatureLevel(feature, ref.level);
     if (
@@ -164,7 +173,26 @@ async function repairNetherscrollsActorClassFeatures(actor, { notify = false } =
       }
     }
 
-    if (actorHasNetherscrollsClassFeature(actor, feature, uuid)) {
+    const groupedChoices = getNetherscrollsDocumentFlag(feature, "groupedChoices");
+    if (groupedChoices && nativeCharacter) {
+      const identities = getNetherscrollsGroupedFeatureIdentities(groupedChoices);
+      const created = await reconcileNetherscrollsGroupedClassFeature(
+        actor,
+        feature,
+        ref,
+        uuid,
+        featureLevel,
+        groupedChoices,
+        nativeCharacter,
+        identities
+      );
+      for (const identity of identities) foldedChoices.add(identity);
+      result.created += created;
+      result.skipped += 1 - created;
+      continue;
+    }
+
+    if (findNetherscrollsActorClassFeature(actor, feature, uuid)) {
       result.skipped += 1;
       continue;
     }
@@ -172,7 +200,6 @@ async function repairNetherscrollsActorClassFeatures(actor, { notify = false } =
     createData.push(buildNetherscrollsActorClassFeatureData(feature, ref, uuid, featureLevel));
   }
 
-  if (!createData.length) return result;
   const created = await runNetherscrollsEmbeddedDocumentBatches(
     actor,
     "createEmbeddedDocuments",
@@ -180,13 +207,138 @@ async function repairNetherscrollsActorClassFeatures(actor, { notify = false } =
     createData,
     { render: false, renderSheet: false, netherscrollsTransfer: true }
   );
-  result.created = Array.isArray(created) ? created.length : createData.length;
+  result.created += created.length;
   if (notify && result.created > 0) {
     ui?.notifications?.info?.(
       `Netherscrolls added ${result.created} missing class feature${result.created === 1 ? "" : "s"}.`
     );
   }
   return result;
+}
+
+async function reconcileNetherscrollsGroupedClassFeature(
+  actor,
+  feature,
+  ref,
+  uuid,
+  level,
+  tree,
+  character,
+  identities
+) {
+  const owner = ref.subclassItem ?? ref.classItem;
+  const ownerId = getItemNetherId(owner);
+  const selections = (character.featureSelections ?? []).filter(
+    (selection) => selection.sourceType === ref.scope && selection.sourceId === ownerId
+  );
+  const selectedIds = getNetherscrollsSelectedClassChoices(owner)
+    .filter(({ level }) => level == null || level <= ref.classLevel)
+    .map(({ id }) => id);
+  const sourceDescription = feature._source?.system?.description ?? feature.system?.description;
+  const description = renderNetherscrollsGroupedFeatureDescription(
+    sourceDescription?.value ?? "",
+    tree,
+    {
+      className: owner.name,
+      level,
+      selectedIds,
+      selections,
+    }
+  );
+  const options = { render: false, renderSheet: false, netherscrollsTransfer: true };
+  const existing = findNetherscrollsActorClassFeature(actor, feature, uuid, { matchName: false });
+  const featureKey = getNetherscrollsDocumentFlag(feature, "featureKey");
+  let savedItem = existing;
+  if (!existing) {
+    const itemData = buildNetherscrollsActorClassFeatureData(feature, ref, uuid, level);
+    itemData.system.description.value = description;
+    const [saved] = await actor.createEmbeddedDocuments("Item", [itemData], options);
+    if (!saved) throw new Error(`Could not create ${feature.name} with its selected choices.`);
+    savedItem = saved;
+  } else if (
+    existing.name !== feature.name ||
+    getNetherscrollsDocumentFlag(existing, "featureKey") !== featureKey ||
+    (existing._source?.system ?? existing.system)?.description?.value !== description
+  ) {
+    const [saved] = await actor.updateEmbeddedDocuments(
+      "Item",
+      [
+        {
+          _id: existing.id,
+          name: feature.name,
+          system: { description: { value: description } },
+          flags: { [MODULE_ID]: { featureKey, featureScope: ref.scope } },
+        },
+      ],
+      options
+    );
+    if (!saved) throw new Error(`Could not update ${feature.name} with its selected choices.`);
+  }
+
+  // The parent is saved before clearing the older module-generated choice items and prompts.
+  if (featureKey) {
+    const advancement = owner._source?.system?.advancement ?? owner.system?.advancement ?? {};
+    const retiredAdvancement = Object.fromEntries(
+      Object.entries(advancement)
+        .filter(
+          ([, entry]) =>
+            entry?.type === "ItemChoice" &&
+            getNetherscrollsDocumentFlag(entry, "featureKey") === featureKey
+        )
+        .map(([id]) => [`-=${id}`, null])
+    );
+    if (Object.keys(retiredAdvancement).length) {
+      await actor.updateEmbeddedDocuments(
+        "Item",
+        [replaceNetherscrollsDeletionKeys({
+          _id: owner.id,
+          system: { advancement: retiredAdvancement },
+        }, { update: true })],
+        options
+      );
+    }
+  }
+  const obsolete = getNetherscrollsActorItems(actor)
+    .filter(
+      (item) =>
+        item.type === "feat" &&
+        item.id !== savedItem.id &&
+        isNetherscrollsGroupedFeatureItem(item, identities) &&
+        !hasNetherscrollsOwnedChoiceMechanics(item)
+    )
+    .map((item) => item.id)
+    .filter(Boolean);
+  if (obsolete.length) await actor.deleteEmbeddedDocuments("Item", obsolete, options);
+  return existing ? 0 : 1;
+}
+
+function getNetherscrollsGroupedFeatureIdentities(tree) {
+  const identities = new Set();
+  function recordChoiceIdentity(node) {
+    if (node.id) identities.add(node.id);
+    if (node.key) identities.add(node.key);
+    node.choices.forEach(recordChoiceIdentity);
+  }
+  recordChoiceIdentity(tree);
+  return identities;
+}
+
+function isNetherscrollsGroupedFeatureItem(item, identities) {
+  return (
+    identities.has(getItemNetherId(item)) ||
+    identities.has(getNetherscrollsDocumentFlag(item, "featureKey"))
+  );
+}
+
+function hasNetherscrollsOwnedChoiceMechanics(item) {
+  const source = item._source ?? item;
+  return Boolean(
+    getNetherscrollsDocumentFlag(item, "nativeMechanics") ||
+    Object.keys(source.system?.activities ?? {}).length ||
+    Object.keys(source.system?.advancement ?? {}).length ||
+    (source.effects?.length ?? source.effects?.size) ||
+    toTrimmedStringOrNull(source.system?.uses?.max)
+  );
 }
 
 /** Retrieve actor class feature refs. */
@@ -241,11 +393,6 @@ async function getNetherscrollsClassItemFeatureRefs(item, flagName, context) {
   const refsByUuid = new Map();
   addNetherscrollsFeatureRefs(
     refsByUuid,
-    await getNetherscrollsSelectedClassFeatureRefs(item),
-    context
-  );
-  addNetherscrollsFeatureRefs(
-    refsByUuid,
     normalizeNetherscrollsUuidArray(getNetherscrollsDocumentFlag(item, flagName)),
     context
   );
@@ -261,11 +408,15 @@ async function getNetherscrollsClassItemFeatureRefs(item, flagName, context) {
     addNetherscrollsFeatureRefs(refsByUuid, getNetherscrollsItemGrantRefs(importedItem), context);
   }
 
+  addNetherscrollsFeatureRefs(
+    refsByUuid,
+    await getNetherscrollsSelectedClassFeatureRefs(item),
+    context
+  );
   return Array.from(refsByUuid.values());
 }
 
-/** Retrieve selected class feature refs. */
-async function getNetherscrollsSelectedClassFeatureRefs(item) {
+function getNetherscrollsSelectedClassChoices(item) {
   const choicesByLevel = getNetherscrollsDocumentFlag(item, "choicesByLevel");
   if (!choicesByLevel || typeof choicesByLevel !== "object" || Array.isArray(choicesByLevel))
     return [];
@@ -278,6 +429,12 @@ async function getNetherscrollsSelectedClassFeatureRefs(item) {
       if (id) selected.push({ id, level: normalizeNetherscrollsNullableNumber(level) });
     }
   }
+  return selected;
+}
+
+/** Retrieve selected class feature refs. */
+async function getNetherscrollsSelectedClassFeatureRefs(item) {
+  const selected = getNetherscrollsSelectedClassChoices(item);
   if (!selected.length) return [];
   const pack = await getNetherscrollsImportPack("classFeatures");
   if (!pack?.getDocuments) return [];
@@ -459,8 +616,8 @@ function isNetherscrollsOptionalClassFeature(feature) {
   return Boolean(getNetherscrollsDocumentFlag(feature, "optional"));
 }
 
-/** Handle actor has class feature. */
-function actorHasNetherscrollsClassFeature(actor, feature, uuid) {
+/** Find an owned feature using the established identity and legacy name matching. */
+function findNetherscrollsActorClassFeature(actor, feature, uuid, { matchName = true } = {}) {
   const featureId = getNetherscrollsDocumentFlag(feature, "netherscrollsId");
   const featureKey = getNetherscrollsDocumentFlag(feature, "featureKey");
   const parentClassIdentifier = getNetherscrollsDocumentFlag(feature, "parentClassIdentifier");
@@ -468,10 +625,11 @@ function actorHasNetherscrollsClassFeature(actor, feature, uuid) {
 
   for (const item of getNetherscrollsActorItems(actor)) {
     if (item?.type !== "feat") continue;
-    if (uuid && getNetherscrollsDocumentFlag(item, "grantedFromUuid") === uuid) return true;
+    if (uuid && getNetherscrollsDocumentFlag(item, "grantedFromUuid") === uuid) return item;
     if (featureId && getNetherscrollsDocumentFlag(item, "netherscrollsId") === featureId)
-      return true;
-    if (featureKey && getNetherscrollsDocumentFlag(item, "featureKey") === featureKey) return true;
+      return item;
+    if (featureKey && getNetherscrollsDocumentFlag(item, "featureKey") === featureKey) return item;
+    if (!matchName) continue;
     const itemName = normalizeNetherscrollsName(item?.name).toLowerCase();
     const isClassFeature =
       item?.system?.type?.value === "class" ||
@@ -483,12 +641,12 @@ function actorHasNetherscrollsClassFeature(actor, feature, uuid) {
         !itemParentClassIdentifier ||
         parentClassIdentifier === itemParentClassIdentifier
       ) {
-        return true;
+        return item;
       }
     }
   }
 
-  return false;
+  return null;
 }
 
 /** Build actor class feature data. */
