@@ -441,12 +441,17 @@ async function importNetherscrollsSelectedCampaignCharacters(
   );
   if (!campaignId) throw new Error("Select a campaign before importing characters.");
 
-  const folder = await findOrCreateNetherscrollsCharacterFolder();
-  if (!folder?.id) throw new Error("Foundry could not create the NS-Character Actor folder.");
+  const createFolder = Boolean(root?.querySelector?.('input[name="createFolder"]')?.checked);
+  let folder = null;
+  if (createFolder) {
+    folder = await findOrCreateNetherscrollsCharacterFolder();
+    if (!folder?.id) throw new Error("Foundry could not create the NS-Character Actor folder.");
+  }
   debugNetherscrollsCharacterImport("Resolved character destination folder.", {
     campaignId,
-    folderId: folder.id,
-    folderName: folder.name,
+    createFolder,
+    folderId: folder?.id ?? null,
+    folderName: folder?.name ?? null,
   });
 
   const results = [];

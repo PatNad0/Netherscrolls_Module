@@ -189,7 +189,9 @@ async function importNetherscrollsCharacterCompanions(
         await updateNetherscrollsCompanionActor(actor, prepared.data, ownerActor);
         result.updated += 1;
       } else {
-        folder ??= await findOrCreateNetherscrollsCompanionFolder(characterFolder);
+        // Without a character folder, companions are created at the root too.
+        if (characterFolder)
+          folder ??= await findOrCreateNetherscrollsCompanionFolder(characterFolder);
         await createNetherscrollsCompanionActor(prepared.data, ownerActor, folder);
         result.created += 1;
       }

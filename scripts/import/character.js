@@ -205,7 +205,10 @@ async function applyNetherscrollsCampaignCharacter(
   // back to this guild, and linked material is resolved in this guild too.
   const guildId = getNetherscrollsRequestGuildId(importedCharacter?.guildId || undefined);
   actorPayload.type = "character";
-  actorPayload.folder = folder.id;
+  // Without a folder ("Create NS folder" off), a new Actor goes to the root and an
+  // existing one stays where it is.
+  if (folder?.id) actorPayload.folder = folder.id;
+  else delete actorPayload.folder;
   actorPayload.name = toTrimmedStringOrNull(actorPayload.name) ?? importedCharacter.name;
   actorPayload.flags = actorPayload.flags ?? {};
   actorPayload.flags.netherscrolls = {

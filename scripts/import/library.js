@@ -5,6 +5,7 @@
 import {
   buildNetherscrollsApiError,
   buildNetherscrollsApiHeaders,
+  fetchNetherscrolls,
   getNetherscrollsRequestGuildId,
 } from "../api/client.js";
 import { prepareNetherscrollsImportSourceNames } from "../api/sources.js";
@@ -480,7 +481,7 @@ async function sendNetherscrollsImportRequest(importRequest, onPage = null) {
 async function fetchNetherscrollsImportPage(importRequest, page) {
   const url = new URL(importRequest.url);
   url.searchParams.set("page", String(page));
-  const response = await fetch(url.toString(), importRequest.options);
+  const response = await fetchNetherscrolls(url.toString(), importRequest.options);
   const data = await response
     .json()
     .catch(/** Handle the operation failure while fetch import page. */ () => null);

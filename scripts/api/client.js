@@ -350,6 +350,66 @@ async function fetchNetherscrollsApiJson(url, apiKey, { guildId = undefined } = 
   return requestNetherscrollsJson(url, { method: "GET", apiKey, guildId });
 }
 
+// The API host sleeps when idle and takes a few seconds to wake. While it boots, its proxy
+// answers 502/503/504 or drops the connection; these delays (~10 s in all) ride that out.
+const NETHERSCROLLS_WAKE_RETRY_DELAYS_MS = [1_500, 3_000, 5_000];
+const NETHERSCROLLS_RETRYABLE_STATUSES = new Set([502, 503, 504]);
+const NETHERSCROLLS_IDEMPOTENT_METHODS = new Set(["GET", "HEAD", "OPTIONS", "PUT", "DELETE"]);
+// One attempt that has not answered by then is reported instead of waiting forever.
+const NETHERSCROLLS_REQUEST_TIMEOUT_MS = 90_000;
+
+/** Wait. */
+function waitNetherscrollsDelay(ms) {
+  return new Promise(/** Resolve after the delay. */ (resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * `fetch` that survives the API waking up: gateway errors are retried for every method (the
+ * request never reached the app); a dropped connection only for idempotent methods, since a
+ * write might have been applied before it dropped.
+ */
+async function fetchNetherscrolls(url, options = {}) {
+  const method = String(options.method ?? "GET").toUpperCase();
+  const idempotent = NETHERSCROLLS_IDEMPOTENT_METHODS.has(method);
+  for (let attempt = 0; ; attempt += 1) {
+    const retryDelay = NETHERSCROLLS_WAKE_RETRY_DELAYS_MS[attempt];
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    const timer = controller
+      ? setTimeout(
+          /** Abort the stalled attempt. */ () => controller.abort(),
+          NETHERSCROLLS_REQUEST_TIMEOUT_MS
+        )
+      : null;
+    let response;
+    try {
+      response = await fetch(url, controller ? { ...options, signal: controller.signal } : options);
+    } catch (err) {
+      if (controller?.signal.aborted) {
+        throw new Error(
+          `Netherscrolls did not answer within ${NETHERSCROLLS_REQUEST_TIMEOUT_MS / 1000} seconds.`
+        );
+      }
+      if (!idempotent || retryDelay === undefined) throw err;
+      console.info(`${MODULE_ID} | Netherscrolls unreachable, retrying (server may be waking).`, {
+        url: String(url),
+        attempt: attempt + 1,
+      });
+      await waitNetherscrollsDelay(retryDelay);
+      continue;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+    if (!NETHERSCROLLS_RETRYABLE_STATUSES.has(response.status) || retryDelay === undefined)
+      return response;
+    console.info(
+      `${MODULE_ID} | Netherscrolls answered ${response.status}, retrying (server may be waking).`,
+      { url: String(url), attempt: attempt + 1 }
+    );
+    response.body?.cancel?.().catch?.(/** Ignore a body that cannot be discarded. */ () => {});
+    await waitNetherscrollsDelay(retryDelay);
+  }
+}
+
 /** Keep headers, empty acknowledgements, and structured errors consistent for every JSON endpoint. */
 async function requestNetherscrollsJson(
   url,
@@ -364,7 +424,7 @@ async function requestNetherscrollsJson(
   } = {}
 ) {
   const requestGuildId = getNetherscrollsRequestGuildId(guildId);
-  const response = await fetch(url, {
+  const response = await fetchNetherscrolls(url, {
     method,
     ...(cache ? { cache } : {}),
     headers: buildNetherscrollsApiHeaders({ apiKey, guildId: requestGuildId, json: body != null }),
@@ -451,6 +511,7 @@ export {
   buildNetherscrollsApiHeaders,
   clearNetherscrollsGuildScopedCaches,
   describeNetherscrollsGuildAccess,
+  fetchNetherscrolls,
   fetchNetherscrollsApiJson,
   formatNetherscrollsApiError,
   getActorNetherscrollsGuildId,

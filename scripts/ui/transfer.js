@@ -318,10 +318,22 @@ async function initializeNetherscrollsTransferWindow(root, { force = false } = {
     return;
   }
   showNetherscrollsTransferStatus(root, "Connecting to Netherscrolls…", { busy: true });
+  // An idle server takes a few seconds to wake; say so instead of looking stuck.
+  const wakeNotice = setTimeout(
+    /** Explain a slow connection. */ () =>
+      showNetherscrollsTransferStatus(
+        root,
+        "Waking up the Netherscrolls server… this can take a few seconds.",
+        { busy: true }
+      ),
+    2_500
+  );
   let state;
   try {
     state = await resolveNetherscrollsGuild({ force });
+    clearTimeout(wakeNotice);
   } catch (err) {
+    clearTimeout(wakeNotice);
     console.error(`${MODULE_ID} | Unable to load the Netherscrolls guilds.`, err);
     showNetherscrollsTransferStatus(root, `Netherscrolls is unavailable: ${err?.message ?? err}`, {
       error: true,
