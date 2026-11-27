@@ -108,16 +108,25 @@ async function disableLegacyNetherscrollsImportQueuePolling() {
 }
 
 /** Invalidate the previous timer generation when polling stops so an in-flight request cannot revive it. */
-function toggleNetherscrollsImportQueuePolling(enabled) {
+// `initialDelayMs` postpones the first poll (world load is busy enough without it).
+function toggleNetherscrollsImportQueuePolling(enabled, { initialDelayMs = 0 } = {}) {
+  const shouldPoll = Boolean(enabled) && Boolean(game?.ready) && isPrimaryNetherscrollsQueuePoller();
+  // updateUser fires for any user change; an already running loop keeps its schedule
+  // instead of polling again on the spot.
+  if (shouldPoll && netherscrollsImportQueuePollActive) return;
+
   const generation = ++netherscrollsImportQueuePollGeneration;
+  netherscrollsImportQueuePollActive = false;
   if (netherscrollsImportQueuePollTimer) {
     clearTimeout(netherscrollsImportQueuePollTimer);
     netherscrollsImportQueuePollTimer = null;
   }
-  if (!enabled || !game?.ready || !isPrimaryNetherscrollsQueuePoller()) return;
+  if (!shouldPoll) return;
+  netherscrollsImportQueuePollActive = true;
 
   const run = /** Run. */ async () => {
     if (generation !== netherscrollsImportQueuePollGeneration) return;
+    netherscrollsImportQueuePollTimer = null;
     let nextPollDelay = NETHERSCROLLS_IMPORT_QUEUE_IDLE_POLL_INTERVAL_MS;
     try {
       const result = await pollNetherscrollsImportQueues();
@@ -127,16 +136,20 @@ function toggleNetherscrollsImportQueuePolling(enabled) {
     } catch (err) {
       console.error(`${MODULE_ID} | Foundry sync queue poll failed.`, err);
     } finally {
-      if (
-        generation === netherscrollsImportQueuePollGeneration &&
-        game?.settings?.get(MODULE_ID, SETTINGS.importQueuePolling) === true &&
-        isPrimaryNetherscrollsQueuePoller()
-      ) {
-        netherscrollsImportQueuePollTimer = setTimeout(run, nextPollDelay);
+      if (generation === netherscrollsImportQueuePollGeneration) {
+        if (
+          game?.settings?.get(MODULE_ID, SETTINGS.importQueuePolling) === true &&
+          isPrimaryNetherscrollsQueuePoller()
+        ) {
+          netherscrollsImportQueuePollTimer = setTimeout(run, nextPollDelay);
+        } else {
+          netherscrollsImportQueuePollActive = false;
+        }
       }
     }
   };
-  run();
+  if (initialDelayMs > 0) netherscrollsImportQueuePollTimer = setTimeout(run, initialDelayMs);
+  else run();
 }
 
 /** Run imports and exports under one poll guard; remember applied imports until their acknowledgements succeed. */
@@ -441,6 +454,9 @@ function findNetherscrollsActorForQueuedExport(queuedExport, guildId = undefined
 let netherscrollsImportQueuePollTimer = null;
 
 let netherscrollsImportQueuePollGeneration = 0;
+
+// True while this client owns a polling loop (a timer is pending or a poll is running).
+let netherscrollsImportQueuePollActive = false;
 
 export {
   disableLegacyNetherscrollsImportQueuePolling,

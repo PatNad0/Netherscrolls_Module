@@ -130,8 +130,10 @@ async function onNetherscrollsReady() {
       }
     );
   }
+  // The first poll waits a minute so it does not compete with the world loading.
   toggleNetherscrollsImportQueuePolling(
-    game.settings.get(MODULE_ID, SETTINGS.importQueuePolling) === true
+    game.settings.get(MODULE_ID, SETTINGS.importQueuePolling) === true,
+    { initialDelayMs: 60_000 }
   );
 }
 

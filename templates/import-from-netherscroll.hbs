@@ -3,7 +3,7 @@
   <div class="ns-transfer-status" data-ns-status>
     <i class="fa-solid fa-circle-notch fa-spin" data-ns-status-icon aria-hidden="true"></i>
     <span data-ns-status-text>{{#if hasApiKey}}Connecting to Netherscrolls…{{else}}Add your Netherscrolls API key in Module Settings first.{{/if}}</span>
-    <button type="button" data-ns-action="retry" hidden><i class="fa-solid fa-rotate" aria-hidden="true"></i> Try again</button>
+    <button type="button" data-ns-action="retry" data-tooltip="Try connecting to Netherscrolls again" hidden><i class="fa-solid fa-rotate" aria-hidden="true"></i> Try again</button>
   </div>
 
   {{!-- Step 1, only when the account has several guilds and none is chosen yet. --}}
@@ -19,14 +19,14 @@
       <i class="fa-solid fa-shield-halved" aria-hidden="true"></i>
       <strong data-ns-guild-name></strong>
       <span class="ns-guild-access" data-ns-guild-access></span>
-      <button type="button" class="ns-link-button" data-ns-action="change-guild" hidden>Change guild</button>
+      <button type="button" class="ns-link-button" data-ns-action="change-guild" data-tooltip="Pick another guild for this world" hidden>Change guild</button>
     </header>
 
     <nav class="ns-tabs" role="tablist">
-      <button type="button" class="ns-tab is-active" role="tab" aria-selected="true" data-ns-tab="characters">
+      <button type="button" class="ns-tab is-active" role="tab" aria-selected="true" data-ns-tab="characters" data-tooltip="Import or send characters from a campaign">
         <i class="fa-solid fa-users" aria-hidden="true"></i> Characters
       </button>
-      <button type="button" class="ns-tab" role="tab" aria-selected="false" data-ns-tab="library">
+      <button type="button" class="ns-tab" role="tab" aria-selected="false" data-ns-tab="library" data-tooltip="Import Netherscrolls library content into compendiums">
         <i class="fa-solid fa-book" aria-hidden="true"></i> Library
       </button>
     </nav>
@@ -39,21 +39,21 @@
             <option value="">Loading campaigns…</option>
           </select>
         </label>
-        <button type="button" class="ns-icon-button" data-ns-character-action="refresh-campaigns" title="Reload campaigns" aria-label="Reload campaigns">
+        <button type="button" class="ns-icon-button" data-ns-character-action="refresh-campaigns" data-tooltip="Reload campaigns" aria-label="Reload campaigns">
           <i class="fa-solid fa-rotate" aria-hidden="true"></i>
         </button>
       </div>
       <div class="ns-character-list" data-ns-character-list></div>
-      <label class="ns-since">
+      <label class="ns-since" data-tooltip="They come up to me, they say, “Mr. Dev, Mr. Dev, sir, we've never seen such an incredible developer. Never seen anything like it.” Big developers, too. Very technical people. And I say, look, it's simple. It's tremendously simple. I put in a button... Beautiful button, by the way, probably one of the finest buttons you've ever seen, and everybody's happy. They're very, very happy. Some of them, I think, were almost crying. And you know, the other developers, they don't understand the button. They study the button, they have meetings about the button, they spend six months talking about the button. I just make the button. A BIG BEAUTIFUL BUTTON, I call it. Bing, bong, it's done.">
         <input type="checkbox" name="createFolder" value="1">
         <span>Create NS folder</span>
       </label>
       <p class="ns-message" data-ns-character-message>Choose a campaign.</p>
       <footer class="ns-actions">
-        <button type="button" data-ns-character-action="import-selected">
+        <button type="button" data-ns-character-action="import-selected" data-tooltip="Create or update the ticked characters in Foundry from Netherscrolls">
           <i class="fa-solid fa-cloud-arrow-down" aria-hidden="true"></i> Import to Foundry
         </button>
-        <button type="button" data-ns-character-action="export-selected">
+        <button type="button" data-ns-character-action="export-selected" data-tooltip="Send the ticked characters' Foundry sheets back to Netherscrolls">
           <i class="fa-solid fa-cloud-arrow-up" aria-hidden="true"></i> Send to Netherscrolls
         </button>
       </footer>
@@ -76,7 +76,7 @@
       </details>
       <p class="ns-import-source-message ns-hint">Loading sources…</p>
 
-      <label class="ns-since">
+      <label class="ns-since" data-tooltip="Only import entries changed since this date">
         <input type="checkbox" name="sinceEnabled" value="1">
         <span>Only what changed since</span>
         <input type="date" name="sinceDate" value="{{defaultSinceDate}}" disabled>
@@ -84,7 +84,7 @@
 
       <p class="ns-message" data-ns-library-message>{{libraryStatus}}</p>
       <footer class="ns-actions">
-        <button type="submit" data-ns-import-action="library">
+        <button type="submit" data-ns-import-action="library" data-tooltip="Import the ticked content types from the chosen sources">
           <i class="fa-solid fa-boxes-stacked" aria-hidden="true"></i> Import library
         </button>
       </footer>
